@@ -53,3 +53,18 @@ export function selectionAnchorRect(
     height: local.height,
   };
 }
+
+/** Wraps a viewport rect as a floating-ui "virtual element" so a Popover can anchor to a text selection. */
+export function measurableFromRect(rect: RectLike) {
+  const box = {
+    x: rect.left,
+    y: rect.top,
+    left: rect.left,
+    top: rect.top,
+    width: rect.width,
+    height: rect.height,
+    right: rect.left + rect.width,
+    bottom: rect.top + rect.height,
+  };
+  return { getBoundingClientRect: () => ({ ...box, toJSON: () => box }) as DOMRect };
+}

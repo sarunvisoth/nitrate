@@ -947,7 +947,7 @@ export function selectionAnchorRect(
   - The menu renders the given entries and calls `run`.
   - Escape calls `onDismiss`.
   - The editor emits the colour code for a swatch click, and sends the note on Save.
-- **Commit:** `feat(web): add reader selection menu and annotation editor`
+- [x] **Commit:** `feat(web): add reader selection menu and annotation editor`
 
 ---
 
