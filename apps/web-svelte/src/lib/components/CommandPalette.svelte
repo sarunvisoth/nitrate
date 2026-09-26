@@ -5,12 +5,14 @@
   import { Search, X, Clock, ArrowRight, LoaderCircle } from "@lucide/svelte";
   import { Button, Command, Dialog, Separator } from "@prismedia/ui-svelte";
   import CommandSearchResult from "./CommandSearchResult.svelte";
+  import ReaderSearchResult from "./ReaderSearchResult.svelte";
   import { useSearch } from "$lib/stores/search.svelte";
   import { useNsfw } from "$lib/nsfw/store.svelte";
   import { recentSearches } from "$lib/stores/recent-searches.svelte";
   import { buildHrefWithFrom } from "$lib/back-navigation";
   import type { SearchEntityKind, SearchResponse } from "$lib/search/models";
   import { searchEntities } from "$lib/search/entity-search";
+  import { searchReaderExtras, type ReaderSearchGroup } from "$lib/search/reader-search";
 
   const search = useSearch();
   const nsfw = useNsfw();
@@ -19,6 +21,7 @@
 
   let query = $state("");
   let results = $state.raw<SearchResponse | null>(null);
+  let readerGroups = $state.raw<ReaderSearchGroup[]>([]);
   let loading = $state(false);
   let failed = $state(false);
   let inputRef = $state<HTMLInputElement | null>(null);
@@ -42,12 +45,16 @@
 
   async function runSearch(term: string, requestId: number) {
     try {
-      const data = await searchEntities({
-        query: term, hideNsfw: nsfw.mode === "off", directLimit: 30,
-        relatedSourceLimit: 3, relatedLimitPerSource: 8,
-      });
+      const [data, extras] = await Promise.all([
+        searchEntities({
+          query: term, hideNsfw: nsfw.mode === "off", directLimit: 30,
+          relatedSourceLimit: 3, relatedLimitPerSource: 8,
+        }),
+        searchReaderExtras(term, PER_KIND_LIMIT).catch(() => [] as ReaderSearchGroup[]),
+      ]);
       if (requestId !== activeRequest) return;
       results = data;
+      readerGroups = extras;
     } catch {
       if (requestId !== activeRequest) return;
       failed = true;
@@ -91,6 +98,7 @@
     const term = query.trim();
     const requestId = ++activeRequest;
     results = null;
+    readerGroups = [];
     failed = false;
     const shouldSearch = search.open && term.length >= 2;
     loading = shouldSearch;
@@ -153,7 +161,7 @@
             </div>
           </Command.Empty>
         {:else}
-          {#if displayGroups.length === 0}
+          {#if displayGroups.length === 0 && readerGroups.length === 0}
             <Command.Empty forceMount>No results for “{query.trim()}”</Command.Empty>
           {/if}
           {#each displayGroups as { group, shownItems } (group.kind)}
@@ -166,6 +174,16 @@
                   <span>See all {group.total} {group.label.toLowerCase()}</span><ArrowRight class="ml-auto" />
                 </Command.Item>
               {/if}
+            </Command.Group>
+          {/each}
+          {#each readerGroups as group (group.kind)}
+            <Command.Group heading={group.label}>
+              {#each group.items as item (`${item.kind}:${item.id}`)}
+                <ReaderSearchResult {item} onSelect={navigateTo} />
+              {/each}
+              <Command.Item value={`reader:${group.kind}`} showIndicator={false} onSelect={() => navigateTo(group.seeAllHref)}>
+                <span>See all {group.label.toLowerCase()}</span><ArrowRight class="ml-auto" />
+              </Command.Item>
             </Command.Group>
           {/each}
           <Command.Group>

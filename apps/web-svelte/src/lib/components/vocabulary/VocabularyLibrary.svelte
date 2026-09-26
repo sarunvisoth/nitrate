@@ -17,7 +17,10 @@
   import { deleteVocabularyEntry, fetchVocabulary, saveVocabularyEntry, vocabularyExportUrl } from "$lib/api/vocabulary";
   import { bookReaderHref } from "$lib/entities/book-reader-route";
 
-  let { loaders = { list: fetchVocabulary } }: { loaders?: VocabularyLibraryLoaders } = $props();
+  let {
+    loaders = { list: fetchVocabulary },
+    initialSearch = "",
+  }: { loaders?: VocabularyLibraryLoaders; initialSearch?: string } = $props();
 
   const ALL = "";
   const PAGE_SIZE = 200;
@@ -33,7 +36,7 @@
     ...Object.values(VOCABULARY_STATUS).map((code) => ({ value: code, label: STATUS_LABEL[code] })),
   ];
 
-  let search = $state("");
+  let search = $state(initialSearch);
   let statusFilter = $state(ALL);
   let items = $state.raw<VocabularyEntry[]>([]);
   let totalCount = $state(0);

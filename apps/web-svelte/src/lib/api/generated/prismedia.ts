@@ -228,6 +228,7 @@ import type {
   ProblemDetails,
   RatingUpdateRequest,
   ReaderPreferencesResponse,
+  ReaderSearchResponse,
   ReleaseCalendarEvent,
   RemotePathMappingSaveRequest,
   RemotePathMappingView,
@@ -250,6 +251,7 @@ import type {
   SaveIdentifyQueueProposalRequest,
   SearchIdentifyQueueItemParams,
   SearchOpdsBooksParams,
+  SearchReaderParams,
   SearchRequestsByPluginParams,
   SearchVideoSubtitlesRequest,
   SearchVideoSubtitlesResponse,
@@ -5561,6 +5563,49 @@ export const getExportVocabularyUrl = (params: ExportVocabularyParams,) => {
 export const exportVocabulary = async (params: ExportVocabularyParams, options?: RequestInit): Promise<exportVocabularyResponse> => {
 
   return orvalFetch<exportVocabularyResponse>(getExportVocabularyUrl(params),
+  {
+    ...options,
+    method: 'GET'
+
+
+  }
+);}
+
+
+
+export type searchReaderResponse200 = {
+  data: ReaderSearchResponse
+  status: 200
+}
+
+export type searchReaderResponseSuccess = (searchReaderResponse200) & {
+  headers: Headers;
+};
+;
+
+export type searchReaderResponse = (searchReaderResponseSuccess)
+
+export const getSearchReaderUrl = (params?: SearchReaderParams,) => {
+  const normalizedParams = new URLSearchParams();
+
+  Object.entries(params || {}).forEach(([key, value]) => {
+
+    if (value !== undefined) {
+      normalizedParams.append(key, value === null ? 'null' : value.toString())
+    }
+  });
+
+  const stringifiedParams = normalizedParams.toString();
+
+  return stringifiedParams.length > 0 ? `/api/search/reader?${stringifiedParams}` : `/api/search/reader`
+}
+
+/**
+ * @summary Search the current user's highlights, notes, and saved vocabulary words.
+ */
+export const searchReader = async (params?: SearchReaderParams, options?: RequestInit): Promise<searchReaderResponse> => {
+
+  return orvalFetch<searchReaderResponse>(getSearchReaderUrl(params),
   {
     ...options,
     method: 'GET'
