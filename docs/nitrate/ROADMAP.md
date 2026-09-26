@@ -11,7 +11,7 @@ Legend for who does the work: **Cloud** = a Claude cloud session can do it end t
 |---|-----------|-----|------|--------|
 | M0 | Import Prismedia snapshot, repo hygiene, Nitrate agent instructions | Cloud | [foundation](plans/2026-09-26-foundation.md) | Done |
 | M1 | `docs/nitrate/ARCHITECTURE_ANALYSIS.md` (18 questions) + `THIRD_PARTY_LICENSES.md` | Cloud | [foundation](plans/2026-09-26-foundation.md) | Not started |
-| M2 | Windows-native host: AMD AMF encoder profile + Windows install guide | Cloud builds, Owner verifies | [foundation](plans/2026-09-26-foundation.md) | Not started |
+| M2 | Windows-native host: AMD AMF encoder profile + Windows install guide | Cloud builds, Owner verifies | [foundation](plans/2026-09-26-foundation.md) | In progress — AMF profile built |
 | M3 | **Reader slice 1:** annotation model + API, text selection, highlights (5 colours), notes, cross-device sync | Cloud; Owner reads with it | written at end of M1 | Not started |
 | M4 | Bookmarks, `/annotations` dashboard (search, filter by book/colour), Markdown/JSON/CSV export | Cloud | — | Not started |
 | M5 | `DictionaryProvider` + Define popup, `TranslationProvider` + Translate, Wikipedia / Search Book / Search Web | Cloud | — | Not started |

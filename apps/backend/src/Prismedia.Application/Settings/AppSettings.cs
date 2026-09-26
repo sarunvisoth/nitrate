@@ -301,7 +301,8 @@ public static class AppSettings {
                 new("VideoToolbox", "Apple VT", "macOS hardware path."),
                 new("Vaapi", "VA-API", "Intel / AMD Linux."),
                 new("Nvenc", "NVENC", "NVIDIA hardware."),
-                new("Qsv", "QSV", "Intel Quick Sync.")
+                new("Qsv", "QSV", "Intel Quick Sync."),
+                new("Amf", "AMD AMF", "AMD on Windows.")
             ]);
         public static readonly SettingDefinition<string> FfmpegPath = Text(
             Group, "hls.ffmpegPath", "ffmpeg path", "Command or absolute path used for ffmpeg.",

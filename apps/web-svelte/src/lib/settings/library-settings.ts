@@ -26,6 +26,7 @@ export const hlsTranscoderProfiles = [
   "Vaapi",
   "Nvenc",
   "Qsv",
+  "Amf",
 ] as const;
 
 export type HlsTranscoderProfile = (typeof hlsTranscoderProfiles)[number];

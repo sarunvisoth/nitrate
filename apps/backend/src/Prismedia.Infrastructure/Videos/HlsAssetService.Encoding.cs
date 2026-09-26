@@ -173,6 +173,7 @@ public sealed partial class HlsAssetService {
             HlsTranscoderProfile.Vaapi => "h264_vaapi",
             HlsTranscoderProfile.Nvenc => "h264_nvenc",
             HlsTranscoderProfile.Qsv => "h264_qsv",
+            HlsTranscoderProfile.Amf => "h264_amf",
             _ => "libx264"
         };
 

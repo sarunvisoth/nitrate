@@ -47,6 +47,10 @@ Backend breakdown (final clean run, Postgres up and dev DB migrated):
 2. **`AutoIdentifyRunnerTests.CancelsProviderWhenNoCascadeProgressArrivesBeforeInactivityTimeout`** — timing-sensitive.
    Failed once under full-suite load (`Assert.Empty() Failure: Collection was not empty`), passed in isolation and in
    the final full run. Treat an occasional failure of this test as pre-existing flakiness.
+3. **Web: `AcquisitionProtocolPreference.test.ts` teardown race** — intermittent. Seen once during Task 4 as
+   `Vitest caught 1 unhandled error … ReferenceError: document is not defined` from bits-ui
+   `body-scroll-lock.svelte.js` (a cleanup timer firing after jsdom teardown). All 1352 tests still passed but vitest
+   exits 1. The file passed 3/3 in isolation and on the pre-Task-4 tree, and the next full run was clean (exit 0).
 
 ### Environment notes that turn into false failures
 

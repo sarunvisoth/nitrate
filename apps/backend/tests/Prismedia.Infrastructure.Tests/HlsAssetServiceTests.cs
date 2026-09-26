@@ -803,6 +803,42 @@ public sealed class HlsAssetServiceTests : IDisposable {
     }
 
     [Fact]
+    public async Task VirtualSegmentsUseAmfEncoderWhenConfigured() {
+        var videoId = Guid.Parse("43434343-4343-4343-4343-434343434343");
+        var sourcePath = Path.Combine(_cacheRoot, "source.mkv");
+        await File.WriteAllTextAsync(sourcePath, "source");
+        var process = new ManifestWritingProcessExecutor();
+        var service = new HlsAssetService(
+            new HlsAssetServiceOptions(_cacheRoot, HlsTranscoderProfile.Amf),
+            new FakeVideoSourceService(new VideoSourceFile(
+                videoId,
+                sourcePath,
+                "video/x-matroska",
+                false,
+                DurationSeconds: 13,
+                Width: 1920,
+                Height: 960)),
+            process,
+            NullLogger<HlsAssetService>.Instance);
+
+        var segment = await service.GetAssetAsync(videoId, "v/720p/seg_00000.ts", null, CancellationToken.None);
+
+        Assert.NotNull(segment);
+        var arguments = Assert.Single(process.ArgumentHistory);
+        Assert.Contains("h264_amf", arguments);
+        Assert.Contains("yuv420p", string.Join(' ', arguments));
+        Assert.DoesNotContain("libx264", arguments);
+        Assert.DoesNotContain("-vaapi_device", arguments);
+    }
+
+    [Theory]
+    [InlineData("Amf")]
+    [InlineData("amf")]
+    public void AmfProfileParsesFromSettingValue(string value) {
+        Assert.Equal(HlsTranscoderProfile.Amf, HlsTranscoderProfiles.ParseOrDefault(value));
+    }
+
+    [Fact]
     public async Task VirtualSegmentsUseVaapiEncoderWhenConfigured() {
         var videoId = Guid.Parse("43434343-4343-4343-4343-434343434343");
         var sourcePath = Path.Combine(_cacheRoot, "source.mkv");

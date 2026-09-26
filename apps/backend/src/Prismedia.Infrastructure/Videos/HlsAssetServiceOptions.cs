@@ -20,7 +20,10 @@ public enum HlsTranscoderProfile {
     Nvenc,
 
     /// <summary>Use Intel Quick Sync via <c>h264_qsv</c> when the host and ffmpeg build expose it.</summary>
-    Qsv
+    Qsv,
+
+    /// <summary>Use AMD's <c>h264_amf</c> encoder on Windows when the host and ffmpeg build expose it.</summary>
+    Amf
 }
 
 /// <summary>

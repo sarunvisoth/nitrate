@@ -250,7 +250,7 @@ Prismedia supports `Software`, `VideoToolbox`, `Vaapi`, `Nvenc`, `Qsv` but not A
 **Interfaces:**
 - Produces: `HlsTranscoderProfile.Amf`; persisted setting value `"Amf"` for key `hls.transcoderProfile`; ffmpeg `-c:v h264_amf`.
 
-- [ ] **Step 1: Write the failing tests.** Add next to `VirtualSegmentsUseVideoToolboxEncoderWhenConfigured` in `HlsAssetServiceTests.cs`:
+- [x] **Step 1: Write the failing tests.** Add next to `VirtualSegmentsUseVideoToolboxEncoderWhenConfigured` in `HlsAssetServiceTests.cs`:
 
 ```csharp
     [Fact]
@@ -290,7 +290,7 @@ Prismedia supports `Software`, `VideoToolbox`, `Vaapi`, `Nvenc`, `Qsv` but not A
     }
 ```
 
-- [ ] **Step 2: Run to verify they fail**
+- [x] **Step 2: Run to verify they fail**
 
 ```bash
 dotnet test apps/backend/tests/Prismedia.Infrastructure.Tests --filter "FullyQualifiedName~Amf"
@@ -298,7 +298,7 @@ dotnet test apps/backend/tests/Prismedia.Infrastructure.Tests --filter "FullyQua
 
 Expected: build error `'HlsTranscoderProfile' does not contain a definition for 'Amf'`.
 
-- [ ] **Step 3: Add the enum member.** In `HlsAssetServiceOptions.cs`, change the tail of the enum from:
+- [x] **Step 3: Add the enum member.** In `HlsAssetServiceOptions.cs`, change the tail of the enum from:
 
 ```csharp
     /// <summary>Use Intel Quick Sync via <c>h264_qsv</c> when the host and ffmpeg build expose it.</summary>
@@ -317,7 +317,7 @@ to:
 }
 ```
 
-- [ ] **Step 4: Map the encoder.** In `HlsAssetService.Encoding.cs` `VideoEncoderArguments`, add the `Amf` arm:
+- [x] **Step 4: Map the encoder.** In `HlsAssetService.Encoding.cs` `VideoEncoderArguments`, add the `Amf` arm:
 
 ```csharp
         var encoder = transcoderProfile switch {
@@ -332,7 +332,7 @@ to:
 
 No other change is needed in that method: the existing hardware branch already emits `-profile:v main` and `-pix_fmt yuv420p` for non-QSV, non-VAAPI profiles, both valid for `h264_amf`. The software-scale filter path (`format=yuv420p`) is also correct for AMF.
 
-- [ ] **Step 5: Run the tests to verify they pass**
+- [x] **Step 5: Run the tests to verify they pass**
 
 ```bash
 dotnet test apps/backend/tests/Prismedia.Infrastructure.Tests --filter "FullyQualifiedName~HlsAssetServiceTests"
@@ -340,14 +340,14 @@ dotnet test apps/backend/tests/Prismedia.Infrastructure.Tests --filter "FullyQua
 
 Expected: all `HlsAssetServiceTests` pass (new AMF tests included).
 
-- [ ] **Step 6: Expose it in settings (backend).** In `AppSettings.cs` `TranscoderProfile` options, add after the `Qsv` line (note the comma on the `Qsv` line):
+- [x] **Step 6: Expose it in settings (backend).** In `AppSettings.cs` `TranscoderProfile` options, add after the `Qsv` line (note the comma on the `Qsv` line):
 
 ```csharp
                 new("Qsv", "QSV", "Intel Quick Sync."),
                 new("Amf", "AMD AMF", "AMD on Windows.")
 ```
 
-- [ ] **Step 7: Expose it in settings (web).** In `apps/web-svelte/src/lib/settings/library-settings.ts`:
+- [x] **Step 7: Expose it in settings (web).** In `apps/web-svelte/src/lib/settings/library-settings.ts`:
 
 ```ts
 export const hlsTranscoderProfiles = [
@@ -369,7 +369,7 @@ grep -rn "\"Qsv\"\|'Qsv'\|Quick Sync" apps/web-svelte/src apps/backend/tests
 
 If the settings UI has a label/description map keyed by profile (the grep will show it), add `Amf` there with label `AMD AMF`.
 
-- [ ] **Step 8: Run affected suites**
+- [x] **Step 8: Run affected suites**
 
 ```bash
 pnpm test:backend
@@ -382,7 +382,7 @@ If `pnpm api:check` reports drift in the generated client, run `pnpm api:generat
 
 Expected: same results as `BASELINE.md` plus the new passing AMF tests. Any new failure must be fixed before committing.
 
-- [ ] **Step 9: Commit**
+- [x] **Step 9: Commit**
 
 ```bash
 git add -A
