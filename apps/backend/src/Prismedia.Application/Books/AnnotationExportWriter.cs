@@ -69,7 +69,8 @@ public static class AnnotationExportWriter {
                     text.Append("\n**Note:** ").Append(item.Note.Trim()).Append('\n');
                 }
 
-                text.Append(CultureInfo.InvariantCulture, $"\n_{item.Color} · {item.CreatedAt:yyyy-MM-dd}_\n");
+                var location = PdfPageLabel(item) is { } page ? $"p. {page} · {item.Color}" : item.Color;
+                text.Append(CultureInfo.InvariantCulture, $"\n_{location} · {item.CreatedAt:yyyy-MM-dd}_\n");
             }
         }
 
@@ -92,6 +93,7 @@ public static class AnnotationExportWriter {
                 locatorKind = item.LocatorKind,
                 locator = item.Locator,
                 position = item.Position,
+                page = PdfPageLabel(item),
                 createdAt = item.CreatedAt,
                 updatedAt = item.UpdatedAt
             })
@@ -99,7 +101,7 @@ public static class AnnotationExportWriter {
     };
 
     private static string Csv(IReadOnlyList<(string Title, List<AnnotationLibraryItem> Items)> books) {
-        var text = new StringBuilder("book,highlight,note,color,position,created_at,updated_at,locator\r\n");
+        var text = new StringBuilder("book,highlight,note,color,page,position,created_at,updated_at,locator\r\n");
         foreach (var (title, items) in books) {
             foreach (var item in items) {
                 text.AppendJoin(',', [
@@ -107,6 +109,7 @@ public static class AnnotationExportWriter {
                     Field(item.SelectedText),
                     Field(item.Note ?? ""),
                     Field(item.Color),
+                    Field(PdfPageLabel(item)?.ToString(CultureInfo.InvariantCulture) ?? ""),
                     Field(item.Position.ToString("0.####", CultureInfo.InvariantCulture)),
                     Field(item.CreatedAt.ToString("O", CultureInfo.InvariantCulture)),
                     Field(item.UpdatedAt.ToString("O", CultureInfo.InvariantCulture)),
@@ -117,6 +120,13 @@ public static class AnnotationExportWriter {
 
         return text.ToString();
     }
+
+    /// <summary>1-based display page number for a PDF-kind item, or null for any other locator kind.</summary>
+    private static int? PdfPageLabel(AnnotationLibraryItem item) =>
+        item.LocatorKind == AnnotationLocatorKind.Pdf.ToCode() &&
+        PdfAnnotationLocatorCodec.TryParse(item.Locator) is { } locator
+            ? locator.Page + 1
+            : null;
 
     /// <summary>RFC 4180 field: quoted when it contains a comma, quote, or line break; quotes doubled.</summary>
     private static string Field(string value) =>

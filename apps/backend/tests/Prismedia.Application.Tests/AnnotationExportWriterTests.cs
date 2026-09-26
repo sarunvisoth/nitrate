@@ -33,7 +33,7 @@ public sealed class AnnotationExportWriterTests {
 
         Assert.Equal([0xEF, 0xBB, 0xBF], file.Content.Take(3));
         var lines = text.TrimStart('﻿').Split("\r\n", StringSplitOptions.RemoveEmptyEntries);
-        Assert.Equal("book,highlight,note,color,position,created_at,updated_at,locator", lines[0]);
+        Assert.Equal("book,highlight,note,color,page,position,created_at,updated_at,locator", lines[0]);
         Assert.Contains("\"Compare with \"\"rectified flow\"\", later.\"", lines[1]);
         Assert.Equal(3, lines.Length);
         Assert.Equal("text/csv; charset=utf-8", file.ContentType);
@@ -58,6 +58,23 @@ public sealed class AnnotationExportWriterTests {
     public void EmptyExportsAreStillValidFiles() {
         using var doc = JsonDocument.Parse(AnnotationExportWriter.Write(AnnotationExportFormat.Json, [], At).Content);
         Assert.Equal(0, doc.RootElement.GetProperty("books").GetArrayLength());
+    }
+
+    [Fact]
+    public void PdfAnnotationsIncludeAOneBasedPageNumber() {
+        var locator = PdfAnnotationLocatorCodec.Write(new PdfAnnotationLocator(4, [new PdfAnnotationRect(0.1, 0.2, 0.3, 0.05)]));
+        var pdfItem = new AnnotationLibraryItem(
+            Guid.NewGuid(), BookId, "Deep Learning", AnnotationLocatorKind.Pdf.ToCode(), locator,
+            4, 0.2, "PDF highlight", null, AnnotationStyle.Highlight.ToCode(), AnnotationColor.Yellow.ToCode(), false, At, At);
+
+        var markdown = Encoding.UTF8.GetString(AnnotationExportWriter.Write(AnnotationExportFormat.Markdown, [pdfItem], At).Content);
+        var csvLines = Encoding.UTF8.GetString(AnnotationExportWriter.Write(AnnotationExportFormat.Csv, [pdfItem], At).Content)
+            .TrimStart('﻿').Split("\r\n", StringSplitOptions.RemoveEmptyEntries);
+        using var json = JsonDocument.Parse(AnnotationExportWriter.Write(AnnotationExportFormat.Json, [pdfItem], At).Content);
+
+        Assert.Contains("p. 5", markdown);
+        Assert.StartsWith("Deep Learning,PDF highlight,,yellow,5,0.2,", csvLines[1]);
+        Assert.Equal(5, json.RootElement.GetProperty("books")[0].GetProperty("annotations")[0].GetProperty("page").GetInt32());
     }
 
     private static AnnotationLibraryItem Item(string text, string? note, AnnotationColor color) => new(

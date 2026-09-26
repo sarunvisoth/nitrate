@@ -133,6 +133,12 @@ internal sealed class EfBookBookmarkService(
             return $"locator is required (max {LocatorMaxLength} characters).";
         }
 
+        if (request.LocatorKind == AnnotationLocatorKind.Pdf.ToCode() &&
+            PdfAnnotationLocatorCodec.TryParse(request.Locator) is null) {
+            return "locator must be a valid PDF locator " +
+                $"(page >= 0, at most {PdfAnnotationLocatorCodec.MaxRects} rects, each rect within 0..1).";
+        }
+
         if (request.SpineIndex < 0) {
             return "spineIndex must be zero or greater.";
         }
