@@ -204,7 +204,7 @@ Format the enums to match the repository style: one attribute per line, as `Cons
   `Prismedia.Application/Books/BookAnnotationWritePolicy.cs` and the policy tests.
 - Modify `ApiProblemCodes.cs`.
 
-- [ ] **Step 1: Contracts.** DTOs expose codes as strings, the same way `BookChapterAudioMapping.Origin` does.
+- [x] **Step 1: Contracts.** DTOs expose codes as strings, the same way `BookChapterAudioMapping.Origin` does.
 
 ```csharp
 namespace Prismedia.Contracts.Books;
@@ -269,7 +269,7 @@ Add this to `ApiProblemCodes.cs`, next to `InvalidBookChapterMapping`:
     public const string InvalidBookAnnotation = "invalid_book_annotation";
 ```
 
-- [ ] **Step 2: Application port**
+- [x] **Step 2: Application port**
 
 ```csharp
 using Prismedia.Contracts.Books;
@@ -316,7 +316,7 @@ public sealed record BookAnnotationWriteResult(
     string? Error);
 ```
 
-- [ ] **Step 3: Write the failing policy tests** (`Prismedia.Application.Tests/BookAnnotationWritePolicyTests.cs`)
+- [x] **Step 3: Write the failing policy tests** (`Prismedia.Application.Tests/BookAnnotationWritePolicyTests.cs`)
 
 ```csharp
 using Prismedia.Application.Books;
@@ -348,7 +348,7 @@ public sealed class BookAnnotationWritePolicyTests {
 }
 ```
 
-- [ ] **Step 4: Run and confirm failure** (a build error), then implement:
+- [x] **Step 4: Run and confirm failure** (a build error), then implement:
 
 ```csharp
 namespace Prismedia.Application.Books;
@@ -370,8 +370,8 @@ public static class BookAnnotationWritePolicy {
 }
 ```
 
-- [ ] **Step 5: Run** `dotnet test apps/backend/tests/Prismedia.Application.Tests` and confirm it is green.
-- [ ] **Step 6: Commit.** `feat(api): add book annotation contracts and last-write-wins policy`
+- [x] **Step 5: Run** `dotnet test apps/backend/tests/Prismedia.Application.Tests` and confirm it is green.
+- [x] **Step 6: Commit.** `feat(api): add book annotation contracts and last-write-wins policy`
 
 ---
 
