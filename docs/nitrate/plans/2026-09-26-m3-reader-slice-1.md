@@ -4,12 +4,14 @@
 > superpowers:executing-plans to carry out this plan task by task. Steps use checkbox (`- [ ]`) syntax. Tick
 > boxes in this file and commit them as you go, so a later session can resume.
 >
-> **Status: written, not executed. Awaiting owner review.** Do not start until the owner approves (see
-> "Decisions for the owner" at the end).
+> **Status: approved by the owner on 2026-09-26, with one addition (Task 10A: reading position follows you
+> between devices). Not yet executed.** See "Owner decisions" at the end.
 
 **Goal:** The owner can select text in an EPUB, highlight it in one of five colours, and optionally attach a
 note. Highlights survive reloads and server restarts, and appear on the owner's other devices the next time the
-book is opened or the tab regains focus.
+book is opened or the tab regains focus. The **reading position** follows the owner the same way: every page turn
+is saved, which is already true, and a reader that is already open catches up to a newer position from another
+device when its tab regains focus (Task 10A).
 
 **Architecture:**
 - **Backend.** A new per-user `book_annotations` table (EF Core, Postgres). An Application port,
@@ -96,6 +98,8 @@ Library, Playwright, vendored foliate-js (`overlayer.js`, `view.js`).
 | `apps/web-svelte/src/lib/components/reader/AnnotationEditor.svelte` (+ `.test.ts`) | create | 8 |
 | `apps/web-svelte/src/lib/components/BookFileReader.svelte` | selection, overlay drawing, gesture overlay rework | 9 |
 | `apps/web-svelte/src/routes/books/[id]/reader/+page.svelte` | load/sync/write annotations | 10 |
+| `apps/web-svelte/src/lib/reader/progress-catch-up.ts` (+ `.test.ts`) | create | 10A |
+| `apps/web-svelte/src/lib/components/PdfReader.svelte` | export `goToPage` | 10A |
 | `tests/fixtures/media/books/nitrate-annotation-fixture.epub` | create (generated, ~2 KB) | 11 |
 | `e2e/auth.ts`, `e2e/book-fixture.ts`, `e2e/reader-annotations.spec.ts` | create | 11 |
 | `docs/nitrate/ROADMAP.md` | M3 status | 12 |
@@ -1032,6 +1036,88 @@ Here `draft` is `{ locator, spineIndex, position, selectedText, textBefore, text
     local entries that are newer than the server's. Keep that in memory only; offline persistence is out of scope.
 - [ ] **Step 4: Run** `pnpm check` and `pnpm test:web-svelte`, then commit: `feat(web): sync reader annotations across devices`
 
+
+---
+
+## Task 10A: Reading position follows you between devices
+
+**Owner request (2026-09-26):** "it should sync my book page progress whenever i switch page."
+
+**What already works:**
+- Every EPUB page turn fires `relocate`, which calls `queueEpubSave()` with no debounce
+  (`routes/books/[id]/reader/+page.svelte:178-182`).
+- Every PDF page change calls `queuePdfSave` (`:248-253`).
+- The saves go to `PATCH /api/entities/{id}/progress`, and opening the book on another device resumes there.
+
+**What is missing:** a reader that is **already open** on another device, for example an iPad tab left on the
+book, never picks up the newer position. This task adds that catch-up, and reuses the existing progress endpoint
+and fields. No backend change and no contract change is needed.
+
+- [ ] **Step 1: Write the failing tests** for `apps/web-svelte/src/lib/reader/progress-catch-up.ts`:
+
+```ts
+import { describe, expect, it } from "vitest";
+import { remoteProgressToAdopt } from "./progress-catch-up";
+
+const saved = "2026-09-26T10:00:00Z";
+
+describe("remoteProgressToAdopt", () => {
+  it("adopts a newer EPUB CFI from another device", () => {
+    const remote = { updatedAt: "2026-09-26T10:05:00Z", location: "epubcfi(/6/8!/4/2/1:0)", index: 4200, total: 10000 };
+    expect(remoteProgressToAdopt(remote, { lastSavedAt: saved, currentLocation: "epubcfi(/6/4!/4/2/1:0)" }))
+      .toEqual({ kind: "cfi", cfi: "epubcfi(/6/8!/4/2/1:0)" });
+  });
+
+  it("ignores progress that is not newer than this device's last save", () => {
+    const remote = { updatedAt: saved, location: "epubcfi(/6/8!/4/2/1:0)", index: 4200, total: 10000 };
+    expect(remoteProgressToAdopt(remote, { lastSavedAt: saved, currentLocation: null })).toBeNull();
+  });
+
+  it("ignores the same location", () => {
+    const cfi = "epubcfi(/6/8!/4/2/1:0)";
+    const remote = { updatedAt: "2026-09-26T10:05:00Z", location: cfi, index: 4200, total: 10000 };
+    expect(remoteProgressToAdopt(remote, { lastSavedAt: saved, currentLocation: cfi })).toBeNull();
+  });
+
+  it("falls back to a fraction when the remote locator is not a CFI (native app formats)", () => {
+    const remote = { updatedAt: "2026-09-26T10:05:00Z", location: "{\"native\":1}", index: 2500, total: 10000 };
+    expect(remoteProgressToAdopt(remote, { lastSavedAt: saved, currentLocation: null }))
+      .toEqual({ kind: "fraction", fraction: 0.25 });
+  });
+
+  it("returns a zero-based page for PDF progress", () => {
+    const remote = { updatedAt: "2026-09-26T10:05:00Z", location: null, index: 11, total: 40 };
+    expect(remoteProgressToAdopt(remote, { lastSavedAt: saved, currentLocation: null, pdf: true }))
+      .toEqual({ kind: "page", page: 11 });
+  });
+});
+```
+
+- [ ] **Step 2: Implement** `remoteProgressToAdopt`.
+  - Use `epub-contents.ts`'s existing CFI check (the function behind `epub-contents.ts:66-79`, which accepts
+    `epubcfi(` and rejects the native-app `{`/`[`/`#prismedia-progress=` formats). Do not retype that logic.
+    Import it, exporting it first if it is private.
+  - Return `null` when `updatedAt` is missing, not newer than `lastSavedAt`, or the location is unchanged.
+- [ ] **Step 3: Make both readers able to jump.**
+  - `BookFileReader.svelte`: add `export function goToLocation(target: { cfi: string } | { fraction: number })`,
+    which calls `view.goTo(cfi)` or `view.goToFraction(fraction)`. Check the name in `view.js`; `init` already
+    accepts `{ fraction }`, see `BookFileReader.svelte:301-310`.
+  - `PdfReader.svelte`: add `export function goToPage(page: number)`, reusing its existing page-navigation code.
+  - Bind both instances in `+page.svelte` with `bind:this`.
+- [ ] **Step 4: Catch up on focus.** In `+page.svelte`:
+  - Record `lastProgressSavedAt = new Date().toISOString()` after every successful `saveEpubProgress` and
+    `savePdfProgress`.
+  - On `visibilitychange`→visible and window `focus`, throttled to once per 5 s and run in the same handler as
+    Task 10's annotation refresh, call `fetchEntity(bookId)` (already imported, `+page.svelte:7,127`).
+  - Read the `CAPABILITY_KIND.progress` capability (as in `:170`), run `remoteProgressToAdopt`, and jump if it
+    returns a target.
+  - Show a small non-blocking notice, "Moved to where you left off on another device", with a **Go back** action.
+    Go back returns to the previous location, which then saves as the newest position. Use the app's existing
+    toast/notice component (grep `toast` in `apps/web-svelte/src/lib`), not a hand-rolled one.
+  - The jump fires `relocate`/page change, which saves as usual. The newest position therefore stays consistent
+    on every device.
+- [ ] **Step 5: Run** the tests and `pnpm check`, then commit: `feat(web): catch up to reading progress from other devices on focus`
+
 ---
 
 ## Task 11: End-to-end test (Playwright)
@@ -1070,6 +1156,9 @@ authenticate: it predates multi-user auth. Build the minimum needed.
   6. **Second browser context, same user:** new context, log in, open the reader, and assert the annotation
      loads. Then, in context 2, change the colour to blue. Bring context 1's page to the front (`page.bringToFront()`
      triggers `visibilitychange`/`focus`) and assert that the colour update is reflected, via the API response.
+  7. **Progress follows (Task 10A):** in context 2, turn two pages (the `next` edge strip, or `view.next()` via the
+     frame). Wait for its `PATCH .../progress`. Bring context 1 to the front, and assert that context 1 jumps: its
+     next `PATCH .../progress` carries context 2's `location`, and the notice is visible.
 - [ ] **Step 5: Run** `pnpm test:e2e -- reader-annotations` against a running stack (BASELINE "Running
   locally"; the API on :8008). Record real output. If the sandbox cannot run Chromium, say so; do not claim a
   pass.
@@ -1089,6 +1178,8 @@ authenticate: it predates multi-user auth. Build the minimum needed.
   - [ ] Open the same book on the iPad browser. Both highlights and the note are there.
   - [ ] Change a colour on the iPad and return to the Mac tab. The change appears after focus.
   - [ ] Delete a highlight on one device. It disappears on the other after reopening or focusing.
+  - [ ] Read a few pages on the Mac, then switch to the iPad tab that already had the book open. It jumps to the
+        Mac's page, and **Go back** returns you to where the iPad was. Repeat with a PDF.
   - [ ] Text selection works in both paged and scrolled modes on the iPad (touch long-press) and on the Mac
         (mouse drag). Edge taps still turn pages, and a centre tap still toggles the controls.
   - [ ] The Prismedia iPhone/iPad App Store app still opens books and resumes progress. No existing endpoint
@@ -1097,19 +1188,16 @@ authenticate: it predates multi-user auth. Build the minimum needed.
 
 ---
 
-## Decisions for the owner (please confirm before execution)
+## Owner decisions (answered 2026-09-26)
 
-1. **Paged-mode gestures (Task 9, Step 1).**
-   - The current full-screen tap overlay blocks text selection. The proposal shrinks it to about 18% edge strips
-     for page turns, uses a centre tap to show or hide the controls, and lets foliate handle swipes.
-   - The change: taps in the middle third no longer turn pages. Only the edges do.
-   - Alternative: a long-press toggles a "select mode", which keeps today's thirds.
-2. **Colours.** Yellow, blue, green, red and purple at foliate's default 30% highlight opacity over the dark
-   reader theme. Exact hex values are chosen in Task 7 and easy to change later.
-3. **Sync freshness.** Other devices see changes on open, on tab focus, or when the page becomes visible. There is
-   no live push while both screens are open. Live push (SSE) could come later if you want it.
-4. **Clock trust.** Last-write-wins uses each device's clock. A device whose clock is badly wrong could win or
-   lose edits unexpectedly. Writes more than a day in the future are rejected.
-5. **Changed book files.** If a file is replaced at the same path, the book id is kept (§18), so old highlights
-   may point at the wrong text. M3 stores the text quote and the file signature, but does **not** yet re-anchor
-   highlights or flag them as stale in the UI. That is proposed for M4 alongside the `/annotations` page.
+1. **Paged-mode gestures: approved.** Edge strips of about 18% turn pages, a centre tap toggles the controls, and
+   foliate handles swipes. Taps in the middle no longer turn pages.
+2. **Colours: approved.** Yellow, blue, green, red and purple at foliate's default 30% opacity.
+3. **Sync freshness: approved, with an addition.**
+   - Highlights and notes refresh on open, focus and visibility; there is no live push.
+   - The owner also asked for reading progress to sync on every page switch. Saving on every page turn already
+     happens. **Task 10A** adds the missing half: an already-open reader catches up to a newer position from
+     another device when its tab regains focus, with a "Go back" escape.
+4. **Clock trust: accepted.** Last-write-wins uses device clocks. Writes more than a day in the future are rejected.
+5. **Changed book files: accepted.** M3 stores the text quote and the file signature. Re-anchoring, and flagging
+   stale highlights, are deferred to M4.
