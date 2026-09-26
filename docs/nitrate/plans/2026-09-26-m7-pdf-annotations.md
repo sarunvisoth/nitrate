@@ -68,11 +68,17 @@ Spec: [VISION.md](../VISION.md) "PDF Reader".
       starting page.
 - [x] Frontend: `AnnotationLibrary.svelte` shows "p. N" for PDF items.
 - [x] Frontend: M6 reader theme applied to `PdfReader.svelte`'s chrome (stage/toolbar background only).
-- [x] Frontend unit tests: `pdf-locator.test.ts`, `pdf-selection.test.ts`, `pdf-text-search.test.ts`,
-      `PdfHighlightLayer` covered indirectly via the above + a rendering smoke test if time allows.
-- [ ] Playwright e2e: `e2e/fixtures/make-annotation-pdf.py` (deterministic tiny multi-page PDF fixture) +
-      `reader-pdf-annotations.spec.ts` covering highlight/reload, bookmark, search-and-navigate, and the
-      dashboard showing the PDF entry with its page. **Not done — see "Gaps" below.**
+- [x] Frontend unit tests: `pdf-locator.test.ts`, `pdf-selection.test.ts`, `pdf-text-search.test.ts` (26
+      assertions total). `PdfHighlightLayer.svelte` itself has no dedicated component test — it is a thin,
+      declarative rect-positioning wrapper over `parsePdfLocator` (already unit-tested) and
+      `annotationColorPaint` (already covered by existing annotation-colors tests); a mount test was not
+      added given time spent on the higher-value gap below. Not ticked as fully covered for that reason.
+- [ ] Playwright e2e: `e2e/fixtures/make-annotation-pdf.py` (deterministic tiny multi-page PDF fixture,
+      hand-built PDF bytes, stdlib only) + `reader-pdf-annotations.spec.ts` (4 tests: highlight/reload,
+      bookmark, search-and-navigate, dashboard page number) are written, and the fixture itself is verified
+      (parses with pdf.js in Node: 3 pages, real extractable text, correct title). **Left unticked: the spec
+      cannot be run to a pass/fail verdict in this sandbox** — see "Gaps" below for why (a `pdfjs-dist`
+      6.0.227 vs. this Chromium build incompatibility, not an M7 code defect).
 - [x] `docs/nitrate/ROADMAP.md` M7 row updated.
 
 ## Files
@@ -95,7 +101,8 @@ Spec: [VISION.md](../VISION.md) "PDF Reader".
 - `pnpm check` (svelte-check)
 - `pnpm api:check` (orval drift check)
 - Playwright: `reader-annotations`, `reader-bookmarks-and-library`, `reader-lookups`,
-  `reader-settings-vocabulary` (existing EPUB specs, regression check) — PDF spec not added (see Gaps).
+  `reader-settings-vocabulary` (existing EPUB specs, regression check — all pass) and
+  `reader-pdf-annotations` (new; blocked in this sandbox, see Gaps).
 
 ## Owner-verified checklist
 
@@ -104,10 +111,36 @@ Spec: [VISION.md](../VISION.md) "PDF Reader".
       highlight interplay was not exercised beyond code review).
 - [ ] Manual check that `pnpm api:generate`'s regenerated `codes.ts`/orval client matches what ships (regenerated
       here against a local dev API instance; verify no drift against the owner's copy).
+- [ ] Run `reader-pdf-annotations.spec.ts` on a real Chromium/machine (this sandbox's pinned Playwright
+      Chromium 141.0.7390.37 cannot render any PDF via `pdfjs-dist@6.0.227` — `Map.prototype.getOrInsertComputed`
+      is missing from its V8, unrelated to this milestone's code) and confirm the 4 PDF reader flows actually
+      pass end to end.
 
 ## As-built notes / gaps
 
 - No EF migration was needed (see decision 1): the existing generic locator columns were reused as designed by
   M3/M4, which is exactly the ceiling case the milestone anticipated.
-- `PdfReader.svelte` line count before/after and the Playwright e2e spec status are recorded after implementation
-  below.
+- `PdfReader.svelte`: 951 → 999 lines (comfortably under the 1000-line ceiling; the old ~90-line inline
+  search UI was removed and replaced by `PdfSearchPanel.svelte` + `pdf-text-search.ts`, offsetting most of
+  the new annotation/bookmark/theme wiring). `BookFileReader.svelte`: 999 → 979 lines (net *smaller*, from
+  deduplicating the highlight-colour helpers into `annotation-colors.ts`).
+- **Gap — PDF e2e spec cannot be run to a verdict in this sandbox.** `reader-pdf-annotations.spec.ts` and its
+  fixture (`e2e/fixtures/make-annotation-pdf.py` → `tests/fixtures/media/books-pdf/nitrate-pdf-annotation-fixture.pdf`,
+  its own library root so it gets a fresh scan) are written and the fixture itself is verified (parses with
+  pdf.js in Node: 3 pages, real extractable text, correct `/Info` title). Running the spec against the real
+  app in this session's Playwright Chromium build (`/opt/pw-browsers/chromium`, Chromium 141.0.7390.37)
+  fails *before any of this milestone's code runs*: `pdfjs-dist@6.0.227`'s own `WorkerTransport.render()` path
+  calls `Map.prototype.getOrInsertComputed`, which does not exist in this Chromium build's V8 (confirmed via
+  `--js-flags=--help`: no such flag exists to enable it, harmony or otherwise) — so `page.render()` throws for
+  every page, no canvas or text layer ever appears, in this environment, for *any* PDF, not just this
+  feature's. This blocks e2e verification of PDF rendering generally (the milestone's own new code — locator
+  build/parse, rect selection math, search, dashboard "p. N" — is separately covered by backend/vitest unit
+  tests, which do not depend on real PDF rendering). The 4 pre-existing EPUB reader specs
+  (`reader-annotations`, `reader-bookmarks-and-library`, `reader-lookups`, `reader-settings-vocabulary`) were
+  re-run in full and all 8 tests pass, so this is isolated to PDF rendering, not a general browser or app
+  regression. **Owner-verified item**: run `reader-pdf-annotations.spec.ts` on a real machine/Chromium (or an
+  updated Playwright browser revision) to get an actual pass/fail; if it still fails there, it points at a
+  genuine `pdfjs-dist` compatibility gap worth its own investigation rather than an M7 code defect.
+- Decision 8 (theme): implemented as designed (chrome background only); "dim pages" was evaluated and
+  skipped as adding no visible effect worth the state, per the plan's own escape hatch — not silently
+  dropped.
