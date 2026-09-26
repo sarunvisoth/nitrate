@@ -15,6 +15,7 @@
   import { saveVocabularyEntry } from "$lib/api/vocabulary";
   import { createUuid } from "$lib/utils/uuid";
   import { BookMarked, Check } from "@lucide/svelte";
+  import { buildSourceSentence, type LookupSourceContext } from "$lib/reader/reader-lookup-actions";
 
   type LookupMode = "define" | "translate" | "wikipedia";
 
@@ -26,9 +27,11 @@
     /** Which view opens first. */
     initialMode: LookupMode;
     onDismiss: () => void;
+    /** Where this selection lives in the book, saved with Add to Vocabulary. */
+    sourceContext?: LookupSourceContext | null;
   }
 
-  let { anchor, term, initialMode, onDismiss }: Props = $props();
+  let { anchor, term, initialMode, onDismiss, sourceContext = null }: Props = $props();
 
   // `mode` only takes its initial value from `initialMode` on mount; after that it is switched by
   // the tab buttons or reset by the effect below when the popover is reopened for a new selection.
@@ -56,10 +59,9 @@
   });
 
   /**
-   * Saves the current term to the reader's vocabulary list from its first definition. Book and
-   * exact reading-location context are not yet threaded through the selection menu (a follow-up),
-   * so the entry is saved without them; the word/definition are still fully usable from
-   * /vocabulary.
+   * Saves the current term to the reader's vocabulary list: word, first definition, book id,
+   * CFI locator, and the surrounding sentence (from the selection's text-quote before/after),
+   * so the saved entry can jump back to where it was found.
    */
   async function addToVocabulary() {
     if (vocabularyState !== "idle" || defineResult?.status !== "ok") return;
@@ -70,9 +72,9 @@
         word: term,
         language: "en",
         definition: firstDefinition,
-        bookId: null,
-        sourceLocator: null,
-        sourceSentence: null,
+        bookId: sourceContext?.bookId ?? null,
+        sourceLocator: sourceContext?.locator ?? null,
+        sourceSentence: buildSourceSentence(term, sourceContext),
         status: VOCABULARY_STATUS.new,
         updatedAt: new Date().toISOString(),
       });

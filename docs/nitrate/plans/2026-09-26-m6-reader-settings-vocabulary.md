@@ -76,13 +76,20 @@ Spec: [VISION.md](../VISION.md) "Reader Settings", "Progress Synchronization", "
   `/vocabulary` (`VocabularyLibrary.svelte`) mirrors `AnnotationLibrary.svelte`: search, status
   filter, inline status change, delete, CSV/JSON/Markdown export. Nav entry "Vocabulary" added
   beside "Annotations" using the existing `layout-list` icon (no new icon needed).
-- **Known gap (time-boxed, not attempted further):** "Add to Vocabulary" in `LookupPopover.svelte`
-  saves word + first definition + language today, but does **not** yet capture book id, CFI
-  locator, or the surrounding sentence — threading that context down from `BookFileReader`'s
-  selection draft through `ReaderSelectionMenu` → `LookupPopover` is a real (small-to-medium)
-  follow-up. Vocabulary entries added this way have no book link and "jump to source location"
-  does nothing for them (the UI simply shows the word as plain text, no link, when there is no
-  book/locator). Entries added via a future full wiring, or via direct API use, work correctly.
+- **Gap closed:** "Add to Vocabulary" now saves `bookId`, `sourceLocator` (CFI), and
+  `sourceSentence` (the text-quote before + selected word + after, joined and clipped to 1000
+  chars), matching VISION's source-linked vocabulary requirement. Threaded as **one** new prop
+  each hop, not ad hoc fields, to keep `BookFileReader.svelte` at its line ceiling:
+  `BookFileReader` takes a new `bookId?: string | null` prop (set once by the reader route,
+  `apps/web-svelte/src/routes/books/[id]/reader/+page.svelte`) and composes a single
+  `LookupSourceContext` object (`{ bookId, locator, textBefore, textAfter }`, reusing the
+  selection draft it already tracks for annotations — no new state) passed to
+  `ReaderSelectionMenu` as one `sourceContext` prop, which forwards it unchanged to
+  `LookupPopover`. `buildSourceSentence` (in `reader-lookup-actions.ts`) joins and clips it.
+  `/vocabulary` now shows a real book-title badge and a clickable word that jumps back into the
+  reader at the saved CFI; unit tests (`reader-lookup-actions.test.ts`,
+  `LookupPopover.test.ts`) and the e2e spec assert the source book, sentence, and the jump-to-
+  source link.
 - **e2e:** `e2e/reader-settings-vocabulary.spec.ts` covers theme+font-size persisting after reload
   and Define → Add to Vocabulary → `/vocabulary` → status change persisting (mocks
   `/api/reader/define` with `page.route`). Bits-ui's `Select` trigger has accessible role
@@ -101,7 +108,10 @@ Spec: [VISION.md](../VISION.md) "Reader Settings", "Progress Synchronization", "
     e2e/reader-annotations.spec.ts e2e/reader-bookmarks-and-library.spec.ts \
     e2e/reader-lookups.spec.ts e2e/reader-settings-vocabulary.spec.ts --workers=1
   ```
-  Result on 2026-09-26: **8/8 passed** (1.5m) — the 3 pre-existing reader specs (6 tests) plus
-  the new M6 spec (2 tests); no regressions.
+  Result on 2026-09-26: **8/8 passed** (1.5m and, re-run after closing the source-context gap
+  below, 2.0m) — the 3 pre-existing reader specs (6 tests) plus the new M6 spec (2 tests); no
+  regressions. The spec now also asserts the saved word links to its source book (title badge +
+  clickable "jump to source" link back into the reader at the saved CFI) and shows the captured
+  surrounding sentence.
 - Real test output, exact commands, and owner-verified items are in the final session report
   handed back to the user.

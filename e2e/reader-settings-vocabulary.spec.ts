@@ -1,6 +1,6 @@
 import { test, expect, type Page } from "@playwright/test";
 import { signInContext } from "./auth";
-import { ensureAnnotationFixtureBook, resetBookProgress } from "./book-fixture";
+import { ANNOTATION_FIXTURE_TITLE, ensureAnnotationFixtureBook, resetBookProgress } from "./book-fixture";
 import { bookSectionFrame, selectInFrame } from "./reader-helpers";
 
 // Shares the fixture book/account with the other reader specs; run with --workers=1.
@@ -96,8 +96,12 @@ test("Define, Add to Vocabulary, then change status on /vocabulary", async ({ br
   await expect(page.getByRole("button", { name: "In vocabulary" })).toBeVisible();
 
   await page.goto("/vocabulary");
-  const row = page.getByText("luminous", { exact: true }).first();
-  await expect(row).toBeVisible({ timeout: 15_000 });
+  // The saved word links back to its source book + location (bookId/CFI locator round-tripped),
+  // shows the book title, and the surrounding sentence captured from the text-quote before/after.
+  const wordLink = page.getByRole("link", { name: "luminous" });
+  await expect(wordLink).toBeVisible({ timeout: 15_000 });
+  await expect(page.getByText(ANNOTATION_FIXTURE_TITLE)).toBeVisible();
+  await expect(page.locator("p", { hasText: "luminous" }).filter({ hasText: "“" })).toBeVisible();
 
   const statusSelect = page.getByRole("button", { name: "Status for luminous" });
   await statusSelect.click();
@@ -106,6 +110,10 @@ test("Define, Add to Vocabulary, then change status on /vocabulary", async ({ br
 
   await page.reload();
   await expect(page.getByRole("button", { name: "Status for luminous" })).toHaveText("Known", { timeout: 15_000 });
+
+  // Jump to source: the word link opens the reader on the saved book.
+  await page.getByRole("link", { name: "luminous" }).click();
+  await expect(page).toHaveURL(new RegExp(`/books/${bookId}/reader`));
 
   await context.close();
 });

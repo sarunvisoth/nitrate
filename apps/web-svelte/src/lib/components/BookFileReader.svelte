@@ -81,6 +81,8 @@
     onAddBookmark?: (page: BookmarkPage) => void;
     onRenameBookmark?: (bookmark: BookBookmark, label: string) => void;
     onDeleteBookmark?: (bookmark: BookBookmark) => void;
+    /** Book Entity id, threaded into the selection menu's lookup source context (Add to Vocabulary). */
+    bookId?: string | null;
   }
 
   let {
@@ -105,6 +107,7 @@
     onAddBookmark,
     onRenameBookmark,
     onDeleteBookmark,
+    bookId = null,
   }: Props = $props();
   const MIN_FONT = 80, MAX_FONT = 200;
   let shell = $state<ReturnType<typeof ReaderShell>>();
@@ -115,14 +118,11 @@
   let ready = $state(false);
   let errorMessage = $state<string | null>(null);
   let flow = $state<ReaderFlow>(untrack(() => initialFlow));
-  let fontPercent = $state(100);
-  let counterLabel = $state("");
-  let atEnd = $state(false);
+  let fontPercent = $state(100), counterLabel = $state(""), atEnd = $state(false);
   let toc = $state.raw<TocEntry[]>([]);
   let tocOpen = $state(false);
-  // Fixed-layout books (PDF) have no reflow, so font-size and paged/scrolled flow do not apply.
+  // Fixed-layout books (PDF) have no reflow, so font-size/flow do not apply; M6 prefs load with the book.
   let isFixedLayout = $state(false);
-  // Server-stored reader typography/theme/flow defaults (M6); loaded alongside the book itself.
   const prefsStore = new ReaderPreferencesStore();
 
   const hasToc = $derived(toc.length > 0);
@@ -822,6 +822,7 @@
         selectedText={pendingSelection?.draft.selectedText ?? ""}
         actions={selectionActions}
         onDismiss={clearSelection}
+        sourceContext={pendingSelection && { bookId, locator: pendingSelection.draft.locator, textBefore: pendingSelection.draft.textBefore, textAfter: pendingSelection.draft.textAfter }}
       />
       <AnnotationEditor
         anchor={editingAnnotation ? editing?.anchor ?? null : null}
