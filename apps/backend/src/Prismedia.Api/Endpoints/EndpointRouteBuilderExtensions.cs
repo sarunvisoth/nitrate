@@ -1,0 +1,81 @@
+using Prismedia.Api.Security;
+
+namespace Prismedia.Api.Endpoints;
+
+public static class EndpointRouteBuilderExtensions {
+    public static IEndpointRouteBuilder MapPrismediaEndpoints(this IEndpointRouteBuilder routes) {
+        routes.MapHealthEndpoints();
+        routes.MapAuthEndpoints();
+        routes.MapUserEndpoints();
+        routes.MapEntityEndpoints();
+        routes.MapVideoEndpoints();
+        routes.MapMovieEndpoints();
+        routes.MapSeriesEndpoints();
+        routes.MapImageEndpoints();
+        routes.MapGalleryEndpoints();
+        routes.MapBookEndpoints();
+        routes.MapBookAuthorEndpoints();
+        routes.MapOpdsEndpoints();
+        routes.MapMusicArtistEndpoints();
+        routes.MapAudioLibraryEndpoints();
+        routes.MapAudioTrackEndpoints();
+        routes.MapPeopleEndpoints();
+        routes.MapStudioEndpoints();
+        routes.MapTagEndpoints();
+        routes.MapCollectionEndpoints();
+        routes.MapVideoPlaybackEndpoints();
+        routes.MapBrowserSessionEndpoints();
+        routes.MapMusicPlayerEndpoints();
+        routes.MapConsumptionStatisticsEndpoints();
+        routes.MapJobEndpoints();
+        routes.MapSettingsEndpoints();
+        routes.MapNavLayoutEndpoints();
+        routes.MapLibraryEndpoints();
+        routes.MapFilesEndpoints();
+        routes.MapUpdateCheckEndpoints();
+        routes.MapPluginEndpoints();
+        routes.MapIdentifyEndpoints();
+        routes.MapOrganizeEndpoints();
+        routes.MapRequestEndpoints();
+        routes.MapAcquisitionEndpoints();
+        routes.MapMonitorEndpoints();
+        routes.MapReleaseCalendarEndpoints();
+
+        return routes;
+    }
+}
+
+/// <summary>
+/// Resolves the caller's NSFW visibility preference at the HTTP edge. The user's
+/// <c>AllowNsfw</c> flag is a server-enforced ceiling. Within it, web-browser sessions
+/// (authenticated via the session cookie) opt into show mode by query or cookie, while
+/// native and OPDS clients (header/query token or Basic auth) have no toggle — the permission
+/// alone decides.
+/// </summary>
+internal static class NsfwVisibility {
+    private const string CookieName = "prismedia-nsfw-mode";
+    private const string ShowMode = "show";
+
+    /// <summary>
+    /// Returns true when NSFW rows should be withheld from this response.
+    /// </summary>
+    /// <param name="explicitHide">Optional route query override (only widens hiding within the user cap).</param>
+    /// <param name="httpContext">Current HTTP context used to inspect the NSFW mode cookie.</param>
+    public static bool ShouldHide(bool? explicitHide, HttpContext httpContext) {
+        var auth = httpContext.GetPrismediaAuth();
+        if (auth is not null && !auth.User.AllowNsfw) {
+            return true;
+        }
+
+        if (explicitHide is { } hide) {
+            return hide;
+        }
+
+        if (auth is { ViaCookie: false }) {
+            return false;
+        }
+
+        return !httpContext.Request.Cookies.TryGetValue(CookieName, out var mode) ||
+            !string.Equals(mode, ShowMode, StringComparison.OrdinalIgnoreCase);
+    }
+}

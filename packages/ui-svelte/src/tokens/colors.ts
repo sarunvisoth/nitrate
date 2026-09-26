@@ -1,0 +1,88 @@
+export const colors = {
+  bg: "#000000",
+  surface: {
+    1: "#111214",
+    2: "#191a1e",
+    3: "#24262b",
+    4: "#303238",
+  },
+  glass: {
+    1: "rgba(15, 15, 17, 0.74)",
+    2: "rgba(18, 18, 20, 0.84)",
+    3: "rgba(24, 24, 27, 0.94)",
+  },
+  glassBlur: {
+    1: "12px",
+    2: "16px",
+    3: "24px",
+  },
+  text: {
+    primary: "#f5f5f6",
+    secondary: "#c8c9cc",
+    muted: "#92959d",
+    disabled: "#585b63",
+    accent: "#d8d9dc",
+    accentBright: "#f1f1f2",
+  },
+  accent: {
+    950: "#101113",
+    900: "#1b1c20",
+    800: "#2a2c31",
+    700: "#4a4d55",
+    600: "#9699a1",
+    500: "#c7c9cc",
+    400: "#d8d9dc",
+    300: "#e5e6e8",
+    200: "#eff0f1",
+    100: "#f7f7f8",
+    50: "#ffffff",
+  },
+  spectrum: {
+    red: "#ff141f",
+    orange: "#ff570a",
+    yellow: "#ffc71f",
+    green: "#1fc247",
+    cyan: "#0ab3e6",
+    blue: "#0d47ff",
+    violet: "#7a14f5",
+    magenta: "#d60de0",
+  },
+  materialSpectrum: {
+    red: "#b3484d",
+    orange: "#b76337",
+    yellow: "#9e873b",
+    green: "#4d925d",
+    cyan: "#3b869c",
+    blue: "#536fb0",
+    violet: "#775ca5",
+    magenta: "#9a4f9d",
+  },
+  accentGradient: {
+    selection: "linear-gradient(135deg, #c7c9cc 0%, #ffffff 100%)",
+    active: "linear-gradient(135deg, #9699a1 0%, #d8d9dc 100%)",
+    subtle: "linear-gradient(180deg, rgba(199,201,204,0.12) 0%, rgba(199,201,204,0) 100%)",
+  },
+  glow: {
+    subtle: "0 0 0 1px rgba(199,201,204,0.28), 0 0 8px rgba(199,201,204,0.12)",
+    full: "0 0 0 1px rgba(199,201,204,0.48), 0 0 16px rgba(199,201,204,0.22), 0 0 32px rgba(199,201,204,0.08)",
+  },
+  status: {
+    success: { default: "#63c889", muted: "#1a3d28", text: "#8ee0aa", glow: "rgba(99, 200, 137, 0.30)" },
+    warning: { default: "#ffc71f", muted: "#3d3106", text: "#ffe27a", glow: "rgba(255, 199, 31, 0.30)" },
+    error:   { default: "#ff806f", muted: "#4a1c18", text: "#ff9f92", glow: "rgba(255, 128, 111, 0.30)" },
+    info:    { default: "#6fa8dc", muted: "#1a2e44", text: "#92c0e8", glow: "rgba(111, 168, 220, 0.30)" },
+  },
+  border: {
+    subtle: "rgba(164, 172, 185, 0.07)",
+    default: "rgba(164, 172, 185, 0.12)",
+    accent: "rgba(199, 201, 204, 0.24)",
+    accentStrong: "rgba(199, 201, 204, 0.52)",
+    glow: "rgba(199, 201, 204, 0.80)",
+  },
+  overlay: {
+    scrim: "rgba(7, 8, 11, 0.75)",
+    heavy: "rgba(7, 8, 11, 0.9)",
+  },
+} as const;
+
+export type Colors = typeof colors;

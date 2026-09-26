@@ -1,0 +1,32 @@
+<script lang="ts">
+  import type { Snippet } from "svelte";
+  import * as Base from "../components/ui/dialog";
+  import { cn } from "../lib/utils";
+  interface Props {
+    open: boolean;
+    ariaLabel: string;
+    onClose: () => void;
+    initialFocus?: () => HTMLElement | null;
+    dismissible?: boolean;
+    /** Edge-to-edge media presentation; the modal still owns focus and dismissal. */
+    fullscreen?: boolean;
+    class?: string;
+    children: Snippet;
+  }
+  let { open, ariaLabel, onClose, initialFocus, dismissible = true, fullscreen = false, class: className, children }: Props = $props();
+</script>
+
+<Base.Root {open} onOpenChange={(next) => { if (!next && dismissible) onClose(); }}>
+  <!-- Mount portals in opening order so independent dialogs (global search,
+       editors) paint in the same order as Bits UI's focus and Escape stack. -->
+  {#if open}
+  <Base.Content showCloseButton={false}
+    escapeKeydownBehavior={dismissible ? "close" : "ignore"}
+    interactOutsideBehavior={dismissible ? "close" : "ignore"}
+    onOpenAutoFocus={(event) => { const target = initialFocus?.(); if (target) { event.preventDefault(); target.focus(); } }}
+    class={cn("flex max-h-[calc(100dvh-2rem)] max-w-[calc(100vw-2rem)] flex-col gap-0 overflow-auto p-0 sm:max-w-[calc(100vw-2rem)]", fullscreen && "inset-0 h-dvh w-dvw max-h-none max-w-none translate-x-0 translate-y-0 overflow-hidden rounded-none border-0 bg-black shadow-none ring-0 sm:max-w-none", className)}>
+    <Base.Title class="sr-only">{ariaLabel}</Base.Title>
+    {@render children()}
+  </Base.Content>
+  {/if}
+</Base.Root>

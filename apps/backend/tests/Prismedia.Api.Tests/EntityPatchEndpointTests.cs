@@ -1,0 +1,480 @@
+using System.Net;
+using System.Net.Http.Json;
+using System.Text.Json;
+using Microsoft.AspNetCore.Hosting;
+using Microsoft.AspNetCore.Mvc.Testing;
+using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.DependencyInjection.Extensions;
+using Prismedia.Infrastructure.Serialization;
+using Prismedia.Application.Entities;
+using Prismedia.Application.Playback;
+using Prismedia.Domain.Capabilities;
+using Prismedia.Domain.Entities;
+using Prismedia.Domain.Media;
+using Prismedia.Contracts.Entities;
+using Prismedia.Contracts.Plugins;
+
+namespace Prismedia.Api.Tests;
+
+public sealed class EntityPatchEndpointTests {
+    // Codec enums (e.g. EntityCard.Kind) serialize as their string code; the client needs the
+    // same converter to deserialize the typed DTO.
+    private static readonly JsonSerializerOptions CodecJson =
+        new(JsonSerializerDefaults.Web) { Converters = { new CodecJsonConverterFactory() } };
+
+    private static readonly Guid EntityId = Guid.Parse("11111111-1111-1111-1111-111111111111");
+    private static readonly Guid VolumeId = Guid.Parse("22222222-2222-2222-2222-222222222222");
+    private static readonly Guid ChapterId = Guid.Parse("33333333-3333-3333-3333-333333333333");
+
+    [Fact]
+    public async Task KindGuardedEntityPatchAppliesMetadataAndReturnsUpdatedCard() {
+        using var factory = CreateFactory(EntityMetadataPatchResult.Applied);
+        using var client = factory.CreateAuthenticatedClient();
+
+        using var response = await client.PatchAsJsonAsync(
+            $"/api/entities/video/{EntityId}",
+            Request("Updated Title"));
+        var card = await response.Content.ReadFromJsonAsync<EntityCard>(CodecJson);
+        var patcher = factory.Services.GetRequiredService<FakeEntityMetadataPatchService>();
+
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        Assert.NotNull(card);
+        Assert.Equal("Video Title", card.Title);
+        Assert.Equal(EntityId, patcher.EntityId);
+        Assert.Equal("video", patcher.ExpectedKind);
+    }
+
+    [Fact]
+    public async Task KindGuardedEntityPatchReturnsNotFoundForKindMismatch() {
+        using var factory = CreateFactory(EntityMetadataPatchResult.KindMismatch);
+        using var client = factory.CreateAuthenticatedClient();
+
+        using var response = await client.PatchAsJsonAsync(
+            $"/api/entities/video-series/{EntityId}",
+            Request("Wrong Kind"));
+        var patcher = factory.Services.GetRequiredService<FakeEntityMetadataPatchService>();
+
+        Assert.Equal(HttpStatusCode.NotFound, response.StatusCode);
+        Assert.Equal("video-series", patcher.ExpectedKind);
+    }
+
+    [Fact]
+    public async Task DomainEntityPatchRoutesDelegateWithDomainKind() {
+        using var factory = CreateFactory(EntityMetadataPatchResult.Applied);
+        using var client = factory.CreateAuthenticatedClient();
+
+        using var response = await client.PatchAsJsonAsync(
+            $"/api/videos/{EntityId}",
+            Request("Video Title"));
+        var patcher = factory.Services.GetRequiredService<FakeEntityMetadataPatchService>();
+
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        Assert.Equal("video", patcher.ExpectedKind);
+    }
+
+    [Fact]
+    public async Task EntityProgressPatchStoresSharedProgressCapability() {
+        using var factory = CreateProgressFactory();
+        using var client = factory.CreateAuthenticatedClient();
+
+        using var response = await client.PatchAsJsonAsync(
+            $"/api/entities/{EntityId}/progress",
+            new EntityProgressUpdateRequest(ChapterId, ProgressUnit.Page, 7, 24, ReaderMode.Webtoon, Completed: null), CodecJson);
+        var repository = factory.Services.GetRequiredService<FakeEntityWriteRepository>();
+
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        Assert.Equal(ChapterId, repository.SavedEntity?.Progress?.CurrentEntityId);
+        Assert.Equal(ProgressUnit.Page, repository.SavedEntity?.Progress?.Unit);
+        Assert.Equal(7, repository.SavedEntity?.Progress?.Index);
+        Assert.Equal(24, repository.SavedEntity?.Progress?.Total);
+        Assert.Equal(ReaderMode.Webtoon, repository.SavedEntity?.Progress?.Mode);
+        Assert.Null(repository.SavedEntity?.Progress?.CompletedAt);
+    }
+
+    [Fact]
+    public async Task EntityProgressPatchPreferMinimalSkipsEntityProjection() {
+        using var factory = CreateProgressFactory();
+        using var client = factory.CreateAuthenticatedClient();
+        using var request = new HttpRequestMessage(
+            HttpMethod.Patch,
+            $"/api/entities/{EntityId}/progress") {
+            Content = JsonContent.Create(
+                new EntityProgressUpdateRequest(
+                    ChapterId,
+                    ProgressUnit.Page,
+                    7,
+                    24,
+                    ReaderMode.Webtoon,
+                    Completed: null),
+                options: CodecJson)
+        };
+        request.Headers.TryAddWithoutValidation("Prefer", "return=minimal");
+
+        using var response = await client.SendAsync(request);
+        var reads = factory.Services.GetRequiredService<FakeEntityReadService>();
+
+        Assert.Equal(HttpStatusCode.NoContent, response.StatusCode);
+        Assert.Equal(0, reads.GetInvocationCount);
+    }
+
+    [Fact]
+    public async Task EntityRatingPatchStoresSharedRatingCapability() {
+        using var factory = CreateProgressFactory();
+        using var client = factory.CreateAuthenticatedClient();
+
+        using var response = await client.PatchAsJsonAsync(
+            $"/api/entities/{EntityId}/rating",
+            new RatingUpdateRequest(4));
+        var repository = factory.Services.GetRequiredService<FakeEntityWriteRepository>();
+
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        Assert.Equal(4, repository.SavedEntity?.RatingValue);
+    }
+
+    [Fact]
+    public async Task EntityConsumptionPatchStoresPositionAndActiveTime() {
+        using var factory = CreateProgressFactory();
+        using var client = factory.CreateAuthenticatedClient();
+
+        using var response = await client.PatchAsJsonAsync(
+            $"/api/entities/{EntityId}/consumption",
+            new {
+                positionSeconds = 18.5,
+                activitySeconds = 12.25,
+                completed = (bool?)null,
+                utcOffsetMinutes = -300
+            });
+        var repository = factory.Services.GetRequiredService<FakeEntityWriteRepository>();
+
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        var consumption = repository.SavedEntity?.ConsumptionCapability?.Value;
+        Assert.Equal(TimeSpan.FromSeconds(18.5), consumption?.ResumeTime);
+        Assert.Equal(TimeSpan.FromSeconds(12.25), consumption?.ActiveDuration);
+    }
+
+    [Fact]
+    public async Task RemovedPlaybackMutationRoutesAreNotExposed() {
+        using var factory = CreateProgressFactory();
+        using var client = factory.CreateAuthenticatedClient();
+
+        using var entityPlayback = await client.PatchAsJsonAsync(
+            $"/api/entities/{EntityId}/playback",
+            new { resumeSeconds = 18.5, durationSeconds = 12.25 });
+        using var audioTrackPlay = await client.PostAsync(
+            $"/api/audio-tracks/{EntityId}/play",
+            content: null);
+
+        Assert.Equal(HttpStatusCode.NotFound, entityPlayback.StatusCode);
+        Assert.Equal(HttpStatusCode.NotFound, audioTrackPlay.StatusCode);
+    }
+
+    [Fact]
+    public async Task EntityProgressPatchMarksProgressComplete() {
+        using var factory = CreateProgressFactory();
+        using var client = factory.CreateAuthenticatedClient();
+
+        using var response = await client.PatchAsJsonAsync(
+            $"/api/entities/{EntityId}/progress",
+            new EntityProgressUpdateRequest(ChapterId, ProgressUnit.Page, 23, 24, ReaderMode.Paged, Completed: true), CodecJson);
+        var repository = factory.Services.GetRequiredService<FakeEntityWriteRepository>();
+
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        Assert.Equal(ChapterId, repository.SavedEntity?.Progress?.CurrentEntityId);
+        Assert.Equal(23, repository.SavedEntity?.Progress?.Index);
+        Assert.NotNull(repository.SavedEntity?.Progress?.CompletedAt);
+        Assert.Contains(
+            factory.Services.GetRequiredService<RecordingPlaybackEventStore>().Events,
+            entry => entry.EntityId == EntityId && entry.Kind == ConsumptionEventKind.Completed);
+    }
+
+    [Fact]
+    public async Task EntityProgressPatchResetReturnsToStartAndClearsCompletion() {
+        using var factory = CreateProgressFactory();
+        using var client = factory.CreateAuthenticatedClient();
+        var repository = factory.Services.GetRequiredService<FakeEntityWriteRepository>();
+
+        using var complete = await client.PatchAsJsonAsync(
+            $"/api/entities/{EntityId}/progress",
+            new EntityProgressUpdateRequest(ChapterId, ProgressUnit.Page, 23, 24, ReaderMode.Paged, Completed: true), CodecJson);
+        Assert.NotNull(repository.SavedEntity?.Progress?.CompletedAt);
+
+        // Start over resets both the current cursor and coverage, then clears completion.
+        using var response = await client.PatchAsJsonAsync(
+            $"/api/entities/{EntityId}/progress",
+            new EntityProgressUpdateRequest(ChapterId, ProgressUnit.Page, 0, 24, ReaderMode.Paged, Completed: null, Reset: true), CodecJson);
+
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        Assert.Equal(0, repository.SavedEntity?.Progress?.Index);
+        Assert.Null(repository.SavedEntity?.Progress?.CompletedAt);
+    }
+
+    [Fact]
+    public async Task EntityProgressPatchMarkUnreadClearsCompletionWithoutMovingTheCursor() {
+        using var factory = CreateProgressFactory();
+        using var client = factory.CreateAuthenticatedClient();
+        var repository = factory.Services.GetRequiredService<FakeEntityWriteRepository>();
+
+        using var complete = await client.PatchAsJsonAsync(
+            $"/api/entities/{EntityId}/progress",
+            new EntityProgressUpdateRequest(ChapterId, ProgressUnit.Page, 23, 24, ReaderMode.Paged, Completed: true), CodecJson);
+        Assert.NotNull(repository.SavedEntity?.Progress?.CompletedAt);
+
+        // Mark unread clears completion in place, leaving the page position untouched.
+        using var response = await client.PatchAsJsonAsync(
+            $"/api/entities/{EntityId}/progress",
+            new EntityProgressUpdateRequest(ChapterId, ProgressUnit.Page, 23, 24, ReaderMode.Paged, Completed: false), CodecJson);
+
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        Assert.Null(repository.SavedEntity?.Progress?.CompletedAt);
+        Assert.Equal(23, repository.SavedEntity?.Progress?.Index);
+    }
+
+    [Fact]
+    public async Task EntityProgressPatchOnBookChildStoresProgressOnBookParent() {
+        using var factory = CreateProgressFactory();
+        using var client = factory.CreateAuthenticatedClient();
+
+        using var response = await client.PatchAsJsonAsync(
+            $"/api/entities/{ChapterId}/progress",
+            new EntityProgressUpdateRequest(ChapterId, ProgressUnit.Page, 2, 16, ReaderMode.Paged, Completed: null), CodecJson);
+        var repository = factory.Services.GetRequiredService<FakeEntityWriteRepository>();
+
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        Assert.Equal(EntityId, repository.SavedEntity?.Id);
+        Assert.Equal(ChapterId, repository.SavedEntity?.Progress?.CurrentEntityId);
+        Assert.Equal(2, repository.SavedEntity?.Progress?.Index);
+    }
+
+    [Fact]
+    public async Task EntityProgressPatchResolvesBookOwnerWithoutFullHydration() {
+        using var factory = CreateProgressFactory();
+        using var client = factory.CreateAuthenticatedClient();
+
+        using var response = await client.PatchAsJsonAsync(
+            $"/api/entities/{EntityId}/progress",
+            new EntityProgressUpdateRequest(ChapterId, ProgressUnit.Page, 3, 16, ReaderMode.Paged, Completed: false), CodecJson);
+        var repository = factory.Services.GetRequiredService<FakeEntityWriteRepository>();
+
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        Assert.Equal(0, repository.FullHydrationLookups);
+        Assert.True(repository.ShallowLookups > 0);
+    }
+
+    [Fact]
+    public async Task EntityProgressPatchMovesCurrentCursorToTheLatestReportedPosition() {
+        using var factory = CreateProgressFactory();
+        using var client = factory.CreateAuthenticatedClient();
+
+        await client.PatchAsJsonAsync(
+            $"/api/entities/{EntityId}/progress",
+            new EntityProgressUpdateRequest(ChapterId, ProgressUnit.Page, 7, 24, ReaderMode.Paged, Completed: null), CodecJson);
+        using var response = await client.PatchAsJsonAsync(
+            $"/api/entities/{EntityId}/progress",
+            new EntityProgressUpdateRequest(ChapterId, ProgressUnit.Page, 2, 24, ReaderMode.Paged, Completed: null), CodecJson);
+        var repository = factory.Services.GetRequiredService<FakeEntityWriteRepository>();
+
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        Assert.Equal(2, repository.SavedEntity?.Progress?.Index);
+        Assert.Equal(8, repository.SavedEntity?.Progress?.ConsumedCount);
+    }
+
+    private static EntityMetadataUpdateRequest Request(string title) =>
+        new(
+            ["title"],
+            EmptyPatch() with { Title = title });
+
+    private static EntityMetadataPatch EmptyPatch() => new(
+        Title: null,
+        Description: null,
+        ExternalIds: new Dictionary<string, string>(),
+        Urls: [],
+        Tags: [],
+        Studio: null,
+        Credits: [],
+        Dates: new Dictionary<string, string>(),
+        Stats: new Dictionary<string, int>(),
+        Positions: new Dictionary<string, int>(),
+        Classification: null);
+
+    private static WebApplicationFactory<Program> CreateFactory(EntityMetadataPatchResult result) =>
+        new WebApplicationFactory<Program>()
+            .WithWebHostBuilder(builder => {
+                builder.ConfigureServices(services => {
+                    services.AddSingleton(new FakeEntityMetadataPatchService(result));
+                    services.AddScoped<IEntityMetadataPatchService>(provider =>
+                        provider.GetRequiredService<FakeEntityMetadataPatchService>());
+                    services.AddScoped<IEntityReadService, FakeEntityReadService>();
+                });
+            })
+            .WithTestAuth();
+
+    private static WebApplicationFactory<Program> CreateProgressFactory() =>
+        new WebApplicationFactory<Program>()
+            .WithWebHostBuilder(builder => {
+                builder.ConfigureServices(services => {
+                    services.AddSingleton(new FakeEntityWriteRepository());
+                    services.AddSingleton(new RecordingPlaybackEventStore());
+                    services.AddScoped<IEntityWriteRepository>(provider =>
+                        provider.GetRequiredService<FakeEntityWriteRepository>());
+                    services.RemoveAll<IEntityReadService>();
+                    services.AddSingleton<FakeEntityReadService>();
+                    services.AddScoped<IEntityReadService>(provider =>
+                        provider.GetRequiredService<FakeEntityReadService>());
+                    services.AddScoped<IConsumptionEventStore>(provider =>
+                        provider.GetRequiredService<RecordingPlaybackEventStore>());
+                    services.RemoveAll<IEntityProgressTopologyResolver>();
+                    services.AddSingleton<IEntityProgressTopologyResolver>(new FakeProgressTopologyResolver());
+                    services.RemoveAll<IEntitySourceOwnershipReader>();
+                    services.AddSingleton<IEntitySourceOwnershipReader>(new NoEntityOwnershipReader());
+                    services.RemoveAll<IEntityFileDeletionRecoveryReader>();
+                    services.AddSingleton<IEntityFileDeletionRecoveryReader>(new NoEntityOwnershipReader());
+                });
+            })
+            .WithTestAuth();
+
+    private sealed class FakeEntityMetadataPatchService(EntityMetadataPatchResult result) : IEntityMetadataPatchService {
+        public Guid? EntityId { get; private set; }
+        public string? ExpectedKind { get; private set; }
+
+        public Task<EntityMetadataPatchResult> ApplyPatchAsync(
+            Guid entityId,
+            EntityMetadataUpdateRequest request,
+            string? expectedKind,
+            CancellationToken cancellationToken) {
+            EntityId = entityId;
+            ExpectedKind = expectedKind;
+            return Task.FromResult(result);
+        }
+    }
+
+    private sealed class FakeEntityReadService : EntityReadServiceStub {
+        public int GetInvocationCount { get; private set; }
+
+        public override Task<EntityCard?> GetAsync(Guid id, bool hideNsfw, CancellationToken cancellationToken) =>
+            ReadAsync(Card(id, EntityKind.Video, "Updated Title"));
+
+        public override Task<EntityCard?> GetAsync(Guid id, string kind, bool hideNsfw, CancellationToken cancellationToken) =>
+            ReadAsync(Card(
+                id,
+                kind.DecodeAs<EntityKind>(),
+                kind == EntityKind.Video.ToCode() ? "Video Title" : "Updated Title"));
+
+        private Task<EntityCard?> ReadAsync(EntityCard card) {
+            GetInvocationCount++;
+            return Task.FromResult<EntityCard?>(card);
+        }
+
+        private static EntityCard Card(Guid id, EntityKind kind, string title) =>
+            new() {
+                Id = id,
+                Kind = kind,
+                Title = title,
+                ParentEntityId = null,
+                SortOrder = null,
+                Capabilities = [],
+                ChildrenByKind = [],
+                Relationships = []
+            };
+    }
+
+    private sealed class NoEntityOwnershipReader :
+        IEntitySourceOwnershipReader,
+        IEntityFileDeletionRecoveryReader {
+        public Task<IReadOnlySet<Guid>> ResolveAsync(
+            IReadOnlyCollection<Guid> entityIds,
+            CancellationToken cancellationToken) =>
+            Task.FromResult<IReadOnlySet<Guid>>(new HashSet<Guid>());
+    }
+
+    private sealed class FakeProgressTopologyResolver : IEntityProgressTopologyResolver {
+        public Task<ProgressOwnerResolution?> ResolveOwnerAsync(
+            Guid requestedEntityId,
+            CancellationToken cancellationToken) =>
+            Task.FromResult<ProgressOwnerResolution?>(
+                (requestedEntityId == EntityId || requestedEntityId == VolumeId || requestedEntityId == ChapterId)
+                    ? new ProgressOwnerResolution(EntityId)
+                    : null);
+
+        public Task<ProgressCursorResolution?> ResolveCursorAsync(
+            Guid ownerId,
+            Guid cursorId,
+            CancellationToken cancellationToken) =>
+            Task.FromResult<ProgressCursorResolution?>(
+                ownerId == EntityId && (cursorId == EntityId || cursorId == VolumeId || cursorId == ChapterId)
+                    ? new ProgressCursorResolution(cursorId, cursorId)
+                    : null);
+
+        public Task<ProgressWorkPosition?> ResolveWorkPositionAsync(
+            Guid ownerId,
+            Guid cursorId,
+            int index,
+            int total,
+            CancellationToken cancellationToken) =>
+            Task.FromResult<ProgressWorkPosition?>(
+                ownerId == EntityId && cursorId == ChapterId
+                    ? new ProgressWorkPosition(ChapterId, index, total)
+                    : null);
+
+        public Task<IReadOnlyList<OrderedProgressScope>> ResolveOrderedScopesAsync(
+            Guid itemId,
+            CancellationToken cancellationToken) =>
+            Task.FromResult<IReadOnlyList<OrderedProgressScope>>([]);
+    }
+
+    private sealed class FakeEntityWriteRepository : IEntityWriteRepository {
+        private readonly Book _entity = new(
+            EntityId,
+            "Book Title",
+            BookType.Book,
+            capabilities: [new CapabilityProgress()]);
+        private readonly BookVolume _volume = new(VolumeId, "Volume 1");
+        private readonly BookChapter _chapter = new(ChapterId, "Chapter 1");
+
+        public FakeEntityWriteRepository() {
+            _entity.AddChild(_volume);
+            _volume.AddChild(_chapter);
+        }
+
+        public Entity? SavedEntity { get; private set; }
+        public int FullHydrationLookups { get; private set; }
+        public int ShallowLookups { get; private set; }
+
+        public Task<Entity?> FindAsync(Guid id, CancellationToken cancellationToken) {
+            FullHydrationLookups++;
+            return Task.FromResult(Find(id));
+        }
+
+        public Task<Entity?> FindShallowAsync(Guid id, CancellationToken cancellationToken) {
+            ShallowLookups++;
+            return Task.FromResult(Find(id));
+        }
+
+        private Entity? Find(Guid id) =>
+            id == EntityId ? _entity : id == VolumeId ? _volume : id == ChapterId ? _chapter : null;
+
+        public Task<Guid?> FindParentIdAsync(Guid id, CancellationToken cancellationToken) {
+            Entity? entity = id == EntityId ? _entity : id == VolumeId ? _volume : id == ChapterId ? _chapter : null;
+            return Task.FromResult(entity?.ParentEntityId);
+        }
+
+        public Task SaveMutableStateAsync(
+            Entity entity,
+            EntityMutableStateChange change,
+            CancellationToken cancellationToken) {
+            SavedEntity = entity;
+            return Task.CompletedTask;
+        }
+    }
+
+    private sealed class RecordingPlaybackEventStore : IConsumptionEventStore {
+        public List<ConsumptionEventAppend> Events { get; } = [];
+
+        public Task StageAsync(ConsumptionEventAppend entry, CancellationToken cancellationToken) {
+            Events.Add(entry);
+            return Task.CompletedTask;
+        }
+
+        public Task AppendAsync(ConsumptionEventAppend entry, CancellationToken cancellationToken) =>
+            StageAsync(entry, cancellationToken);
+    }
+}

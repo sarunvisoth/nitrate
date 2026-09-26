@@ -1,0 +1,191 @@
+<script lang="ts">
+  import { tick, type Snippet } from "svelte";
+  import { Loader2, RefreshCw, Repeat2, Search, Upload, X } from "@lucide/svelte";
+  import { Button, Progress, SearchInput } from "@prismedia/ui-svelte";
+  import type { AcquisitionDetail, ManualReplacementSearchResult, ReleaseCandidateView } from "$lib/api/generated/model";
+  import {
+    queueManualReplacement,
+    searchManualReplacement,
+    uploadAcquisitionContent,
+  } from "$lib/api/acquisitions";
+  import ReleaseTable from "$lib/components/acquisitions/ReleaseTable.svelte";
+  import StatePlaceholder from "$lib/components/StatePlaceholder.svelte";
+
+  let {
+    entityId,
+    canReplace,
+    canUpload,
+    onStarted,
+    children,
+  }: {
+    entityId: string;
+    canReplace: boolean;
+    canUpload: boolean;
+    onStarted: (detail: AcquisitionDetail) => void | Promise<void>;
+    /** The owning acquisition layout places controls and review in their respective columns. */
+    children?: Snippet<[actions: Snippet, replacementReview: Snippet, reviewOpen: boolean]>;
+  } = $props();
+
+  let review = $state<ManualReplacementSearchResult | null>(null);
+  let reviewOpen = $state(false);
+  let customQuery = $state("");
+  let busy = $state(false);
+  let uploadProgress = $state<number | null>(null);
+  let error = $state<string | null>(null);
+  let uploadInput = $state<HTMLInputElement | null>(null);
+  let searchInput = $state<HTMLInputElement | null>(null);
+
+  async function search(query?: string) {
+    if (busy) return;
+    busy = true;
+    reviewOpen = true;
+    error = null;
+    void tick().then(() => searchInput?.focus());
+    try {
+      review = await searchManualReplacement(entityId, query);
+    } catch (reason) {
+      error = reason instanceof Error ? reason.message : "Failed to search for replacements";
+    } finally {
+      busy = false;
+    }
+  }
+
+  async function queue(candidate: ReleaseCandidateView) {
+    if (busy || !review) return;
+    busy = true;
+    error = null;
+    try {
+      const detail = await queueManualReplacement(entityId, review.searchId, candidate.id);
+      closeReview();
+      await onStarted(detail);
+    } catch (reason) {
+      error = reason instanceof Error ? reason.message : "Failed to queue replacement";
+    } finally {
+      busy = false;
+    }
+  }
+
+  async function upload(event: Event) {
+    const input = event.currentTarget as HTMLInputElement;
+    const files = Array.from(input.files ?? []);
+    if (files.length === 0 || busy) return;
+    busy = true;
+    uploadProgress = 0;
+    error = null;
+    try {
+      const detail = await uploadAcquisitionContent(entityId, files, (value) => (uploadProgress = value));
+      await onStarted(detail);
+    } catch (reason) {
+      error = reason instanceof Error ? reason.message : "Failed to upload content";
+    } finally {
+      busy = false;
+      uploadProgress = null;
+      input.value = "";
+    }
+  }
+
+  function closeReview() {
+    reviewOpen = false;
+    review = null;
+    customQuery = "";
+    error = null;
+  }
+</script>
+
+{#snippet actions()}
+{#if canReplace || canUpload}
+  <div class="manual-actions">
+    <div class="flex flex-wrap items-center gap-control-gap">
+      {#if canReplace}
+        <Button type="button" variant="secondary" disabled={busy} onclick={() => void search()}>
+          <Repeat2 data-icon="inline-start" />
+          Replace
+        </Button>
+      {/if}
+      {#if canUpload}
+        <Button type="button" variant="secondary" disabled={busy} onclick={() => uploadInput?.click()}>
+          <Upload data-icon="inline-start" />
+          Upload content
+        </Button>
+        <input bind:this={uploadInput} type="file" multiple class="hidden" aria-label="Content files" disabled={busy} onchange={upload} />
+      {/if}
+    </div>
+
+    {#if uploadProgress !== null}
+      <div class="upload-progress" role="status" aria-label={`Uploading ${Math.round(uploadProgress * 100)}%`}>
+        <div class="flex items-center justify-between gap-3 text-xs">
+          <span class="flex items-center gap-2 text-text-secondary"><Loader2 class="h-3.5 w-3.5 animate-spin" />Uploading content</span>
+          <span class="font-mono text-text-accent">{Math.round(uploadProgress * 100)}%</span>
+        </div>
+        <Progress value={uploadProgress * 100} aria-label="Upload progress" />
+      </div>
+    {/if}
+    {#if error && !reviewOpen}<p role="alert" class="text-[0.72rem] text-error-text">{error}</p>{/if}
+  </div>
+{/if}
+{/snippet}
+
+{#snippet replacementReview()}
+    {#if reviewOpen}
+      <section class="replacement-review">
+        <div class="flex items-center justify-between gap-3">
+          <div>
+            <h3 class="text-sm font-semibold text-text-primary">Choose a replacement</h3>
+            <p class="text-[0.72rem] text-text-muted">Nothing changes until you select a release.</p>
+          </div>
+          <Button type="button" size="sm" variant="ghost" aria-label="Close replacement review" onclick={closeReview}>
+            <X class="h-3.5 w-3.5" />
+          </Button>
+        </div>
+        <form
+          class="flex flex-col gap-2 sm:flex-row"
+          onsubmit={(event) => {
+            event.preventDefault();
+            void search(customQuery);
+          }}
+        >
+          <SearchInput
+            bind:value={customQuery}
+            bind:element={searchInput}
+            ariaLabel="Custom replacement search term"
+            placeholder="Search replacements"
+            loading={busy}
+            class="min-w-0 flex-1"
+          />
+          <Button type="submit" size="sm" variant="secondary" disabled={busy || !customQuery.trim()} class="gap-1.5">
+            <Search class="h-3.5 w-3.5" />Search term
+          </Button>
+        </form>
+        {#if busy && !review}
+          <StatePlaceholder icon={RefreshCw} title="Searching for replacements" description="Checking indexers without changing the current copy." busy />
+        {:else if review && review.candidates.length > 0}
+          <ReleaseTable candidates={review.candidates} canChoose {busy} onQueue={queue} />
+        {:else if review}
+          <StatePlaceholder icon={Search} title="No replacement releases found" description="Adjust the search term or upload content directly." />
+        {/if}
+        {#if error}<p role="alert" class="text-[0.72rem] text-error-text">{error}</p>{/if}
+      </section>
+    {/if}
+{/snippet}
+
+{#if children}
+  {@render children(actions, replacementReview, reviewOpen)}
+{:else}
+  <div class="manual-actions">
+    {@render actions()}
+    {@render replacementReview()}
+  </div>
+{/if}
+
+<style>
+  .manual-actions { display: grid; gap: 0.75rem; }
+  .upload-progress,
+  .replacement-review {
+    display: grid;
+    gap: 0.75rem;
+    border: 1px solid var(--color-border-subtle);
+    border-radius: var(--radius-sm);
+    background: var(--color-surface-1);
+    padding: 0.8rem;
+  }
+</style>

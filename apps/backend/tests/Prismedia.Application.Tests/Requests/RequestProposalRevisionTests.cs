@@ -1,0 +1,145 @@
+using Prismedia.Application.Requests;
+using Prismedia.Contracts.Plugins;
+using Prismedia.Domain.Entities;
+
+namespace Prismedia.Application.Tests.Requests;
+
+public sealed class RequestProposalRevisionTests {
+    [Fact]
+    public void SemanticallyEqualDictionaryOrderProducesTheSameRevision() {
+        var first = Proposal(
+            new Dictionary<string, string> { ["tmdb"] = "123", ["imdb"] = "tt123" },
+            new Dictionary<string, string> { ["release"] = "2024", ["digital"] = "2024-03-01" });
+        var second = Proposal(
+            new Dictionary<string, string> { ["imdb"] = "tt123", ["tmdb"] = "123" },
+            new Dictionary<string, string> { ["digital"] = "2024-03-01", ["release"] = "2024" });
+
+        Assert.Equal(RequestProposalRevision.Compute(first), RequestProposalRevision.Compute(second));
+    }
+
+    [Fact]
+    public void ChangedNestedChildProducesADifferentRevision() {
+        var original = Proposal(
+            new Dictionary<string, string> { ["tmdb"] = "123" },
+            new Dictionary<string, string> { ["release"] = "2024" });
+        var changed = original with {
+            Children = [original.Children[0] with {
+                Patch = original.Children[0].Patch with { Title = "Changed episode" }
+            }]
+        };
+
+        Assert.NotEqual(RequestProposalRevision.Compute(original), RequestProposalRevision.Compute(changed));
+    }
+
+    [Fact]
+    public void SyntheticEntityIdsDoNotChangeTheReviewedProposalRevision() {
+        var first = Proposal(
+            new Dictionary<string, string> { ["openlibrarywork"] = "OL257943W" },
+            new Dictionary<string, string> { ["published"] = "1996" }) with {
+            TargetEntityId = Guid.NewGuid()
+        };
+        var second = first with {
+            TargetEntityId = Guid.NewGuid(),
+            Children = [first.Children[0] with { TargetEntityId = Guid.NewGuid() }]
+        };
+
+        Assert.Equal(RequestProposalRevision.Compute(first), RequestProposalRevision.Compute(second));
+    }
+
+    [Fact]
+    public void NullPluginProposalCollectionsAreEquivalentToEmptyCollections() {
+        var populated = Proposal(
+            new Dictionary<string, string> { ["openlibrarywork"] = "OL257943W" },
+            new Dictionary<string, string>()) with { Children = [], Relationships = [] };
+        var sparse = populated with { Children = null!, Relationships = null! };
+
+        Assert.Equal(RequestProposalRevision.Compute(populated), RequestProposalRevision.Compute(sparse));
+    }
+
+    [Fact]
+    public void SemanticallyEqualDecimalScaleProducesTheSameRevision() {
+        var reviewed = Proposal(
+            new Dictionary<string, string> { ["tmdb"] = "97546" },
+            new Dictionary<string, string> { ["firstAir"] = "2020-08-14" }) with {
+            Confidence = 1.000m,
+            Images = [new ImageCandidate(
+                "poster",
+                "https://image.tmdb.org/t/p/original/poster.jpg",
+                "tmdb",
+                2.2780m,
+                "en",
+                2000,
+                3000)]
+        };
+        var clientRoundTrip = reviewed with {
+            Confidence = 1m,
+            Images = [reviewed.Images[0] with { Rank = 2.278m }]
+        };
+
+        Assert.Equal(
+            RequestProposalRevision.Compute(reviewed),
+            RequestProposalRevision.Compute(clientRoundTrip));
+    }
+
+    [Fact]
+    public void EntityKindMembersKeepTheirGoldenRevision() {
+        var proposal = Proposal(
+            new Dictionary<string, string> { ["tmdb"] = "123" },
+            new Dictionary<string, string> { ["release"] = "2024" });
+
+        Assert.Equal(
+            "14167ef4f3fc9408528fa399dfd4fa637355fcabe359894933ffcb807592f710",
+            RequestProposalRevision.Compute(proposal));
+    }
+
+    private static EntityMetadataProposal Proposal(
+        IReadOnlyDictionary<string, string> externalIds,
+        IReadOnlyDictionary<string, string> dates) =>
+        new(
+            "root",
+            "cinema-metadata",
+            EntityKind.VideoSeries,
+            1,
+            "external-id",
+            new EntityMetadataPatch(
+                "Series",
+                "Overview",
+                externalIds,
+                [],
+                ["Drama", "Mystery"],
+                null,
+                [],
+                dates,
+                new Dictionary<string, int> { ["runtimeMinutes"] = 45 },
+                new Dictionary<string, int>(),
+                null),
+            [],
+            [
+                new EntityMetadataProposal(
+                    "child",
+                    "cinema-metadata",
+                    EntityKind.VideoEpisode,
+                    1,
+                    "cascade",
+                    new EntityMetadataPatch(
+                        "Episode",
+                        null,
+                        new Dictionary<string, string> { ["tmdb"] = "episode:1" },
+                        [],
+                        [],
+                        null,
+                        [],
+                        new Dictionary<string, string>(),
+                        new Dictionary<string, int>(),
+                        new Dictionary<string, int> { ["episode"] = 1 },
+                        null),
+                    [],
+                    [],
+                    [],
+                    null,
+                    [])
+            ],
+            [],
+            null,
+            []);
+}

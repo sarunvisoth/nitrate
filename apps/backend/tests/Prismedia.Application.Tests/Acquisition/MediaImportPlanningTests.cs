@@ -1,0 +1,1153 @@
+using Prismedia.Application.Acquisition;
+using Prismedia.Domain.Entities;
+
+namespace Prismedia.Application.Tests.Acquisition;
+
+public sealed class MovieImportPlanBuilderTests {
+    private static ImportTemplateContext Context(string title = "The Martian", int? year = 2015) =>
+        new(title, null, year);
+
+    private static ImportCandidateFile File(string path, long size) => new(path, size);
+
+    [Theory]
+    [InlineData(false, false)]
+    [InlineData(true, true)]
+    public void IndividualRecordingChecksArtistWithoutChangingCompilationAlbumMatching(bool requireArtistMatch, bool blocked) {
+        var plan = MusicImportPlanBuilder.Plan([new("01 Other Performer - Song.flac", 100)], "Album Artist", "Compilation",
+            requestedTracks: [new(Guid.NewGuid(), "Song")], requireArtistMatch: requireArtistMatch);
+        Assert.Equal(blocked, plan.Blocked);
+    }
+
+    [Fact]
+    public void PicksTheLargestVideoAndRendersTitleYearLayout() {
+        var plan = MovieImportPlanBuilder.Plan([
+            File("The.Martian.2015.1080p/movie.mkv", 8_000_000_000),
+            File("The.Martian.2015.1080p/extras/featurette.mkv", 300_000_000),
+            File("The.Martian.2015.1080p/release.nfo", 5_000)
+        ], Context());
+
+        Assert.False(plan.Blocked);
+        var item = Assert.Single(plan.Items);
+        Assert.Equal("The.Martian.2015.1080p/movie.mkv", item.SourceRelativePath);
+        Assert.Equal("The Martian (2015)/The Martian (2015).mkv", item.TargetRelativePath);
+    }
+
+    [Fact]
+    public void MissingYearUsesBareTitle() {
+        var plan = MovieImportPlanBuilder.Plan([File("movie.mp4", 100)], Context(year: null));
+
+        Assert.Equal("The Martian/The Martian.mp4", Assert.Single(plan.Items).TargetRelativePath);
+    }
+
+    [Fact]
+    public void SampleFilesAreNeverThePrimary() {
+        var plan = MovieImportPlanBuilder.Plan([
+            File("movie-sample.mkv", 9_000_000_000),
+            File("movie.mkv", 8_000_000_000)
+        ], Context());
+
+        Assert.Equal("movie.mkv", Assert.Single(plan.Items).SourceRelativePath);
+    }
+
+    [Fact]
+    public void OnlySampleNamedVideosStillImportTheLargest() {
+        var plan = MovieImportPlanBuilder.Plan([File("weird.sample.mkv", 700)], Context());
+
+        Assert.False(plan.Blocked);
+        Assert.Equal("weird.sample.mkv", Assert.Single(plan.Items).SourceRelativePath);
+    }
+
+    [Fact]
+    public void TwoFullSizeVideosBlockAsAmbiguous() {
+        var plan = MovieImportPlanBuilder.Plan([
+            File("part1.mkv", 4_000_000_000),
+            File("part2.mkv", 3_900_000_000)
+        ], Context());
+
+        Assert.True(plan.Blocked);
+        Assert.Equal(ImportBlockReason.AmbiguousMultiplePrimaries, plan.BlockReason);
+    }
+
+    [Fact]
+    public void NoVideoFilesBlockAsUnsupported() {
+        var plan = MovieImportPlanBuilder.Plan([File("cover.jpg", 100), File("release.nfo", 10)], Context());
+
+        Assert.True(plan.Blocked);
+        Assert.Equal(ImportBlockReason.NoSupportedPayload, plan.BlockReason);
+    }
+
+    [Fact]
+    public void IllegalTitleCharactersAreSanitized() {
+        var plan = MovieImportPlanBuilder.Plan([File("m.mkv", 1)], Context(title: "Face/Off: Redux"));
+
+        Assert.Equal("Face Off Redux (2015)/Face Off Redux (2015).mkv", Assert.Single(plan.Items).TargetRelativePath);
+    }
+
+    [Fact]
+    public void CustomTemplateFlowsThroughToTheTargetPathAndHintFolder() {
+        var context = Context();
+        var plan = MovieImportPlanBuilder.Plan(
+            [File("The.Martian.2015.1080p/movie.mkv", 8_000_000_000)],
+            context, template: "{Title} [{Quality}]/{Title}.{ext}", quality: "bluray-1080p");
+
+        var item = Assert.Single(plan.Items);
+        Assert.Equal("The Martian [bluray-1080p]/The Martian.mkv", item.TargetRelativePath);
+        // The scan-hint folder helper derives from the same render, so it prefixes the placed path.
+        var folder = MovieImportPlanBuilder.MovieFolderRelative(context, template: "{Title} [{Quality}]/{Title}.{ext}", quality: "bluray-1080p");
+        Assert.Equal("The Martian [bluray-1080p]", folder);
+        Assert.StartsWith(folder + "/", item.TargetRelativePath);
+    }
+}
+
+public sealed class MusicImportPlanBuilderTests {
+    private static ImportCandidateFile File(string path, long size = 1_000) => new(path, size);
+
+    [Fact]
+    public void PlacesTracksUnderArtistAlbumStrippingTheReleaseWrapperFolder() {
+        var plan = MusicImportPlanBuilder.Plan([
+            File("Artist - Album (2020) [FLAC]/01 - One.flac"),
+            File("Artist - Album (2020) [FLAC]/02 - Two.flac")
+        ], "Daft Punk", "Discovery");
+
+        Assert.False(plan.Blocked);
+        Assert.Equal(
+            ["Daft Punk/Discovery/01 - One.flac", "Daft Punk/Discovery/02 - Two.flac"],
+            plan.Items.Select(item => item.TargetRelativePath).ToArray());
+    }
+
+    [Fact]
+    public void DiscSubfoldersArePreserved() {
+        var plan = MusicImportPlanBuilder.Plan([
+            File("Release/CD1/01.flac"),
+            File("Release/CD2/01.flac")
+        ], "Artist", "Album");
+
+        Assert.Equal(
+            ["Artist/Album/CD1/01.flac", "Artist/Album/CD2/01.flac"],
+            plan.Items.Select(item => item.TargetRelativePath).ToArray());
+    }
+
+    [Fact]
+    public void UnixCaseDistinctWrapperFoldersAreNotCollapsedTogether() {
+        if (OperatingSystem.IsWindows()) {
+            return;
+        }
+
+        var plan = MusicImportPlanBuilder.Plan([
+            File("Release/CD1/01.flac"),
+            File("release/CD2/02.flac")
+        ], "Artist", "Album");
+
+        Assert.Equal(
+            [
+                "Artist/Album/Release/CD1/01.flac",
+                "Artist/Album/release/CD2/02.flac"
+            ],
+            plan.Items.Select(item => item.TargetRelativePath).ToArray());
+    }
+
+    [Fact]
+    public void CoverArtIsCarriedFlattenedIntoTheAlbumFolder() {
+        var plan = MusicImportPlanBuilder.Plan([
+            File("Release/01.mp3"),
+            File("Release/artwork/cover.jpg")
+        ], "Artist", "Album");
+
+        Assert.Contains(plan.Items, item => item.TargetRelativePath == "Artist/Album/cover.jpg");
+    }
+
+    [Fact]
+    public void NoAudioFilesBlockAsUnsupported() {
+        var plan = MusicImportPlanBuilder.Plan([File("cover.jpg")], "Artist", "Album");
+
+        Assert.True(plan.Blocked);
+        Assert.Equal(ImportBlockReason.NoSupportedPayload, plan.BlockReason);
+    }
+
+    [Fact]
+    public void ArtistAndAlbumNamesAreSanitized() {
+        Assert.Equal("AC DC/Back In Black", MusicImportPlanBuilder.AlbumFolderRelative("AC/DC", "Back In Black"));
+    }
+
+    [Fact]
+    public void CustomAlbumTemplateFlowsThroughToTrackPathsAndTheHintFolder() {
+        const string template = "{Artist}/{Album} ({Year})";
+        var plan = MusicImportPlanBuilder.Plan([
+            File("Release/01 - One.flac"),
+            File("Release/02 - Two.flac")
+        ], "Daft Punk", "Discovery", template, year: 2001);
+
+        // The album folder helper (the scan hint) matches the folder tracks were placed under.
+        var folder = MusicImportPlanBuilder.AlbumFolderRelative("Daft Punk", "Discovery", template, year: 2001);
+        Assert.Equal("Daft Punk/Discovery (2001)", folder);
+        Assert.All(plan.Items, item => Assert.StartsWith(folder + "/", item.TargetRelativePath));
+        Assert.Equal(
+            ["Daft Punk/Discovery (2001)/01 - One.flac", "Daft Punk/Discovery (2001)/02 - Two.flac"],
+            plan.Items.Select(item => item.TargetRelativePath).ToArray());
+    }
+
+    [Fact]
+    public void CustomAlbumTemplateDropsEmptyYearWhenNoYearIsKnown() {
+        const string template = "{Artist}/{Album} ({Year})";
+
+        var folder = MusicImportPlanBuilder.AlbumFolderRelative("Daft Punk", "Discovery", template);
+
+        Assert.Equal("Daft Punk/Discovery", folder);
+    }
+
+    [Fact]
+    public void RequestedAlbumImportsOnlyFilesThatUniquelyMatchWantedTracks() {
+        var frozenHeart = Guid.NewGuid();
+        var letItGo = Guid.NewGuid();
+        var plan = MusicImportPlanBuilder.Plan([
+            File("Frozen Deluxe/01 - Frozen Heart.flac"),
+            File("Frozen Deluxe/05 - Let It Go.flac"),
+            File("Frozen Deluxe/Disc 2/01 - Let It Go (Demi Lovato Version).flac"),
+            File("Frozen Deluxe/Disc 2/02 - For the First Time in Forever (Karaoke).flac"),
+            File("Frozen Deluxe/cover.jpg")
+        ], "Various Artists", "Frozen", requestedTracks: [
+            new RequestedAudioTrack(frozenHeart, "Frozen Heart", 1),
+            new RequestedAudioTrack(letItGo, "Let It Go", 5)
+        ]);
+
+        Assert.False(plan.Blocked);
+        Assert.Equal(
+            [
+                "Various Artists/Frozen/01 - Frozen Heart.flac",
+                "Various Artists/Frozen/05 - Let It Go.flac",
+                "Various Artists/Frozen/cover.jpg"
+            ],
+            plan.Items.Select(item => item.TargetRelativePath).ToArray());
+    }
+
+    [Fact]
+    public void RequestedAlbumMatchesProviderScoreDecorationWithoutImportingDeluxeExtras() {
+        var plan = MusicImportPlanBuilder.Plan([
+            File("Frozen Deluxe/CD1/11 - Vuelie.flac"),
+            File("Frozen Deluxe/CD1/12 - Elsa and Anna.flac"),
+            File("Frozen Deluxe/CD1/13 - The Trolls.flac"),
+            File("Frozen Deluxe/CD2/01 - For the First Time in Forever (Demo).flac"),
+            File("Frozen Deluxe/CD2/02 - Love Is an Open Door (Demo).flac")
+        ], "Various Artists", "Frozen", requestedTracks: [
+            new RequestedAudioTrack(Guid.NewGuid(), "Vuelie (score)", 10),
+            new RequestedAudioTrack(Guid.NewGuid(), "Elsa and Anna (score)", 11),
+            new RequestedAudioTrack(Guid.NewGuid(), "The Trolls (score)", 12)
+        ]);
+
+        Assert.False(plan.Blocked);
+        Assert.Equal(
+            [
+                "Various Artists/Frozen/11 - Vuelie.flac",
+                "Various Artists/Frozen/12 - Elsa and Anna.flac",
+                "Various Artists/Frozen/13 - The Trolls.flac"
+            ],
+            plan.Items.Select(item => item.TargetRelativePath).ToArray());
+    }
+
+    [Fact]
+    public void RequestedAlbumUsesTrackOrderWithinTheMatchedDiscToResolveDuplicateTitles() {
+        var demiLovatoTrackId = Guid.NewGuid();
+        var heimrTrackId = Guid.NewGuid();
+        var plan = MusicImportPlanBuilder.Plan([
+            File("Frozen Deluxe/CD1/01 - Frozen Heart.mp3"),
+            File("Frozen Deluxe/CD1/05 - Let It Go.mp3"),
+            File("Frozen Deluxe/CD1/09 - Fixer Upper.mp3"),
+            File("Frozen Deluxe/CD1/10 - Let It Go.mp3"),
+            File("Frozen Deluxe/CD1/11 - Vuelie.mp3"),
+            File("Frozen Deluxe/CD1/15 - Heimr Arnadalr.mp3"),
+            File("Frozen Deluxe/CD2/05 - Let It Go.mp3"),
+            File("Frozen Deluxe/CD2/10 - Outtake.mp3"),
+            File("Frozen Deluxe/CD2/15 - Score Demo.mp3")
+        ], "Kristen Anderson-Lopez, Robert Lopez, Christophe Beck", "Frozen", requestedTracks: [
+            new RequestedAudioTrack(Guid.NewGuid(), "Frozen Heart", 0),
+            new RequestedAudioTrack(Guid.NewGuid(), "Let It Go", 4),
+            new RequestedAudioTrack(Guid.NewGuid(), "Fixer Upper", 8),
+            new RequestedAudioTrack(demiLovatoTrackId, "Let It Go (Demi Lovato version)", 9),
+            new RequestedAudioTrack(Guid.NewGuid(), "Vuelie (score)", 10),
+            new RequestedAudioTrack(heimrTrackId, "Heimr Àrnadalr (score)", 14)
+        ]);
+
+        Assert.False(plan.Blocked);
+        Assert.Equal(
+            [
+                "Kristen Anderson-Lopez, Robert Lopez, Christophe Beck/Frozen/01 - Frozen Heart.mp3",
+                "Kristen Anderson-Lopez, Robert Lopez, Christophe Beck/Frozen/05 - Let It Go.mp3",
+                "Kristen Anderson-Lopez, Robert Lopez, Christophe Beck/Frozen/09 - Fixer Upper.mp3",
+                "Kristen Anderson-Lopez, Robert Lopez, Christophe Beck/Frozen/10 - Let It Go.mp3",
+                "Kristen Anderson-Lopez, Robert Lopez, Christophe Beck/Frozen/11 - Vuelie.mp3",
+                "Kristen Anderson-Lopez, Robert Lopez, Christophe Beck/Frozen/15 - Heimr Arnadalr.mp3"
+            ],
+            plan.Items.Select(item => item.TargetRelativePath).ToArray());
+        Assert.Equal(
+            demiLovatoTrackId,
+            Assert.Single(plan.Items, item => item.SourceRelativePath.EndsWith("CD1/10 - Let It Go.mp3")).TargetEntityId);
+        Assert.Equal(
+            heimrTrackId,
+            Assert.Single(plan.Items, item => item.SourceRelativePath.EndsWith("CD1/15 - Heimr Arnadalr.mp3")).TargetEntityId);
+    }
+
+    [Fact]
+    public void RequestedAlbumWithNoMatchingTrackBlocksInsteadOfImportingTheBundleWholesale() {
+        var plan = MusicImportPlanBuilder.Plan([
+            File("Deluxe/01 - Unrequested Bonus.flac")
+        ], "Artist", "Album", requestedTracks: [
+            new RequestedAudioTrack(Guid.NewGuid(), "Wanted Song", 1)
+        ]);
+
+        Assert.True(plan.Blocked);
+        Assert.Equal(ImportBlockReason.NoSupportedPayload, plan.BlockReason);
+    }
+}
+
+public sealed class TvImportPlanBuilderTests {
+    private static ImportCandidateFile File(string path, long size = 1_000_000) => new(path, size);
+
+    [Fact]
+    public void SeasonPackPlacesEachTokenedEpisodeUnderItsSeasonFolder() {
+        var plan = TvImportPlanBuilder.Plan([
+            File("Andor.S01.1080p/Andor.S01E01.1080p.mkv"),
+            File("Andor.S01.1080p/Andor.S01E02.1080p.mkv"),
+            File("Andor.S01.1080p/release.nfo"),
+        ], "Andor", seasonNumber: 1, episodeNumber: null);
+
+        Assert.False(plan.Blocked);
+        Assert.Equal(
+            ["Andor/Season 01/Andor - S01E01.mkv", "Andor/Season 01/Andor - S01E02.mkv"],
+            plan.Items.Select(item => item.TargetRelativePath).ToArray());
+    }
+
+    [Fact]
+    public void CompleteSeriesPackKeepsOnlyTheRequestedSeason() {
+        var plan = TvImportPlanBuilder.Plan([
+            File("pack/Andor.S01E01.mkv"),
+            File("pack/Andor.S02E01.mkv"),
+        ], "Andor", seasonNumber: 1, episodeNumber: null);
+
+        Assert.Equal(
+            ["Andor/Season 01/Andor - S01E01.mkv"],
+            plan.Items.Select(item => item.TargetRelativePath).ToArray());
+    }
+
+    [Fact]
+    public void SeasonPackKeepsOnlyTheRequestedEpisodeForAnEpisodeAcquisition() {
+        var plan = TvImportPlanBuilder.Plan([
+            File("pack/Andor.S01E01.mkv"),
+            File("pack/Andor.S01E02.mkv"),
+            File("pack/Andor.S01E03.mkv"),
+        ], "Andor", seasonNumber: 1, episodeNumber: 2);
+
+        Assert.Equal(
+            ["Andor/Season 01/Andor - S01E02.mkv"],
+            plan.Items.Select(item => item.TargetRelativePath).ToArray());
+    }
+
+    [Fact]
+    public void TokenlessSingleEpisodeFallsBackToTheAcquisitionsUnit() {
+        var plan = TvImportPlanBuilder.Plan(
+            [File("andor.pilot.recode.mkv")], "Andor", seasonNumber: 1, episodeNumber: 5);
+
+        Assert.Equal("Andor/Season 01/Andor - S01E05.mkv", Assert.Single(plan.Items).TargetRelativePath);
+    }
+
+    [Fact]
+    public void TokenlessSeasonPackBlocksInsteadOfGuessingOrder() {
+        var plan = TvImportPlanBuilder.Plan([
+            File("pack/episode one.mkv"),
+            File("pack/episode two.mkv"),
+        ], "Andor", seasonNumber: 1, episodeNumber: null);
+
+        Assert.True(plan.Blocked);
+        Assert.Equal(ImportBlockReason.AmbiguousMultiplePrimaries, plan.BlockReason);
+    }
+
+    [Fact]
+    public void ManualMappingsPlaceTokenlessFilesAtTheirReviewedEpisodes() {
+        var firstTarget = Guid.NewGuid();
+        var secondTarget = Guid.NewGuid();
+        var plan = TvImportPlanBuilder.PlanManualUnits([
+            File("pack/video-a.mp4"),
+            File("pack/video-b.mp4"),
+            File("pack/poster.jpg"),
+        ], [
+            new ManualImportFileMapping("pack/video-a.mp4", firstTarget, 9, 3),
+            new ManualImportFileMapping("pack/video-b.mp4", secondTarget, 9, 1),
+        ], "Sesame Street");
+
+        Assert.False(plan.Blocked);
+        Assert.Equal(
+            [
+                ("pack/video-a.mp4", "Sesame Street/Season 09/Sesame Street - S09E03.mp4"),
+                ("pack/video-b.mp4", "Sesame Street/Season 09/Sesame Street - S09E01.mp4"),
+            ],
+            plan.Units.Select(unit => (unit.SourceRelativePath, unit.TargetRelativePath)).ToArray());
+    }
+
+    [Fact]
+    public void ManualMappingsRejectTwoFilesForTheSameEpisode() {
+        var target = Guid.NewGuid();
+        var plan = TvImportPlanBuilder.PlanManualUnits([
+            File("pack/video-a.mp4"),
+            File("pack/video-b.mp4"),
+        ], [
+            new ManualImportFileMapping("pack/video-a.mp4", target, 9, 1),
+            new ManualImportFileMapping("pack/video-b.mp4", target, 9, 1),
+        ], "Sesame Street");
+
+        Assert.True(plan.Blocked);
+        Assert.Equal(ImportBlockReason.AmbiguousMultiplePrimaries, plan.BlockReason);
+    }
+
+    [Fact]
+    public void ManualMappingsBindSeveralEpisodesToOnePlacedFile() {
+        var firstTarget = Guid.NewGuid();
+        var secondTarget = Guid.NewGuid();
+        var plan = TvImportPlanBuilder.PlanManualUnits([
+            File("pack/shared-video.mp4"),
+        ], [
+            new ManualImportFileMapping("pack/shared-video.mp4", firstTarget, 9, 3),
+            new ManualImportFileMapping("pack/shared-video.mp4", secondTarget, 9, 4),
+        ], "Daniel Tiger's Neighborhood");
+
+        Assert.False(plan.Blocked);
+        var unit = Assert.Single(plan.Units);
+        Assert.Equal("pack/shared-video.mp4", unit.SourceRelativePath);
+        Assert.Equal(3, unit.Episode);
+        Assert.Equal([4], unit.ExtraEpisodes);
+        Assert.Equal(
+            "Daniel Tiger's Neighborhood/Season 09/Daniel Tiger's Neighborhood - S09E03.mp4",
+            unit.TargetRelativePath);
+    }
+
+    [Fact]
+    public void TokenlessSeasonPackMapsUniqueProviderEpisodeTitlesIncludingZeroPadding() {
+        var plan = TvImportPlanBuilder.Plan([
+            File("pack/Sesame Street - Episode 0131 (November 9, 1970).mp4"),
+            File("pack/Sesame Street - Episode 0132 (November 10, 1970).mp4"),
+        ], "Sesame Street", seasonNumber: 2, episodeNumber: null, episodeTitles: [
+            new TvEpisodeTitle(1, "Episode 131", AbsoluteEpisode: 131),
+            new TvEpisodeTitle(2, "Episode 132", AbsoluteEpisode: 132)
+        ]);
+
+        Assert.False(plan.Blocked);
+        Assert.Equal(
+            ["Sesame Street/Season 02/Sesame Street - S02E01.mp4", "Sesame Street/Season 02/Sesame Street - S02E02.mp4"],
+            plan.Items.Select(item => item.TargetRelativePath).ToArray());
+    }
+
+    [Fact]
+    public void TokenlessSeasonPackUsesVerifiedAbsolutePositionsForGenericTitles() {
+        var plan = TvImportPlanBuilder.Plan([
+            File("pack/Sesame Street 1316 Season 11 - American Archive.mp4"),
+            File("pack/Sesame Street 1317 Season 11 - American Archive.mp4"),
+        ], "Sesame Street", seasonNumber: 11, episodeNumber: null, episodeTitles: [
+            new TvEpisodeTitle(1, "Episode 1316", AbsoluteEpisode: 1316),
+            new TvEpisodeTitle(2, "Episode 1317", AbsoluteEpisode: 1317)
+        ]);
+
+        Assert.False(plan.Blocked);
+        Assert.Equal(
+            ["Sesame Street/Season 11/Sesame Street - S11E01.mp4", "Sesame Street/Season 11/Sesame Street - S11E02.mp4"],
+            plan.Items.Select(item => item.TargetRelativePath).ToArray());
+    }
+
+    [Fact]
+    public void AuthoredTitleNumbersDoNotBecomeBareEpisodeIdentifiers() {
+        var inferred = TvImportPlanBuilder.InferEpisode(
+            "pack/Sesame Street 1316 Season 11.mp4",
+            requestedSeason: 11,
+            [new TvEpisodeTitle(1, "1316 Candles")]);
+
+        Assert.Null(inferred);
+    }
+
+    [Fact]
+    public void AbsoluteEpisodeFallbackRejectsAConflictingDeclaredSeason() {
+        var inferred = TvImportPlanBuilder.InferEpisode(
+            "pack/Sesame Street 1316 Season 12.mp4",
+            requestedSeason: 11,
+            [new TvEpisodeTitle(1, "Episode 1316", AbsoluteEpisode: 1316)]);
+
+        Assert.Null(inferred);
+    }
+
+    [Fact]
+    public void InternetArchiveDerivativeYieldsToItsOriginalSibling() {
+        var plan = TvImportPlanBuilder.Plan([
+            File("pack/Sesame Street - Episode 0131 (November 9, 1970).ia.mp4"),
+            File("pack/Sesame Street - Episode 0131 (November 9, 1970).mp4"),
+        ], "Sesame Street", seasonNumber: 2, episodeNumber: null, episodeTitles: [
+            new TvEpisodeTitle(1, "Episode 131", AbsoluteEpisode: 131)
+        ]);
+
+        var item = Assert.Single(plan.Items);
+        Assert.Equal("pack/Sesame Street - Episode 0131 (November 9, 1970).mp4", item.SourceRelativePath);
+        Assert.Equal("Sesame Street/Season 02/Sesame Street - S02E01.mp4", item.TargetRelativePath);
+    }
+
+    [Fact]
+    public void SamplesAndNonVideoFilesAreSkipped() {
+        var plan = TvImportPlanBuilder.Plan([
+            File("pack/Andor.S01E01.sample.mkv"),
+            File("pack/Andor.S01E01.mkv"),
+            File("pack/artwork.jpg"),
+        ], "Andor", seasonNumber: 1, episodeNumber: null);
+
+        Assert.Equal("Andor/Season 01/Andor - S01E01.mkv", Assert.Single(plan.Items).TargetRelativePath);
+    }
+
+    [Fact]
+    public void TvReviewRetentionDistinguishesUnmappedVideosFromSamplesAndKnownDerivatives() {
+        var files = new[] {
+            File("pack/Show.S01E01.mp4"), File("pack/Show.S01E01.ia.mp4"),
+            File("pack/Show.S01E01.sample.mp4"), File("pack/artwork.jpg"),
+            File("pack/Show.S02E01.mp4"), File("pack/unknown.ia.mp4")
+        };
+
+        var retained = TvImportPlanBuilder.UnmappedVideos(files, ["pack/Show.S01E01.mp4"]);
+
+        Assert.Equal(["pack/Show.S02E01.mp4", "pack/unknown.ia.mp4"], retained.Select(file => file.RelativePath).ToArray());
+    }
+
+    [Fact]
+    public void CustomTemplateFlowsThroughToEpisodePathsAndTheSeriesFolderStaysConsistent() {
+        const string template = "{Series}/S{Season:00}/{Series} {Season:00}x{Episode:00} [{Quality}].{ext}";
+        var plan = TvImportPlanBuilder.Plan([
+            File("Andor.S01.1080p/Andor.S01E01.1080p.mkv"),
+            File("Andor.S01.1080p/Andor.S01E02.1080p.mkv"),
+        ], "Andor", seasonNumber: 1, episodeNumber: null, template: template, quality: "webdl-1080p");
+
+        Assert.Equal(
+            ["Andor/S01/Andor 01x01 [webdl-1080p].mkv", "Andor/S01/Andor 01x02 [webdl-1080p].mkv"],
+            plan.Items.Select(item => item.TargetRelativePath).ToArray());
+        // The series-folder hint helper is derived from the same template's first segment.
+        var seriesFolder = TvImportPlanBuilder.SeriesFolderRelative("Andor", template);
+        Assert.Equal("Andor", seriesFolder);
+        Assert.All(plan.Items, item => Assert.StartsWith(seriesFolder + "/", item.TargetRelativePath));
+    }
+
+    [Fact]
+    public void InvalidTemplateDegradesToTheDefaultLayout() {
+        // A wrong-segment-count template must not break placement — it falls back to the default.
+        var plan = TvImportPlanBuilder.Plan(
+            [File("Andor.S01E01.mkv")], "Andor", seasonNumber: 1, episodeNumber: 1, template: "{Series} S{Season:00}E{Episode:00}.{ext}");
+
+        Assert.Equal("Andor/Season 01/Andor - S01E01.mkv", Assert.Single(plan.Items).TargetRelativePath);
+    }
+}
+
+public sealed class ImportTargetResolverTests {
+    [Fact]
+    public void ResolvesRelativeMovesUnderTheLibraryRoot() {
+        var plan = ImportPlan.For([new ImportPlanItem("movie.mkv", "Title (2020)/Title (2020).mkv")]);
+
+        var resolved = ImportTargetResolver.Resolve("/downloads/x", "/library/movies", plan);
+
+        Assert.False(resolved.Blocked);
+        var item = Assert.Single(resolved.Items);
+        Assert.Equal(Path.GetFullPath("/downloads/x/movie.mkv"), item.SourceAbsolutePath);
+        Assert.Equal(Path.GetFullPath("/library/movies/Title (2020)/Title (2020).mkv"), item.TargetAbsolutePath);
+    }
+
+    [Fact]
+    public void TargetsEscapingTheRootAreBlocked() {
+        var plan = ImportPlan.For([new ImportPlanItem("movie.mkv", "../outside/movie.mkv")]);
+
+        var resolved = ImportTargetResolver.Resolve("/downloads/x", "/library/movies", plan);
+
+        Assert.True(resolved.Blocked);
+    }
+}
+
+/// <summary>
+/// Covers the unit pass behind the TV plan (parity with <see cref="TvImportPlanBuilder.Plan"/>) and the
+/// existing-target merges: folder anchoring on the real on-disk tree and the per-file upgrade gate.
+/// </summary>
+public sealed class MediaImportMergeTests {
+    private static ImportCandidateFile File(string path, long size = 1_000_000) => new(path, size);
+
+    [Fact]
+    public void PlanUnitsMirrorsPlanWithParsedUnits() {
+        var files = new[] {
+            File("Andor.S01.1080p/Andor.S01E01.1080p.mkv"),
+            File("Andor.S01.1080p/Andor.S01E02.1080p.mkv"),
+        };
+
+        var plan = TvImportPlanBuilder.Plan(files, "Andor", seasonNumber: 1, episodeNumber: null);
+        var units = TvImportPlanBuilder.PlanUnits(files, "Andor", seasonNumber: 1, episodeNumber: null);
+
+        Assert.False(units.Blocked);
+        Assert.Equal(
+            plan.Items.Select(item => (item.SourceRelativePath, item.TargetRelativePath)).ToArray(),
+            units.Units.Select(unit => (unit.SourceRelativePath, unit.TargetRelativePath)).ToArray());
+        Assert.Equal([(1, 1), (1, 2)], units.Units.Select(unit => (unit.Season, unit.Episode)).ToArray());
+        Assert.Equal("Andor - S01E01.mkv", units.Units[0].FileName);
+    }
+
+    [Fact]
+    public void SeasonFolderSegmentRendersTheTemplatesMiddleSegment() {
+        Assert.Equal("Season 03", TvImportPlanBuilder.SeasonFolderSegment("Andor", 3));
+        Assert.Equal(
+            "S03",
+            TvImportPlanBuilder.SeasonFolderSegment("Andor", 3, "{Series}/S{Season:00}/{Series} {Season:00}x{Episode:00}.{ext}"));
+    }
+
+    // ── TvExistingTargetMerge: per-file collision gate against an existing on-disk series ──
+
+    private static TvSeriesDiskLayout Layout(Dictionary<int, string>? season1Episodes = null) =>
+        new(Guid.NewGuid(), "/media/tv/Andor (2022)", new Dictionary<int, TvSeasonDiskLayout> {
+            [1] = new(Guid.NewGuid(), "/media/tv/Andor (2022)/S01", season1Episodes ?? []),
+        });
+
+    private static IReadOnlyList<TvPlanUnit> Units(params (int Season, int Episode)[] units) =>
+        units.Select(unit => new TvPlanUnit(
+            $"pack/e{unit.Episode}.mkv", unit.Season, unit.Episode,
+            $"Andor/Season {unit.Season:00}/Andor - S{unit.Season:00}E{unit.Episode:00}.mkv")).ToArray();
+
+    private static string SeasonSegment(int season) => $"Season {season:00}";
+
+    [Fact]
+    public void NewEpisodesPlaceIntoTheExistingSeasonFolder() {
+        var merged = TvExistingTargetMerge.Plan(
+            Units((1, 2)), Layout(), SeasonSegment,
+            incomingQualityPosition: (int)VideoQuality.Webdl1080p, incomingRevision: 1, ProperDownloadPolicy.PreferAndUpgrade);
+
+        var item = Assert.Single(merged);
+        Assert.Equal(MergeFileAction.PlaceNew, item.Action);
+        Assert.Equal(Path.Combine("/media/tv/Andor (2022)/S01", "Andor - S01E02.mkv"), item.TargetAbsolutePath);
+    }
+
+    [Fact]
+    public void MissingSeasonGetsATemplateNamedFolderInsideTheExistingSeriesFolder() {
+        var merged = TvExistingTargetMerge.Plan(
+            Units((2, 1)), Layout(), SeasonSegment,
+            incomingQualityPosition: (int)VideoQuality.Webdl1080p, incomingRevision: 1, ProperDownloadPolicy.PreferAndUpgrade);
+
+        Assert.Equal(
+            Path.Combine("/media/tv/Andor (2022)", "Season 02", "Andor - S02E01.mkv"),
+            Assert.Single(merged).TargetAbsolutePath);
+    }
+
+    [Fact]
+    public void StrictlyBetterQualityReplacesTheOwnedFileInPlace() {
+        var layout = Layout(new Dictionary<int, string> { [1] = "/media/tv/Andor (2022)/S01/e01.720p.WEB.mkv" });
+
+        var merged = TvExistingTargetMerge.Plan(
+            Units((1, 1)), layout, SeasonSegment,
+            incomingQualityPosition: (int)VideoQuality.Bluray1080p, incomingRevision: 1, ProperDownloadPolicy.PreferAndUpgrade);
+
+        var item = Assert.Single(merged);
+        Assert.Equal(MergeFileAction.ReplaceUpgrade, item.Action);
+        Assert.Equal("/media/tv/Andor (2022)/S01/e01.720p.WEB.mkv", item.OwnedFilePath);
+        Assert.Equal(item.OwnedFilePath, item.TargetAbsolutePath);
+    }
+
+    [Fact]
+    public void EqualOrWorseQualityIsDropped() {
+        var layout = Layout(new Dictionary<int, string> { [1] = "/media/tv/Andor (2022)/S01/e01.1080p.BluRay.mkv" });
+
+        var merged = TvExistingTargetMerge.Plan(
+            Units((1, 1)), layout, SeasonSegment,
+            incomingQualityPosition: (int)VideoQuality.Webdl1080p, incomingRevision: 1, ProperDownloadPolicy.PreferAndUpgrade);
+
+        Assert.Equal(MergeFileAction.DropNotUpgrade, Assert.Single(merged).Action);
+    }
+
+    [Theory]
+    [InlineData(ProperDownloadPolicy.PreferAndUpgrade, MergeFileAction.ReplaceUpgrade)]
+    [InlineData(ProperDownloadPolicy.DoNotUpgrade, MergeFileAction.DropNotUpgrade)]
+    [InlineData(ProperDownloadPolicy.DoNotPrefer, MergeFileAction.DropNotUpgrade)]
+    public void EqualQualityProperReplacesOnlyUnderThePreferAndUpgradePolicy(ProperDownloadPolicy policy, MergeFileAction expected) {
+        var layout = Layout(new Dictionary<int, string> { [1] = "/media/tv/Andor (2022)/S01/e01.1080p.WEB-DL.mkv" });
+
+        var merged = TvExistingTargetMerge.Plan(
+            Units((1, 1)), layout, SeasonSegment,
+            incomingQualityPosition: (int)VideoQuality.Webdl1080p, incomingRevision: 2, policy);
+
+        Assert.Equal(expected, Assert.Single(merged).Action);
+    }
+
+    [Theory]
+    [InlineData(0, "/media/tv/Andor (2022)/S01/e01.1080p.WEB.mkv")] // incoming unrankable
+    [InlineData(10, "/media/tv/Andor (2022)/S01/Episode 1.mkv")] // owned unrankable
+    public void UnknownQualityOnEitherSideNeverReplaces(int incomingPosition, string ownedPath) {
+        var layout = Layout(new Dictionary<int, string> { [1] = ownedPath });
+
+        var merged = TvExistingTargetMerge.Plan(
+            Units((1, 1)), layout, SeasonSegment, incomingPosition, incomingRevision: 1, ProperDownloadPolicy.PreferAndUpgrade);
+
+        Assert.Equal(MergeFileAction.DropNotUpgrade, Assert.Single(merged).Action);
+    }
+
+    [Fact]
+    public void UpgradeThatChangesTheExtensionIsSurfacedNotSwapped() {
+        var layout = Layout(new Dictionary<int, string> { [1] = "/media/tv/Andor (2022)/S01/e01.720p.WEB.mp4" });
+
+        var merged = TvExistingTargetMerge.Plan(
+            Units((1, 1)), layout, SeasonSegment,
+            incomingQualityPosition: (int)VideoQuality.Bluray2160p, incomingRevision: 1, ProperDownloadPolicy.PreferAndUpgrade);
+
+        Assert.Equal(MergeFileAction.DropFormatChange, Assert.Single(merged).Action);
+    }
+
+    [Fact]
+    public void ConsentedFormatChangeReplacesAGenuineUpgrade() {
+        // The user's explicit "import anyway": the same cross-format upgrade becomes a replace…
+        var layout = Layout(new Dictionary<int, string> { [1] = "/media/tv/Andor (2022)/S01/e01.720p.WEB.mp4" });
+
+        var merged = TvExistingTargetMerge.Plan(
+            Units((1, 1)), layout, SeasonSegment,
+            incomingQualityPosition: (int)VideoQuality.Bluray2160p, incomingRevision: 1, ProperDownloadPolicy.PreferAndUpgrade,
+            allowFormatChange: true);
+
+        Assert.Equal(MergeFileAction.ReplaceUpgrade, Assert.Single(merged).Action);
+    }
+
+    [Fact]
+    public void ConsentedFormatChangeStillNeverReplacesANonUpgrade() {
+        // …but consent to a format change is not consent to a downgrade: quality gating is unchanged.
+        var layout = Layout(new Dictionary<int, string> { [1] = "/media/tv/Andor (2022)/S01/e01.1080p.WEB.mp4" });
+
+        var merged = TvExistingTargetMerge.Plan(
+            Units((1, 1)), layout, SeasonSegment,
+            incomingQualityPosition: (int)VideoQuality.Webdl720p, incomingRevision: 1, ProperDownloadPolicy.PreferAndUpgrade,
+            allowFormatChange: true);
+
+        Assert.Equal(MergeFileAction.DropNotUpgrade, Assert.Single(merged).Action);
+    }
+
+    [Fact]
+    public void MultiEpisodeFileIsHeldWhenCoveredSlotsOwnDifferentFiles() {
+        var layout = Layout(new Dictionary<int, string> {
+            [1] = "/media/tv/Andor (2022)/S01/e01.720p.WEB.mkv",
+            [2] = "/media/tv/Andor (2022)/S01/e02.720p.WEB.mkv",
+        });
+        var unit = new TvPlanUnit(
+            "pack/e01-e02.mkv",
+            1,
+            1,
+            "Andor/Season 01/Andor - S01E01.mkv") {
+            ExtraEpisodes = [2],
+        };
+
+        var merged = TvExistingTargetMerge.Plan(
+            [unit],
+            layout,
+            SeasonSegment,
+            incomingQualityPosition: (int)VideoQuality.Bluray1080p,
+            incomingRevision: 1,
+            ProperDownloadPolicy.PreferAndUpgrade);
+
+        Assert.Equal(MergeFileAction.HoldStructuralConflict, Assert.Single(merged).Action);
+    }
+
+    [Fact]
+    public void MultiEpisodeFileCanUpgradeWhenEveryCoveredSlotSharesOneOwnedFile() {
+        const string shared = "/media/tv/Andor (2022)/S01/e01-e02.720p.WEB.mkv";
+        var layout = Layout(new Dictionary<int, string> { [1] = shared, [2] = shared });
+        var unit = new TvPlanUnit(
+            "pack/e01-e02.mkv",
+            1,
+            1,
+            "Andor/Season 01/Andor - S01E01.mkv") {
+            ExtraEpisodes = [2],
+        };
+
+        var merged = TvExistingTargetMerge.Plan(
+            [unit],
+            layout,
+            SeasonSegment,
+            incomingQualityPosition: (int)VideoQuality.Bluray1080p,
+            incomingRevision: 1,
+            ProperDownloadPolicy.PreferAndUpgrade);
+
+        var item = Assert.Single(merged);
+        Assert.Equal(MergeFileAction.ReplaceUpgrade, item.Action);
+        Assert.Equal(shared, item.OwnedFilePath);
+    }
+
+    [Fact]
+    public void SeparateIncomingFilesAreHeldWhenTheyOverlapOneSharedOwnedFile() {
+        const string shared = "/media/tv/Andor (2022)/S01/e01-e02.720p.WEB.mkv";
+        var layout = Layout(new Dictionary<int, string> { [1] = shared, [2] = shared });
+
+        var merged = TvExistingTargetMerge.Plan(
+            Units((1, 1), (1, 2)),
+            layout,
+            SeasonSegment,
+            incomingQualityPosition: (int)VideoQuality.Bluray1080p,
+            incomingRevision: 1,
+            ProperDownloadPolicy.PreferAndUpgrade);
+
+        Assert.All(merged, item => Assert.Equal(MergeFileAction.HoldStructuralConflict, item.Action));
+    }
+
+    [Fact]
+    public void MissingAndOwnedClaimsAreHeldWhenTheCombinedFileIsNotAnUpgrade() {
+        const string ownedEpisodeTwo = "/media/tv/Andor (2022)/S01/e02.1080p.BluRay.mkv";
+        var layout = Layout(new Dictionary<int, string> { [2] = ownedEpisodeTwo });
+        var unit = new TvPlanUnit(
+            "pack/e01-e02.mkv",
+            1,
+            1,
+            "Andor/Season 01/Andor - S01E01.mkv") {
+            ExtraEpisodes = [2],
+        };
+
+        var merged = TvExistingTargetMerge.Plan(
+            [unit],
+            layout,
+            SeasonSegment,
+            incomingQualityPosition: (int)VideoQuality.Webdl1080p,
+            incomingRevision: 1,
+            ProperDownloadPolicy.PreferAndUpgrade);
+
+        var item = Assert.Single(merged);
+        Assert.Equal(MergeFileAction.HoldStructuralConflict, item.Action);
+        Assert.Equal(ownedEpisodeTwo, item.OwnedFilePath);
+    }
+
+    [Fact]
+    public void NarrowerUpgradeIsHeldWhenTheOwnedFileAlsoSatisfiesAnotherEpisode() {
+        const string shared = "/media/tv/Andor (2022)/S01/e01-e02.720p.WEB.mkv";
+        var layout = Layout(new Dictionary<int, string> { [1] = shared, [2] = shared });
+
+        var merged = TvExistingTargetMerge.Plan(
+            Units((1, 1)),
+            layout,
+            SeasonSegment,
+            incomingQualityPosition: (int)VideoQuality.Bluray1080p,
+            incomingRevision: 1,
+            ProperDownloadPolicy.PreferAndUpgrade);
+
+        var item = Assert.Single(merged);
+        Assert.Equal(MergeFileAction.HoldStructuralConflict, item.Action);
+        Assert.Equal(shared, item.OwnedFilePath);
+    }
+
+    [Fact]
+    public void CombinedFileMayUpgradeOneOwnedSlotWhileAddingAMissingCoveredSlot() {
+        const string ownedEpisodeOne = "/media/tv/Andor (2022)/S01/e01.720p.WEB.mkv";
+        var layout = Layout(new Dictionary<int, string> { [1] = ownedEpisodeOne });
+        var unit = new TvPlanUnit(
+            "pack/e01-e02.mkv",
+            1,
+            1,
+            "Andor/Season 01/Andor - S01E01.mkv") {
+            ExtraEpisodes = [2],
+        };
+
+        var merged = TvExistingTargetMerge.Plan(
+            [unit],
+            layout,
+            SeasonSegment,
+            incomingQualityPosition: (int)VideoQuality.Bluray1080p,
+            incomingRevision: 1,
+            ProperDownloadPolicy.PreferAndUpgrade);
+
+        var item = Assert.Single(merged);
+        Assert.Equal(MergeFileAction.ReplaceUpgrade, item.Action);
+        Assert.Equal(ownedEpisodeOne, item.OwnedFilePath);
+    }
+
+    [Fact]
+    public void UnixCaseDistinctOwnedFilesRemainSeparateStructuralOwners() {
+        if (OperatingSystem.IsWindows()) {
+            return;
+        }
+
+        var layout = Layout(new Dictionary<int, string> {
+            [1] = "/media/tv/Andor (2022)/S01/Episode.mkv",
+            [2] = "/media/tv/Andor (2022)/S01/episode.mkv",
+        });
+        var unit = new TvPlanUnit(
+            "pack/e01-e02.mkv",
+            1,
+            1,
+            "Andor/Season 01/Andor - S01E01.mkv") {
+            ExtraEpisodes = [2],
+        };
+
+        var merged = TvExistingTargetMerge.Plan(
+            [unit],
+            layout,
+            SeasonSegment,
+            incomingQualityPosition: (int)VideoQuality.Bluray1080p,
+            incomingRevision: 1,
+            ProperDownloadPolicy.PreferAndUpgrade);
+
+        Assert.Equal(MergeFileAction.HoldStructuralConflict, Assert.Single(merged).Action);
+    }
+
+    [Fact]
+    public void MultiSeasonPacksRoutePerFileToTheirOwnSeasons() {
+        var layout = Layout(new Dictionary<int, string> { [1] = "/media/tv/Andor (2022)/S01/e01.720p.WEB.mkv" });
+
+        var merged = TvExistingTargetMerge.Plan(
+            Units((1, 1), (1, 2), (2, 1)), layout, SeasonSegment,
+            incomingQualityPosition: (int)VideoQuality.Webdl1080p, incomingRevision: 1, ProperDownloadPolicy.PreferAndUpgrade);
+
+        Assert.Equal(
+            [MergeFileAction.ReplaceUpgrade, MergeFileAction.PlaceNew, MergeFileAction.PlaceNew],
+            merged.Select(item => item.Action).ToArray());
+        Assert.StartsWith(Path.Combine("/media/tv/Andor (2022)", "Season 02"), merged[2].TargetAbsolutePath);
+    }
+
+    // ── MusicExistingTargetMerge: re-anchor onto an existing album folder ──
+
+    [Fact]
+    public void MusicItemsReAnchorOntoTheExistingAlbumFolderAndSkipOwnedTracks() {
+        var items = new[] {
+            new ImportPlanItem("release/01 track.flac", "Artist/Album (2020)/01 track.flac"),
+            new ImportPlanItem("release/Disc 1/02 track.flac", "Artist/Album (2020)/Disc 1/02 track.flac"),
+        };
+        var existing = new HashSet<string>(StringComparer.OrdinalIgnoreCase) { "01 track.flac" };
+
+        var merged = MusicExistingTargetMerge.Plan(items, "/media/music/Artist/Album", existing);
+
+        Assert.Equal(MergeFileAction.DropNotUpgrade, merged[0].Action);
+        Assert.Equal(MergeFileAction.PlaceNew, merged[1].Action);
+        Assert.Equal(Path.Combine("/media/music/Artist/Album", "Disc 1/02 track.flac"), merged[1].TargetAbsolutePath);
+    }
+
+    [Fact]
+    public void MusicMergeSkipsUniqueSoulseekFilenameVariantOfOwnedTrack() {
+        var items = new[] {
+            new ImportPlanItem(
+                "release/01. Find Your Way (Inspired by Avatar_ The Last Airbender ).flac",
+                "Divide Music/Find Your Way/01. Find Your Way (Inspired by Avatar_ The Last Airbender ).flac")
+        };
+        var existing = new HashSet<string>(StringComparer.OrdinalIgnoreCase) {
+            "01 Find Your Way (Inspired by “Avatar - The Last Airbender”) [798 kbps].flac"
+        };
+
+        var merged = MusicExistingTargetMerge.Plan(
+            items,
+            "/media/music/Divide Music/Find Your Way",
+            existing);
+
+        Assert.Equal(MergeFileAction.DropNotUpgrade, Assert.Single(merged).Action);
+    }
+
+    [Fact]
+    public void MusicMergeKeepsAmbiguousRepeatedTrackTitles() {
+        var items = new[] {
+            new ImportPlanItem("release/disc1/01 Intro.flac", "Artist/Album/disc1/01 Intro.flac"),
+            new ImportPlanItem("release/disc2/01 Intro.flac", "Artist/Album/disc2/01 Intro.flac")
+        };
+        var existing = new HashSet<string>(StringComparer.OrdinalIgnoreCase) { "disc0/01 Intro.flac" };
+
+        var merged = MusicExistingTargetMerge.Plan(items, "/media/music/Artist/Album", existing);
+
+        Assert.All(merged, item => Assert.Equal(MergeFileAction.PlaceNew, item.Action));
+    }
+}
+
+/// <summary>
+/// Covers title-based multi-episode alignment: "as aired" packs bundle two provider episodes per file
+/// (the live Clifford pack: the file labeled S01E01 carries the titles of provider episodes 1 AND 2,
+/// S01E02 carries 3+4), so numeric placement would import the wrong content into almost every slot.
+/// </summary>
+public sealed class TvEpisodeTitleAlignmentTests {
+    [Theory]
+    [InlineData("Show SE2 EP083 - Look Out.avi", "Look Out!")]
+    [InlineData("Show SE2 EP083 - Look Out!.avi", "Look Out")]
+    [InlineData("Show SE2 EP083 - Whos There.avi", "Who's There?")]
+    public void TitlePunctuationCanResolveAnEpisodeWithoutAssumingItsAbsoluteNumber(string filename, string title) {
+        var plan = TvImportPlanBuilder.PlanUnits([File(filename)], "Show", seasonNumber: 2,
+            episodeNumber: null, episodeTitles: [new(1, title)]);
+
+        Assert.False(plan.Blocked);
+        Assert.Equal(1, Assert.Single(plan.Units).Episode);
+    }
+
+    [Theory]
+    [InlineData("Show.S03E01.mkv")]
+    [InlineData("Show.S03E01-E02.mkv")]
+    public void ExplicitOtherSeasonCannotFallBackToTheRequestedEpisode(string filename) {
+        var plan = TvImportPlanBuilder.PlanUnits([File(filename)], "Show", seasonNumber: 2, episodeNumber: 1);
+
+        Assert.True(plan.Blocked);
+        Assert.Equal(ImportBlockReason.NoMatchingTvUnit, plan.BlockReason);
+    }
+
+    [Theory]
+    [InlineData(null)]
+    [InlineData(2)]
+    public void ExplicitEpisodeRangesRetainEveryCoveredEpisodeWithoutProviderTitles(int? requestedEpisode) {
+        var plan = TvImportPlanBuilder.PlanUnits([
+            File("Show.S02E01-E02.First.Story.&.Second.Story.480p.WEB-DL.mkv")
+        ], "Show", seasonNumber: 2, episodeNumber: requestedEpisode);
+
+        Assert.False(plan.Blocked);
+        var unit = Assert.Single(plan.Units);
+        Assert.Equal(1, unit.Episode);
+        Assert.Equal([2], unit.ExtraEpisodes);
+    }
+
+    [Fact]
+    public void PartialTitleMetadataDoesNotDiscardExplicitEpisodeCoverage() {
+        var plan = TvImportPlanBuilder.PlanUnits([
+            File("Show.S02E01-E02.First.Story.&.Second.Story.mkv"),
+            File("Show.S02E03-E04.Third.Story.&.Fourth.Story.mkv")
+        ], "Show", seasonNumber: 2, episodeNumber: null, episodeTitles: [
+            new(1, "First Story"), new(3, "Third Story"), new(4, "Fourth Story")
+        ]);
+
+        Assert.False(plan.Blocked);
+        Assert.Equal([2], plan.Units.Single(unit => unit.Episode == 1).ExtraEpisodes);
+        Assert.Equal([4], plan.Units.Single(unit => unit.Episode == 3).ExtraEpisodes);
+    }
+
+    [Theory]
+    [InlineData(2, false)]
+    [InlineData(20, true)]
+    public void OneKnownHalfCannotReidentifyAnEntireExplicitBundle(int knownEpisode, bool shouldBlock) {
+        var plan = TvImportPlanBuilder.PlanUnits([
+            File("Show.S02E01-E02.First.Story.&.Second.Story.mkv")
+        ], "Show", seasonNumber: 2, episodeNumber: null, episodeTitles: [new(knownEpisode, "Second Story")]);
+
+        Assert.Equal(shouldBlock, plan.Blocked);
+        if (!shouldBlock) {
+            var unit = Assert.Single(plan.Units);
+            Assert.Equal(1, unit.Episode);
+            Assert.Equal([2], unit.ExtraEpisodes);
+        }
+    }
+
+    private static readonly TvEpisodeTitle[] CliffordTitles = [
+        new(1, "My Best Friend"),
+        new(2, "Cleo's Fair Share"),
+        new(3, "Special Delivery"),
+        new(4, "Ferry Tale"),
+    ];
+
+    private static ImportCandidateFile File(string path) => new(path, 700_000_000);
+
+    [Fact]
+    public void RealignsBundledEpisodesToTheirProviderNumbersAndRecordsCoverage() {
+        var plan = TvImportPlanBuilder.PlanUnits([
+            File("Pack/Clifford the Big Red Dog_S01E01_MY BEST FRIEND_CLEO'S FAIR SHARE.mkv"),
+            File("Pack/Clifford the Big Red Dog_S01E02_SPECIAL DELIVERY_FERRY TALE.mkv"),
+        ], "Clifford the Big Red Dog", seasonNumber: 1, episodeNumber: null, episodeTitles: CliffordTitles);
+
+        Assert.False(plan.Blocked);
+        var units = plan.Units.OrderBy(unit => unit.Episode).ToArray();
+        // File "E01" anchors at provider episode 1 and covers 2…
+        Assert.Equal(1, units[0].Episode);
+        Assert.Equal([2], units[0].ExtraEpisodes);
+        // …file "E02" is REALIGNED to provider episode 3 (its numeric label lied) and covers 4.
+        Assert.Equal(3, units[1].Episode);
+        Assert.Equal([4], units[1].ExtraEpisodes);
+        Assert.Contains("S01E03", units[1].TargetRelativePath.Replace(" ", ""));
+    }
+
+    [Fact]
+    public void FilesWhoseTailsMatchNoTitleKeepNumericPlacement() {
+        var plan = TvImportPlanBuilder.PlanUnits([
+            File("Pack/Show.S01E05.720p.WEB-DL.mkv"),
+        ], "Show", seasonNumber: 1, episodeNumber: null, episodeTitles: CliffordTitles);
+
+        var unit = Assert.Single(plan.Units);
+        Assert.Equal(5, unit.Episode);
+        Assert.Empty(unit.ExtraEpisodes);
+    }
+
+    [Fact]
+    public void UniqueTitleIdentifierReidentifiesButDoesNotSatisfyTheWrongRequestedEpisode() {
+        var titles = new[] {
+            new TvEpisodeTitle(19, "Super Maria"),
+            new TvEpisodeTitle(20, "The Flood"),
+        };
+
+        var inferred = TvImportPlanBuilder.InferEpisode(
+            "Sesame Street S42E19 The Flood 1080i.ts",
+            requestedSeason: 42,
+            titles);
+        var plan = TvImportPlanBuilder.PlanUnits([
+            File("Sesame Street S42E19 The Flood 1080i.ts"),
+        ], "Sesame Street", seasonNumber: 42, episodeNumber: 19, episodeTitles: titles);
+
+        Assert.Equal((42, 20), inferred);
+        Assert.True(plan.Blocked);
+        Assert.Equal(ImportBlockReason.NoMatchingTvUnit, plan.BlockReason);
+    }
+
+    [Fact]
+    public void DifferentStructuredEpisodeUsesTheMatchingUnitHoldReason() {
+        var plan = TvImportPlanBuilder.PlanUnits([
+            File("Daniel.Tigers.Neighborhood.S00E03.Wont.You.Sing.Along.With.Me.mkv"),
+        ], "Daniel Tiger's Neighborhood", seasonNumber: 0, episodeNumber: 2);
+
+        Assert.True(plan.Blocked);
+        Assert.Equal(ImportBlockReason.NoMatchingTvUnit, plan.BlockReason);
+    }
+
+    [Fact]
+    public void ConflictingRealignmentIsHeldInsteadOfFallingBackToNumeric() {
+        // Both files' tails claim episode 1. Numeric and title evidence disagree for the second file,
+        // so importing either interpretation would risk cataloging the wrong content.
+        var plan = TvImportPlanBuilder.PlanUnits([
+            File("Pack/Show_S01E01_MY BEST FRIEND.mkv"),
+            File("Pack/Show_S01E02_MY BEST FRIEND.mkv"),
+        ], "Show", seasonNumber: 1, episodeNumber: null, episodeTitles: CliffordTitles);
+
+        Assert.True(plan.Blocked);
+        Assert.Equal(ImportBlockReason.AmbiguousMultiplePrimaries, plan.BlockReason);
+    }
+
+    [Fact]
+    public void ConflictingBundledTitleMappingsCannotRevertToDistinctNumericLabels() {
+        var plan = TvImportPlanBuilder.PlanUnits([
+            File("Pack/Show.S01E01.SPECIAL.DELIVERY.FERRY.TALE.mkv"),
+            File("Pack/Show.S01E02.SPECIAL.DELIVERY.FERRY.TALE.mkv"),
+        ], "Show", seasonNumber: 1, episodeNumber: null, episodeTitles: CliffordTitles);
+
+        Assert.True(plan.Blocked);
+        Assert.Equal(ImportBlockReason.AmbiguousMultiplePrimaries, plan.BlockReason);
+        Assert.Empty(plan.Units);
+    }
+
+    [Fact]
+    public void NoTitlesMeansNoRealignment() {
+        var plan = TvImportPlanBuilder.PlanUnits([
+            File("Pack/Show_S01E02_SPECIAL DELIVERY_FERRY TALE.mkv"),
+        ], "Show", seasonNumber: 1, episodeNumber: null);
+
+        Assert.Equal(2, Assert.Single(plan.Units).Episode);
+    }
+
+    [Fact]
+    public void DuplicateNumericEpisodeSlotsAreHeldForManualResolution() {
+        var plan = TvImportPlanBuilder.PlanUnits([
+            File("Pack/Show.S01E02.WEB.mkv"),
+            File("Pack/Show.1x02.BluRay.mp4"),
+        ], "Show", seasonNumber: 1, episodeNumber: null);
+
+        Assert.True(plan.Blocked);
+        Assert.Equal(ImportBlockReason.AmbiguousMultiplePrimaries, plan.BlockReason);
+    }
+
+    [Fact]
+    public void CoveredEpisodeCannotAlsoBeClaimedByASecondPrimaryFile() {
+        var plan = TvImportPlanBuilder.PlanUnits([
+            File("Pack/Show_S01E01_MY BEST FRIEND_CLEO'S FAIR SHARE.mkv"),
+            File("Pack/Show.S01E02.720p.WEB-DL.mkv"),
+        ], "Show", seasonNumber: 1, episodeNumber: null, episodeTitles: CliffordTitles);
+
+        Assert.True(plan.Blocked);
+        Assert.Equal(ImportBlockReason.AmbiguousMultiplePrimaries, plan.BlockReason);
+    }
+
+    [Fact]
+    public void RequestedSeasonImportDropsOtherSeasonsBeforeTitleRealignment() {
+        var plan = TvImportPlanBuilder.PlanUnits([
+            File("Pack/Show_S01E05_SPECIAL DELIVERY.mkv"),
+            File("Pack/Show_S03E01_SPECIAL DELIVERY.mkv"),
+        ], "Show", seasonNumber: 3, episodeNumber: null, episodeTitles: CliffordTitles);
+
+        Assert.False(plan.Blocked);
+        var seasonThree = Assert.Single(plan.Units);
+        Assert.Equal(3, seasonThree.Season);
+        Assert.Equal(3, seasonThree.Episode);
+    }
+}

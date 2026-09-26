@@ -1,0 +1,388 @@
+<script lang="ts">
+  import { Progress, Button } from "@prismedia/ui-svelte";
+  import {
+    Check,
+    ChevronDown,
+    ChevronUp,
+    FolderPlus,
+    Layers,
+    Loader2,
+  } from "@lucide/svelte";
+  import MetadataProposalReview from "$lib/components/review/MetadataProposalReview.svelte";
+  import ReviewSection from "$lib/components/review/ReviewSection.svelte";
+  import IdentifyTargetPreview from "./IdentifyTargetPreview.svelte";
+  import IdentifyChildrenGrid from "./IdentifyChildrenGrid.svelte";
+  import IdentifyNewContainersGrid from "./IdentifyNewContainersGrid.svelte";
+  import IdentifyRejectQueueActions from "./IdentifyRejectQueueActions.svelte";
+  import {
+    buildRootReviewApplyPayload,
+    currentFieldValueForReview,
+    defaultImageSelectionForReview,
+    defaultFieldSelectionForReview,
+    proposalHasField,
+    structuralChildEntities,
+    structuralChildProposals,
+    structuralDescendantProposals,
+    newStructuralContainerProposals,
+    adoptedLocalChildIds,
+    entityKindLabel,
+    relationshipProposals,
+    reviewDiffFieldKeys,
+  } from "$lib/components/identify-review";
+  import {
+    proposalImageUrl,
+    selectedProposalImageUrl,
+    proposalTitle,
+    tagRelationshipForTitle,
+  } from "./identify-review-helpers";
+  import type { EntityMetadataProposal } from "$lib/api/identify-types";
+  import type { EntityCard, EntityDetailCard } from "$lib/api/entities";
+  import { ENTITY_KIND } from "$lib/entities/entity-codes";
+  import { aspectRatioForKind } from "$lib/entities/entity-thumbnail";
+  import { useIdentifyStore } from "./identify-store.svelte";
+
+  interface Props {
+    entity: EntityCard;
+    proposal: EntityMetadataProposal;
+    detail?: EntityDetailCard | null;
+  }
+
+  let { entity, proposal, detail = null }: Props = $props();
+
+  const store = useIdentifyStore();
+
+  const DIFF_FIELD_KEYS = reviewDiffFieldKeys;
+
+  let selectedFields = $state<Record<string, boolean>>({});
+  let selectedImages = $state<Record<string, string | null>>({});
+  let selectedTags = $state<Record<string, boolean>>({});
+  let reviewStateProposalId = $state<string | null>(null);
+
+  const children = $derived(structuralChildProposals(proposal));
+  const relationships = $derived(relationshipProposals(proposal));
+  // De-duplicate tags: the tag chips key their `{#each}` on the tag string, so a
+  // provider repeating a tag would crash rendering with `each_key_duplicate`.
+  const tags = $derived([...new Set(proposal.patch?.tags ?? [])]);
+  const selectedTagCount = $derived(Object.values(selectedTags).filter(Boolean).length);
+  const selectedRelationshipCount = $derived(
+    relationships.filter((relationship) => store.isReviewProposalSelected(relationship.proposalId)).length,
+  );
+  const selectedChildCount = $derived(
+    children.filter((child) => store.isReviewProposalSelected(child.proposalId)).length,
+  );
+  const localChildEntities = $derived(structuralChildEntities(entity.kind, detail?.childrenByKind));
+  const cascadeRunning = $derived(store.cascadeRunning(entity.id));
+  // New containers the provider proposes (volumes, seasons, discs, …) get their own section, and
+  // a child the proposal files inside one moves out of the flat children list — so the review
+  // shows each child migrating into its new home as the cascade resolves it.
+  const newContainers = $derived(newStructuralContainerProposals(proposal));
+  const adoptedIds = $derived(adoptedLocalChildIds(proposal));
+  const remainingChildEntities = $derived(localChildEntities.filter((child) => !adoptedIds.has(child.id)));
+  const newContainersTitle = $derived(`New ${entityKindLabel(newContainers[0]?.targetKind ?? "")}`);
+  const newContainersMeta = $derived.by(() => {
+    const filed = `${adoptedIds.size} of ${localChildEntities.length} filed inside`;
+    return cascadeRunning ? `${filed} · identifying…` : filed;
+  });
+  const matchedRemainingCount = $derived.by(() => {
+    const bound = new Set(
+      structuralDescendantProposals(proposal)
+        .map((node) => node.targetEntityId)
+        .filter((id): id is string => Boolean(id)),
+    );
+    return remainingChildEntities.filter((child) => bound.has(child.id)).length;
+  });
+  const childrenMeta = $derived(
+    cascadeRunning
+      ? "identifying…"
+      : `${matchedRemainingCount} of ${remainingChildEntities.length} matched`,
+  );
+  const nextQueueItem = $derived(store.nextQueueItem(entity.id));
+  const queueIndex = $derived(store.queue.findIndex((item) => item.entityId === entity.id));
+  const prevQueueNavItem = $derived(queueIndex > 0 ? store.queue[queueIndex - 1] : null);
+  const nextQueueNavItem = $derived(queueIndex >= 0 && queueIndex < store.queue.length - 1 ? store.queue[queueIndex + 1] : null);
+  const contextTitle = $derived(proposal.patch?.title?.trim() || entity.title);
+  const showEntitySubtitle = $derived(
+    entity.title.trim().localeCompare(contextTitle, undefined, { sensitivity: "accent" }) !== 0,
+  );
+  const contextPosterUrl = $derived(
+    selectedProposalImageUrl(proposal, ["poster", "thumbnail", "cover"], selectedImages, proposal.proposalId, store)
+    ?? entity.coverUrl
+    ?? proposalImageUrl(proposal, ["poster", "thumbnail", "cover"]),
+  );
+  // Direct videos carry a wide thumbnail/still rather than a portrait poster — show the context
+  // chip in the matching orientation.
+  const contextImageWide = $derived.by(() => {
+    const images = proposal.images ?? [];
+    const hasPoster = images.some((image) => image.kind === "poster" || image.kind === "cover");
+    const hasWide = images.some((image) => image.kind === "thumbnail" || image.kind === "still" || image.kind === "backdrop");
+    return !hasPoster && hasWide;
+  });
+  // Music artists, albums, and tracks use a square cover rather than a portrait poster.
+  const coverIsSquare = $derived(aspectRatioForKind(proposal.targetKind) === "square");
+  const applyProgressPercent = $derived.by(() => {
+    const progress = store.applyProgress;
+    if (!progress) return 0;
+    return Math.max(0, Math.min(100, Math.round((progress.currentIndex / Math.max(progress.total, 1)) * 100)));
+  });
+  const applyProgressPath = $derived((store.applyProgress?.currentPath ?? []).filter((part) => part.trim().length > 0));
+
+  $effect(() => {
+    if (reviewStateProposalId === proposal.proposalId) return;
+    reviewStateProposalId = proposal.proposalId;
+    store.beginProposalReview(proposal);
+    selectedFields = store.getReviewFieldSelections(proposal.proposalId) ??
+      defaultFieldSelectionForReview(proposal);
+    selectedImages = store.getReviewImageSelections(proposal.proposalId) ??
+      defaultImageSelectionForReview(proposal);
+    selectedTags = store.getReviewTagSelections(proposal.proposalId) ??
+      Object.fromEntries((proposal.patch?.tags ?? []).map((tag) => [tag, true]));
+    store.setReviewFieldSelections(proposal.proposalId, selectedFields);
+    store.setReviewImageSelections(proposal.proposalId, selectedImages);
+    store.setReviewTagSelections(proposal.proposalId, selectedTags);
+  });
+
+  // The child tree is resolved by a background cascade that streams onto the queue item. Poll it
+  // while the cascade runs so children fill in; the poll stops itself when the cascade completes.
+  $effect(() => {
+    if (!cascadeRunning) return;
+    // The shared queue poll streams cascade children onto the open review and stops
+    // itself once nothing is in flight, so there is no per-view cleanup to do.
+    store.ensureQueuePolling();
+  });
+
+  function setRelationshipSelected(result: EntityMetadataProposal, selected: boolean) {
+    store.setReviewProposalSelected(result.proposalId, selected);
+    if (result.targetKind === ENTITY_KIND.tag) {
+      setTagSelected(proposalTitle(result), selected);
+    }
+  }
+
+  function setTagSelected(tag: string, selected: boolean) {
+    selectedTags = { ...selectedTags, [tag]: selected };
+    store.setReviewTagSelected(proposal.proposalId, tag, selected);
+    const relationship = tagRelationshipForTitle(tag, relationships);
+    if (relationship) store.setReviewProposalSelected(relationship.proposalId, selected);
+  }
+
+  function setFieldSelected(field: string, selected: boolean) {
+    selectedFields = { ...selectedFields, [field]: selected };
+    store.setReviewFieldSelected(proposal.proposalId, field, selected);
+  }
+
+  function setAllFields(selected: boolean) {
+    selectedFields = {
+      ...selectedFields,
+      ...Object.fromEntries(DIFF_FIELD_KEYS.map((k) => [k, selected ? proposalHasField(proposal, k) : false])),
+    };
+    store.setReviewFieldSelections(proposal.proposalId, selectedFields);
+  }
+
+  function setImageSelected(kind: string, url: string | null) {
+    selectedImages = { ...selectedImages, [kind]: url };
+    store.setReviewImageSelected(proposal.proposalId, kind, url);
+  }
+
+  function handleApply(navigateNext = false) {
+    store.setReviewFieldSelections(proposal.proposalId, selectedFields);
+    store.setReviewImageSelections(proposal.proposalId, selectedImages);
+    store.setReviewTagSelections(proposal.proposalId, selectedTags);
+    const payload = buildRootReviewApplyPayload(proposal, {
+      selectedFields,
+      selectedImages,
+      selectedTags,
+      selectedCascade: store.reviewCascadeSelections,
+      selectedFieldsByProposal: store.reviewFieldSelections,
+      selectedImagesByProposal: store.reviewImageSelections,
+      selectedTagsByProposal: store.reviewTagSelections,
+    });
+    void store.applyProposal(entity, payload.proposal, payload.selectedFields, payload.selectedImages, { navigateNext });
+  }
+
+  function walkChild(child: EntityMetadataProposal) {
+    store.navigateTo({
+      kind: "review-child",
+      entity,
+      proposal: child,
+      parentProposal: proposal,
+      ancestors: [proposal],
+    });
+  }
+</script>
+
+<div class="flex flex-col gap-4">
+  <!-- Preview of what we are identifying (collapsed by default) -->
+  <IdentifyTargetPreview {entity} />
+
+  <MetadataProposalReview
+    {proposal}
+    title={contextTitle}
+    subtitle={showEntitySubtitle ? entity.title : null}
+    kindLabel={entity.kind}
+    posterUrl={contextPosterUrl}
+    imageShape={coverIsSquare ? "square" : contextImageWide ? "wide" : "portrait"}
+    {detail}
+    {selectedFields}
+    {selectedImages}
+    {selectedTags}
+    currentValue={(field) => currentFieldValueForReview(entity, detail, field)}
+    onFieldChange={setFieldSelected}
+    onAllFields={setAllFields}
+    onImageChange={setImageSelected}
+    onTagChange={setTagSelected}
+    onProposalSelected={setRelationshipSelected}
+    isProposalSelected={(proposalId) => store.isReviewProposalSelected(proposalId)}
+    imageSelectionsForProposal={(proposalId) => store.getReviewImageSelections(proposalId)}
+    onActivate={walkChild}
+  />
+
+  <!-- New structure the provider proposes: children below move in here as they resolve -->
+  {#if newContainers.length > 0}
+    <ReviewSection
+      panelId={`new-containers-${proposal.proposalId}`}
+      title={newContainersTitle}
+      meta={newContainersMeta}
+    >
+      {#snippet icon()}
+        <FolderPlus class="h-3.5 w-3.5 text-text-accent" />
+      {/snippet}
+      <IdentifyNewContainersGrid containers={newContainers} onWalkChild={walkChild} />
+    </ReviewSection>
+  {/if}
+
+  <!-- Children: identified one at a time; a child filed into new structure moves up there -->
+  {#if remainingChildEntities.length > 0}
+    <ReviewSection
+      panelId={`children-${proposal.proposalId}`}
+      title="Children"
+      meta={childrenMeta}
+    >
+      {#snippet icon()}
+        <Layers class="h-3.5 w-3.5 text-text-accent" />
+      {/snippet}
+      <IdentifyChildrenGrid {cascadeRunning} childEntities={remainingChildEntities} {proposal} onWalkChild={walkChild} />
+    </ReviewSection>
+  {/if}
+
+  {#if store.applying && store.applyProgress}
+    <div class="apply-progress-row" aria-live="polite">
+      <div class="flex min-w-0 items-center gap-2">
+        <span class="grid h-8 w-8 shrink-0 place-items-center rounded-xs border border-border-accent bg-accent-950/40 text-text-accent shadow-[0_0_18px_rgba(199, 201, 204,0.18)]">
+          <Loader2 class="h-4 w-4 animate-spin" />
+        </span>
+        <div class="min-w-0">
+          <div class="flex min-w-0 flex-wrap items-baseline gap-x-2 gap-y-1">
+            <span class="font-heading text-[0.82rem] font-semibold text-text-primary">Applying metadata</span>
+            <span class="font-mono text-[0.68rem] text-text-muted">
+              {store.applyProgress.currentIndex}/{store.applyProgress.total}
+            </span>
+          </div>
+          <div class="mt-1 flex min-w-0 flex-wrap items-center gap-1.5 text-[0.75rem] text-text-secondary">
+            {#if applyProgressPath.length > 0}
+              {#each applyProgressPath as part, index (index)}
+                {#if index > 0}
+                  <span class="font-mono text-text-disabled">-&gt;</span>
+                {/if}
+                <span class="max-w-[14rem] truncate">{part}</span>
+              {/each}
+            {:else}
+              <span>Preparing accepted proposal</span>
+            {/if}
+          </div>
+        </div>
+      </div>
+      <Progress value={applyProgressPercent} aria-label="Apply progress" class="mt-3 h-1.5" />
+    </div>
+  {/if}
+
+  <!-- Action footer -->
+  <div class="flex flex-col gap-2 py-2 md:flex-row md:items-center md:gap-3">
+    {#if store.queue.length > 1 && queueIndex >= 0}
+      <div class="flex items-center gap-1.5">
+        <Button variant="outline" size="sm"
+          type="button"
+          class="inline-flex h-8 w-8 items-center justify-center disabled:opacity-30 md:h-7 md:w-7"
+          disabled={!prevQueueNavItem}
+          onclick={() => prevQueueNavItem && store.reviewQueueItem(prevQueueNavItem)}
+          aria-label="Previous queue item"
+        >
+          <ChevronUp class="h-3.5 w-3.5" />
+        </Button>
+        <span class="font-mono text-[0.72rem] text-text-muted">
+          {queueIndex + 1}/{store.queue.length}
+        </span>
+        <Button variant="outline" size="sm"
+          type="button"
+          class="inline-flex h-8 w-8 items-center justify-center disabled:opacity-30 md:h-7 md:w-7"
+          disabled={!nextQueueNavItem}
+          onclick={() => nextQueueNavItem && store.reviewQueueItem(nextQueueNavItem)}
+          aria-label="Next queue item"
+        >
+          <ChevronDown class="h-3.5 w-3.5" />
+        </Button>
+      </div>
+    {/if}
+
+    <span class="hidden font-mono text-[0.7rem] text-text-muted md:inline">
+      {Object.values(selectedFields).filter(Boolean).length} fields
+      · {Object.values(selectedImages).filter(Boolean).length} imgs
+      · {selectedRelationshipCount} rels
+      · {selectedTagCount} tags
+      · {selectedChildCount} children
+    </span>
+    <div class="hidden flex-1 md:block"></div>
+
+    {#if cascadeRunning}
+      <span class="font-mono text-[0.7rem] text-text-muted">Identifying children… Accept unlocks when finished</span>
+    {/if}
+
+    <!-- Review actions: full-width stacked on mobile -->
+    <div class="flex flex-col gap-2 md:flex-row md:items-center md:gap-3" data-testid="identify-proposal-actions">
+      <IdentifyRejectQueueActions entityId={entity.id} showNext={Boolean(nextQueueItem)} disabled={store.applying} />
+      <div class="flex flex-col gap-2 md:flex-row md:gap-3">
+        <Button variant="default" size="sm"
+          type="button"
+          class="inline-flex h-10 items-center justify-center gap-1.5 px-3 text-[0.78rem] disabled:cursor-not-allowed disabled:opacity-40 md:h-9"
+          disabled={store.applying || cascadeRunning}
+          onclick={() => handleApply(false)}
+        >
+          {#if store.applying}
+            <Loader2 class="h-4 w-4 animate-spin" />
+          {:else}
+            <Check class="h-4 w-4" />
+          {/if}
+          Accept
+        </Button>
+        {#if nextQueueItem}
+          <Button variant="outline" size="sm"
+            type="button"
+            class="inline-flex h-10 items-center justify-center gap-1.5 px-3 text-[0.78rem] disabled:cursor-not-allowed disabled:opacity-40 md:h-9"
+
+            disabled={store.applying || cascadeRunning}
+            onclick={() => handleApply(true)}
+          >
+            {#if store.applying}
+              <Loader2 class="h-4 w-4 animate-spin" />
+            {:else}
+              <Check class="h-4 w-4" />
+            {/if}
+            Accept and Next
+          </Button>
+        {/if}
+      </div>
+    </div>
+  </div>
+</div>
+
+<style>
+  .apply-progress-row {
+    width: 100%;
+    border: 1px solid rgba(199, 201, 204, 0.28);
+    border-radius: var(--radius-sm);
+    background:
+      linear-gradient(135deg, rgba(199, 201, 204, 0.12), rgba(150, 153, 161, 0.05)),
+      rgba(20, 20, 22, 0.86);
+    box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.04), 0 0 26px rgba(199, 201, 204, 0.08);
+    padding: 0.875rem;
+  }
+
+</style>

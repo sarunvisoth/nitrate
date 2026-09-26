@@ -1,0 +1,115 @@
+using Microsoft.EntityFrameworkCore;
+using Prismedia.Application.Acquisition;
+using Prismedia.Domain.Entities;
+using Prismedia.Infrastructure.Acquisition;
+using Prismedia.Infrastructure.Persistence;
+using Prismedia.Infrastructure.Persistence.Entities;
+
+namespace Prismedia.Infrastructure.Tests;
+
+/// <summary>Acquisition profiles inherit visibility from the library root they import into.</summary>
+public sealed class EfBookAcquisitionProfileStoreVisibilityTests {
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public async Task FormatChangePolicyPersistsAndResolvesForEpisodeProfiles(bool enabled) {
+        await using var database = await PostgresTestDatabase.CreateAsync();
+        Guid profileId;
+        await using (var db = database.CreateContext()) {
+            var root = Root(SfwRootId, "Video", false, DateTimeOffset.UtcNow);
+            db.LibraryRoots.Add(root);
+            await db.SaveChangesAsync();
+            var row = Profile("Television", root.Id, DateTimeOffset.UtcNow);
+            Assert.True(row.AllowFormatChange);
+            row.Kind = EntityKind.VideoSeries;
+            row.IsDefault = true;
+            row.AllowFormatChange = enabled;
+            profileId = row.Id;
+            db.BookAcquisitionProfiles.Add(row);
+            await db.SaveChangesAsync();
+        }
+        await using (var db = database.CreateContext()) {
+            var store = new EfBookAcquisitionProfileStore(db);
+            Assert.Equal(enabled, (await store.GetAsync(profileId, default))!.AllowFormatChange);
+            Assert.Equal(enabled, (await store.GetRulesAsync(profileId, EntityKind.VideoEpisode, default)).AllowFormatChange);
+            Assert.Equal(enabled, (await store.GetRulesAsync(null, EntityKind.VideoSeason, default)).AllowFormatChange);
+            Assert.True((await store.GetRulesAsync(null, EntityKind.Movie, default)).AllowFormatChange);
+        }
+    }
+
+    [Fact]
+    public async Task MissingProfileRetainsTheRequestedAcquisitionKind() {
+        await using var db = new PrismediaDbContext(
+            new DbContextOptionsBuilder<PrismediaDbContext>()
+                .UseInMemoryDatabase($"profile-default-kind-{Guid.NewGuid():N}")
+                .Options);
+
+        var rules = await new EfBookAcquisitionProfileStore(db)
+            .GetRulesAsync(profileId: null, kind: EntityKind.Movie, cancellationToken: CancellationToken.None);
+
+        Assert.Equal(EntityKind.Movie, rules.Kind);
+    }
+
+    [Fact]
+    public async Task SfwModeOmitsProfilesThatTargetNsfwLibraries() {
+        await using var db = await SeedAsync();
+        var store = new EfBookAcquisitionProfileStore(db);
+
+        var profiles = await store.ListAsync(hideNsfw: true, allowedRootIds: null, CancellationToken.None);
+
+        Assert.Equal(["SFW profile"], profiles.Select(profile => profile.DisplayName).ToArray());
+    }
+
+    [Fact]
+    public async Task ProfileListIncludesOnlyLibrariesGrantedToTheCurrentUser() {
+        await using var db = await SeedAsync();
+        var store = new EfBookAcquisitionProfileStore(db);
+
+        var profiles = await store.ListAsync(
+            hideNsfw: false,
+            allowedRootIds: new HashSet<Guid> { SfwRootId },
+            CancellationToken.None);
+
+        Assert.Equal(["SFW profile"], profiles.Select(profile => profile.DisplayName).ToArray());
+    }
+
+    private static readonly Guid SfwRootId = Guid.Parse("11111111-1111-1111-1111-111111111111");
+    private static readonly Guid NsfwRootId = Guid.Parse("22222222-2222-2222-2222-222222222222");
+
+    private static async Task<PrismediaDbContext> SeedAsync() {
+        var db = new PrismediaDbContext(
+            new DbContextOptionsBuilder<PrismediaDbContext>()
+                .UseInMemoryDatabase($"profile-visibility-{Guid.NewGuid():N}")
+                .Options);
+        var now = DateTimeOffset.UtcNow;
+        db.LibraryRoots.AddRange(
+            Root(SfwRootId, "SFW", isNsfw: false, now),
+            Root(NsfwRootId, "NSFW", isNsfw: true, now));
+        db.BookAcquisitionProfiles.AddRange(
+            Profile("SFW profile", SfwRootId, now),
+            Profile("NSFW profile", NsfwRootId, now));
+        await db.SaveChangesAsync();
+        return db;
+    }
+
+    private static LibraryRootRow Root(Guid id, string label, bool isNsfw, DateTimeOffset now) => new() {
+        Id = id,
+        Path = $"/media/{label.ToLowerInvariant()}",
+        Label = label,
+        Enabled = true,
+        ScanBooks = true,
+        IsNsfw = isNsfw,
+        CreatedAt = now,
+        UpdatedAt = now
+    };
+
+    private static BookAcquisitionProfileRow Profile(string name, Guid targetRootId, DateTimeOffset now) => new() {
+        Id = Guid.NewGuid(),
+        Kind = EntityKind.Book,
+        DisplayName = name,
+        TargetLibraryRootId = targetRootId,
+        PathTemplate = MediaNamingTemplates.BookDefault,
+        CreatedAt = now,
+        UpdatedAt = now
+    };
+}

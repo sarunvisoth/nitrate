@@ -1,0 +1,85 @@
+using Prismedia.Domain.Entities;
+
+namespace Prismedia.Contracts.Entities;
+
+/// <summary>
+/// Request body for setting or clearing an entity rating.
+/// </summary>
+/// <param name="Value">Rating value from 0 through 5, or null to clear the rating.</param>
+public sealed record RatingUpdateRequest(int? Value);
+
+/// <summary>
+/// Request body for partially updating shared entity flags.
+/// </summary>
+/// <param name="IsFavorite">Optional favorite flag value.</param>
+/// <param name="IsNsfw">Optional NSFW flag value.</param>
+/// <param name="IsOrganized">Optional organized/reviewed flag value.</param>
+public sealed record EntityFlagsUpdateRequest(
+    bool? IsFavorite,
+    bool? IsNsfw,
+    bool? IsOrganized);
+
+/// <summary>
+/// Request body for updating time-based consumption state.
+/// All fields are optional — omitted fields leave the existing value unchanged.
+/// </summary>
+/// <param name="PositionSeconds">Current time-based position to resume from.</param>
+/// <param name="ActivitySeconds">Active seconds to add to the cached total and local-day bucket.</param>
+/// <param name="Completed">When true, marks the entity as completed; when false, clears completion.</param>
+public sealed record ConsumptionUpdateRequest(
+    double? PositionSeconds,
+    double? ActivitySeconds,
+    bool? Completed,
+    int? UtcOffsetMinutes = null);
+
+/// <summary>
+/// Request body for recording an explicit consumption-history event.
+/// </summary>
+/// <param name="Kind">Consumption event kind to record.</param>
+/// <param name="OccurredAt">Optional timestamp; defaults to the server clock when omitted.</param>
+/// <param name="PositionSeconds">Optional playback position associated with the event.</param>
+/// <param name="DurationSeconds">Optional entity duration associated with the event.</param>
+public sealed record ConsumptionEventCreateRequest(
+    ConsumptionEventKind Kind,
+    DateTimeOffset? OccurredAt,
+    double? PositionSeconds,
+    double? DurationSeconds,
+    string? SessionId = null);
+
+/// <summary>
+/// Request body for recording non-time progress such as a reading cursor.
+/// </summary>
+/// <param name="CurrentEntityId">Current child entity, such as a chapter identifier.</param>
+/// <param name="Unit">Unit being tracked, such as page or item.</param>
+/// <param name="Index">Zero-based position within the tracked unit.</param>
+/// <param name="Total">Total number of tracked units available.</param>
+/// <param name="Mode">Optional reader/viewing mode associated with the progress.</param>
+/// <param name="Completed">When true, marks the progress complete; when false, clears completion in place. Independent of the cursor.</param>
+/// <param name="Reset">When true, resets the cursor and independent consumed coverage to the supplied start position and clears completion.</param>
+/// <param name="Location">Optional format-specific resume locator (e.g. an EPUB CFI) stored alongside the index.</param>
+/// <param name="ActivitySeconds">Optional active time since the client's preceding heartbeat.</param>
+/// <param name="ActivityKind">Viewing, listening, or reading mode for <paramref name="ActivitySeconds"/>.</param>
+/// <param name="UtcOffsetMinutes">Client wall-clock offset used to choose the daily activity bucket.</param>
+public sealed record EntityProgressUpdateRequest(
+    Guid CurrentEntityId,
+    ProgressUnit Unit,
+    int Index,
+    int Total,
+    ReaderMode? Mode,
+    bool? Completed,
+    bool Reset = false,
+    string? Location = null,
+    double? ActivitySeconds = null,
+    ConsumptionActivityKind? ActivityKind = null,
+    int? UtcOffsetMinutes = null);
+
+/// <summary>
+/// Request body for creating or updating a timeline marker.
+/// </summary>
+/// <param name="Title">Human-readable marker label.</param>
+/// <param name="Seconds">Marker start time in seconds.</param>
+/// <param name="EndSeconds">Optional marker end time in seconds.</param>
+public sealed record EntityMarkerWriteRequest(
+    string Title,
+    double Seconds,
+    double? EndSeconds);

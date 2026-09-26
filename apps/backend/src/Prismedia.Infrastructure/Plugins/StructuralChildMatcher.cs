@@ -1,0 +1,360 @@
+using System.Globalization;
+using System.Text;
+using Prismedia.Contracts.Plugins;
+using Prismedia.Domain.Entities;
+
+namespace Prismedia.Infrastructure.Plugins;
+
+internal static class StructuralChildMatcher {
+    public static EntityMetadataProposal? FindProviderChild(
+        StructuralLocalChild localChild,
+        IReadOnlyList<EntityMetadataProposal> providerChildren,
+        ISet<int> usedProviderIndexes,
+        bool cautious) {
+        var bestIndex = -1;
+        var bestScore = 0;
+        for (var index = 0; index < providerChildren.Count; index++) {
+            if (usedProviderIndexes.Contains(index)) {
+                continue;
+            }
+
+            var score = ScoreLocalToProvider(localChild, providerChildren[index], cautious);
+            if (score > bestScore) {
+                bestIndex = index;
+                bestScore = score;
+            }
+        }
+
+        if (bestIndex < 0) {
+            return null;
+        }
+
+        usedProviderIndexes.Add(bestIndex);
+        return providerChildren[bestIndex];
+    }
+
+    public static StructuralLocalChild? FindLocalChild(
+        EntityMetadataProposal providerChild,
+        IReadOnlyList<StructuralLocalChild> localChildren,
+        ISet<Guid> usedLocalEntityIds,
+        bool cautious) {
+        StructuralLocalChild? bestChild = null;
+        var bestScore = 0;
+        foreach (var localChild in localChildren) {
+            if (usedLocalEntityIds.Contains(localChild.EntityId)) {
+                continue;
+            }
+
+            var score = ScoreLocalToProvider(localChild, providerChild, cautious);
+            if (score > bestScore) {
+                bestChild = localChild;
+                bestScore = score;
+            }
+        }
+
+        if (bestChild is null) {
+            return null;
+        }
+
+        usedLocalEntityIds.Add(bestChild.EntityId);
+        return bestChild;
+    }
+
+    public static bool IsSameLocalAndProviderChild(
+        StructuralLocalChild localChild,
+        EntityMetadataProposal providerChild,
+        bool cautious = false) =>
+        ScoreLocalToProvider(localChild, providerChild, cautious) > 0;
+
+    public static bool IsSameProposalChild(EntityMetadataProposal left, EntityMetadataProposal right) {
+        if (left.TargetKind != right.TargetKind) {
+            return false;
+        }
+
+        if (left.TargetEntityId is { } leftId && right.TargetEntityId is { } rightId) {
+            return leftId == rightId;
+        }
+
+        var leftSortOrder = StructuralSortOrder(left);
+        var rightSortOrder = StructuralSortOrder(right);
+        if (leftSortOrder is not null || rightSortOrder is not null) {
+            return leftSortOrder is not null &&
+                rightSortOrder is not null &&
+                leftSortOrder == rightSortOrder;
+        }
+
+        return TitleCompatibility(left.Patch.Title, right.Patch.Title) == StructuralTitleCompatibility.Exact;
+    }
+
+    public static int? StructuralSortOrder(EntityMetadataProposal child) =>
+        EntityMetadataPositionRules.SortOrderFor(
+            child.TargetKind.ToCode(),
+            EntityMetadataPositionRules.Normalize(child.Patch.Positions));
+
+    public static bool IsCompatibleStructuralKind(string localKind, EntityKind proposalKind) =>
+        localKind == proposalKind.ToCode();
+
+    private static int ScoreLocalToProvider(
+        StructuralLocalChild localChild,
+        EntityMetadataProposal providerChild,
+        bool cautious) {
+        if (!IsCompatibleStructuralKind(localChild.KindCode, providerChild.TargetKind)) {
+            return 0;
+        }
+
+        var providerSortOrder = EntityMetadataPositionRules.SortOrderFor(
+            localChild.KindCode,
+            EntityMetadataPositionRules.Normalize(providerChild.Patch.Positions));
+        var numbersMatch = localChild.SortOrder is { } localSortOrder &&
+            providerSortOrder is { } matchedSortOrder &&
+            localSortOrder == matchedSortOrder;
+        var titleCompatibility = TitleCompatibility(localChild.Title, providerChild.Patch.Title);
+        var titlesCompatible = titleCompatibility != StructuralTitleCompatibility.None;
+        if (providerChild.TargetEntityId is { } targetEntityId && targetEntityId == localChild.EntityId) {
+            return !titlesCompatible && HasUsefulTitle(localChild.Title) && HasUsefulTitle(providerChild.Patch.Title)
+                ? 0
+                : 100;
+        }
+
+        if (titlesCompatible && numbersMatch) {
+            return 90;
+        }
+
+        if (titleCompatibility == StructuralTitleCompatibility.Exact) {
+            return cautious ? 80 : 50;
+        }
+
+        if (titleCompatibility == StructuralTitleCompatibility.Contains) {
+            return cautious ? 70 : 45;
+        }
+
+        if (!numbersMatch) {
+            return 0;
+        }
+
+        return cautious && HasUsefulTitle(localChild.Title) && HasUsefulTitle(providerChild.Patch.Title)
+            ? 0
+            : 40;
+    }
+
+    private static StructuralTitleCompatibility TitleCompatibility(string? left, string? right) {
+        var leftTokens = NormalizeTitleTokens(left);
+        var rightTokens = NormalizeTitleTokens(right);
+        if (leftTokens.Length == 0 || rightTokens.Length == 0) {
+            return StructuralTitleCompatibility.None;
+        }
+
+        if (leftTokens.SequenceEqual(rightTokens, StringComparer.OrdinalIgnoreCase)) {
+            return StructuralTitleCompatibility.Exact;
+        }
+
+        if (ContainsTokenSequence(leftTokens, rightTokens) || ContainsTokenSequence(rightTokens, leftTokens)) {
+            return StructuralTitleCompatibility.Contains;
+        }
+
+        return HasTinyTokenDifference(leftTokens, rightTokens)
+            ? StructuralTitleCompatibility.TinyDifference
+            : StructuralTitleCompatibility.None;
+    }
+
+    private static bool HasUsefulTitle(string? value) {
+        var tokens = NormalizeTitleTokens(value);
+        return tokens.Length > 0 && !IsGenericStructuralTitle(tokens);
+    }
+
+    internal static string[] NormalizeTitleTokens(string? value) {
+        if (string.IsNullOrWhiteSpace(value)) {
+            return [];
+        }
+
+        var decomposed = value.Normalize(NormalizationForm.FormD);
+        var normalized = new StringBuilder(decomposed.Length);
+        for (var index = 0; index < decomposed.Length; index++) {
+            var character = decomposed[index];
+            if (char.IsLetterOrDigit(character)) {
+                normalized.Append(character);
+                continue;
+            }
+
+            if (IsDiacritic(character) || IsIntraWordApostrophe(decomposed, index)) {
+                continue;
+            }
+
+            normalized.Append(character == '&' ? " and " : " ");
+        }
+
+        return normalized
+            .ToString()
+            .Split((char[]?)null, StringSplitOptions.RemoveEmptyEntries)
+            .Select(NormalizeNumericToken)
+            .ToArray();
+    }
+
+    /// <summary>
+    /// Compares structural numbers by value rather than folder formatting: <c>Season 06</c> and
+    /// <c>Season 6</c> describe the same season. Trimming instead of parsing avoids overflow for an
+    /// unexpectedly long numeric token while preserving an all-zero token as canonical <c>0</c>.
+    /// </summary>
+    private static string NormalizeNumericToken(string token) {
+        if (!token.All(char.IsDigit)) {
+            return token;
+        }
+
+        var normalized = token.TrimStart('0');
+        return normalized.Length == 0 ? "0" : normalized;
+    }
+
+    private static bool IsDiacritic(char character) =>
+        char.GetUnicodeCategory(character) is
+            UnicodeCategory.NonSpacingMark or
+            UnicodeCategory.SpacingCombiningMark or
+            UnicodeCategory.EnclosingMark;
+
+    private static bool IsIntraWordApostrophe(string value, int index) =>
+        value[index] is '\'' or '’' or 'ʼ' or '＇' &&
+        index > 0 &&
+        index < value.Length - 1 &&
+        char.IsLetterOrDigit(value[index - 1]) &&
+        char.IsLetterOrDigit(value[index + 1]);
+
+    private static bool ContainsTokenSequence(string[] haystack, string[] needle) {
+        if (needle.Length == 0 || needle.Length > haystack.Length) {
+            return false;
+        }
+
+        for (var start = 0; start <= haystack.Length - needle.Length; start++) {
+            var matches = true;
+            for (var offset = 0; offset < needle.Length; offset++) {
+                if (!haystack[start + offset].Equals(needle[offset], StringComparison.OrdinalIgnoreCase)) {
+                    matches = false;
+                    break;
+                }
+            }
+
+            if (matches) {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    private static bool HasTinyTokenDifference(string[] leftTokens, string[] rightTokens) {
+        if (leftTokens.Length != rightTokens.Length || leftTokens.Length < 2) {
+            return false;
+        }
+
+        var differences = 0;
+        for (var index = 0; index < leftTokens.Length; index++) {
+            if (leftTokens[index].Equals(rightTokens[index], StringComparison.OrdinalIgnoreCase)) {
+                continue;
+            }
+
+            differences++;
+            if (differences > 1 || !IsTinyTokenDifference(leftTokens[index], rightTokens[index])) {
+                return false;
+            }
+        }
+
+        return differences == 1;
+    }
+
+    private static bool IsTinyTokenDifference(string left, string right) {
+        if (left.Length < 4 || right.Length < 4) {
+            return false;
+        }
+
+        return BoundedEditDistance(left, right, maxDistance: 2) <= 2;
+    }
+
+    private static int BoundedEditDistance(string left, string right, int maxDistance) {
+        if (Math.Abs(left.Length - right.Length) > maxDistance) {
+            return maxDistance + 1;
+        }
+
+        var previous = new int[right.Length + 1];
+        var current = new int[right.Length + 1];
+        for (var column = 0; column <= right.Length; column++) {
+            previous[column] = column;
+        }
+
+        for (var row = 1; row <= left.Length; row++) {
+            current[0] = row;
+            var rowBest = current[0];
+            for (var column = 1; column <= right.Length; column++) {
+                var substitutionCost = char.ToUpperInvariant(left[row - 1]) == char.ToUpperInvariant(right[column - 1]) ? 0 : 1;
+                current[column] = Math.Min(
+                    Math.Min(previous[column] + 1, current[column - 1] + 1),
+                    previous[column - 1] + substitutionCost);
+                rowBest = Math.Min(rowBest, current[column]);
+            }
+
+            if (rowBest > maxDistance) {
+                return maxDistance + 1;
+            }
+
+            (previous, current) = (current, previous);
+        }
+
+        return previous[right.Length];
+    }
+
+    private static bool IsGenericStructuralTitle(string[] tokens) {
+        var sawStructuralNumber = false;
+        foreach (var token in tokens.Select(CleanTitleToken).Where(token => token.Length > 0)) {
+            if (IsStructuralNumberToken(token)) {
+                sawStructuralNumber = true;
+                continue;
+            }
+
+            if (IsGenericStructuralWord(token)) {
+                continue;
+            }
+
+            return false;
+        }
+
+        return sawStructuralNumber;
+    }
+
+    private static string CleanTitleToken(string token) =>
+        token.Trim('.', ',', ':', ';', '-', '_', '[', ']', '(', ')');
+
+    private static bool IsStructuralNumberToken(string token) =>
+        token.All(char.IsDigit) || LooksLikeSeasonEpisodeToken(token);
+
+    private static bool LooksLikeSeasonEpisodeToken(string token) {
+        if (token.Length < 4 || token[0] is not ('s' or 'S')) {
+            return false;
+        }
+
+        var episodeMarker = token.IndexOf('e', StringComparison.OrdinalIgnoreCase);
+        return episodeMarker > 1 &&
+            episodeMarker < token.Length - 1 &&
+            token[1..episodeMarker].All(char.IsDigit) &&
+            token[(episodeMarker + 1)..].All(char.IsDigit);
+    }
+
+    private static bool IsGenericStructuralWord(string token) =>
+        token.Equals("local", StringComparison.OrdinalIgnoreCase) ||
+        token.Equals("episode", StringComparison.OrdinalIgnoreCase) ||
+        token.Equals("ep", StringComparison.OrdinalIgnoreCase) ||
+        token.Equals("season", StringComparison.OrdinalIgnoreCase) ||
+        token.Equals("series", StringComparison.OrdinalIgnoreCase) ||
+        token.Equals("track", StringComparison.OrdinalIgnoreCase) ||
+        token.Equals("song", StringComparison.OrdinalIgnoreCase) ||
+        token.Equals("volume", StringComparison.OrdinalIgnoreCase) ||
+        token.Equals("vol", StringComparison.OrdinalIgnoreCase) ||
+        token.Equals("chapter", StringComparison.OrdinalIgnoreCase) ||
+        token.Equals("page", StringComparison.OrdinalIgnoreCase) ||
+        token.Equals("part", StringComparison.OrdinalIgnoreCase);
+
+    private enum StructuralTitleCompatibility {
+        None,
+        TinyDifference,
+        Contains,
+        Exact
+    }
+}
+
+internal sealed record StructuralLocalChild(Guid EntityId, string KindCode, string Title, int? SortOrder);

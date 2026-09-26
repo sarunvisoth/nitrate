@@ -1,0 +1,652 @@
+<script lang="ts">
+  import { untrack } from "svelte";
+  import { ChevronDown, Layers, Loader2 } from "@lucide/svelte";
+  import { Badge, Button, Toggle, cn } from "@prismedia/ui-svelte";
+  import { ACQUISITION_STATUS, ENTITY_KIND } from "$lib/api/generated/codes";
+  import type {
+    AcquisitionSummary,
+    MonitorView,
+  } from "$lib/api/generated/model";
+  import { isWanted } from "$lib/api/capabilities";
+  import {
+    fetchEntityMonitorStates,
+    resumeMonitor,
+    startEntityMonitor,
+    stopMonitor,
+  } from "$lib/api/monitors";
+  import { commitEntityRequest } from "$lib/api/requests";
+  import { labelForEntityKind } from "$lib/entities/entity-codes";
+  import {
+    resolveEntityThumbnailHref,
+    type EntityThumbnailCard,
+  } from "$lib/entities/entity-thumbnail";
+  import { acquisitionStatusDisplay } from "$lib/requests/acquisition-status-display";
+  import {
+    ACTIVE_ACQUISITION_STATUSES,
+    acquisitionStatusShouldPoll,
+  } from "$lib/requests/acquisition-status";
+  import {
+    monitorHasUnknownStatus,
+    monitorIsActive,
+    monitorIsDeletingFiles,
+    monitorIsStopping,
+  } from "$lib/requests/monitor-status";
+
+  interface ChildMonitoringRow {
+    card: EntityThumbnailCard;
+    acquisition: AcquisitionSummary | null;
+    monitor: MonitorView | null;
+    canMonitor: boolean;
+    canRequest: boolean;
+  }
+
+  interface RefreshOptions {
+    showLoading?: boolean;
+    waitForCurrent?: boolean;
+    reportErrors?: boolean;
+  }
+
+  const POLL_INTERVAL_MS = 5_000;
+
+  let {
+    cards,
+    onChanged,
+    initiallyExpanded = false,
+  }: {
+    /** Direct child Entities managed by this parent, regardless of medium. */
+    cards: EntityThumbnailCard[];
+    /** Show child work immediately when it is the primary acquisition content. */
+    initiallyExpanded?: boolean;
+    /** Refreshes the owning Entity graph after monitoring creates or removes wanted children. */
+    onChanged?: () => void | Promise<void>;
+  } = $props();
+
+  let open = $state(untrack(() => initiallyExpanded || cards.some(cardHasActiveAcquisition)));
+  let loading = $state(false);
+  let bulkBusy = $state(false);
+  let busyIds = $state.raw<string[]>([]);
+  let rows = $state.raw<ChildMonitoringRow[]>([]);
+  let error = $state<string | null>(null);
+  let outcome = $state<string | null>(null);
+  let refreshInFlight: Promise<void> | null = null;
+
+  const cardsKey = $derived(cards.map((card) => card.entity.id).join("|"));
+  const childKind = $derived.by(() => {
+    const kinds = new Set(cards.map((card) => card.entity.kind));
+    return kinds.size === 1 && cards[0] ? cards[0].entity.kind : null;
+  });
+  const sectionTitle = $derived(
+    childKind === ENTITY_KIND.videoEpisode
+      ? "Episode activity"
+      : childKind === ENTITY_KIND.audioTrack
+        ? "Track activity"
+      : childKind === ENTITY_KIND.videoSeason
+        ? "Season activity"
+        : "Child activity",
+  );
+  const childLabel = $derived.by(() => {
+    return childKind === ENTITY_KIND.videoEpisode
+      ? "Episodes"
+      : childKind === ENTITY_KIND.audioTrack
+        ? "Tracks"
+      : childKind
+      ? labelForEntityKind(childKind)
+      : "Items";
+  });
+  const actionableRows = $derived(rows.filter(canSetMonitoring));
+  const activeAcquisitionCount = $derived(rows.filter(hasActiveAcquisition).length);
+  const activityCounts = $derived.by(() => {
+    let downloading = 0;
+    let preparing = 0;
+    let searching = 0;
+    let importing = 0;
+    for (const row of rows) {
+      if (isPreparingMetadata(row)) {
+        preparing += 1;
+        continue;
+      }
+      switch (effectiveAcquisitionStatus(row)) {
+        case ACQUISITION_STATUS.waitingForRelease:
+          preparing += 1;
+          break;
+        case ACQUISITION_STATUS.downloading:
+          downloading += 1;
+          break;
+        case ACQUISITION_STATUS.queued:
+        case ACQUISITION_STATUS.waitingForDownloadClient:
+          preparing += 1;
+          break;
+        case ACQUISITION_STATUS.pending:
+        case ACQUISITION_STATUS.searching:
+          searching += 1;
+          break;
+        case ACQUISITION_STATUS.downloaded:
+        case ACQUISITION_STATUS.importing:
+          importing += 1;
+          break;
+      }
+    }
+    return { downloading, preparing, searching, importing };
+  });
+  const hasCardActivity = $derived(cards.some(cardHasActiveAcquisition));
+  const acting = $derived(bulkBusy || busyIds.length > 0);
+
+  // The open panel is a live read surface: loading on every expansion prevents a same-id cache from
+  // surviving a close/reopen, while the scoped poll reconciles monitor/acquisition changes that do not
+  // alter the owning Entity graph. Teardown stops all background reads while collapsed.
+  $effect(() => {
+    const key = cardsKey;
+    if ((!open && !hasCardActivity) || !key) return;
+
+    // A same-id owner refresh can re-run this effect while rows are already visible. Preserve the
+    // last good snapshot instead of swapping the whole list for a loading line on every poll.
+    void loadRows(key, {
+      showLoading: open && untrack(() => rows.length === 0),
+      waitForCurrent: true,
+      reportErrors: true,
+    });
+    const timer = setInterval(() => {
+      void loadRows(key);
+    }, POLL_INTERVAL_MS);
+    return () => clearInterval(timer);
+  });
+
+  function expand(): void {
+    open = !open;
+  }
+
+  async function loadRows(key = cardsKey, options: RefreshOptions = {}): Promise<void> {
+    if (!key) return;
+    if (refreshInFlight) {
+      if (!options.waitForCurrent) return;
+      await refreshInFlight;
+      return loadRows(key, { ...options, waitForCurrent: false });
+    }
+
+    const refresh = readRows(key, options);
+    refreshInFlight = refresh;
+    try {
+      await refresh;
+    } finally {
+      if (refreshInFlight === refresh) refreshInFlight = null;
+    }
+  }
+
+  async function readRows(key: string, options: RefreshOptions): Promise<void> {
+    if (options.showLoading) loading = true;
+    if (options.reportErrors) error = null;
+    try {
+      const entityIds = cards.map((card) => card.entity.id);
+      const states = await fetchEntityMonitorStates(entityIds);
+      if (cardsKey !== key) return;
+
+      const stateByEntity: Record<string, (typeof states)[number]> = Object.create(null);
+      for (const state of states) {
+        stateByEntity[state.entityId] = state;
+      }
+
+      const previousStatusByEntity = new Map(
+        rows.map((row) => [row.card.entity.id, effectiveAcquisitionStatus(row)]),
+      );
+      const nextRows = cards.map((card): ChildMonitoringRow => {
+        const state = stateByEntity[card.entity.id];
+        return {
+          card,
+          acquisition: state?.latestAcquisition ?? null,
+          monitor: state?.monitor ?? null,
+          canMonitor: state?.canMonitor ?? false,
+          canRequest: state?.canRequest ?? false,
+        };
+      });
+      rows = nextRows;
+
+      const importedTransition = nextRows.some((row) => {
+        const previous = previousStatusByEntity.get(row.card.entity.id);
+        return previous !== undefined
+          && previous !== null
+          && ACTIVE_ACQUISITION_STATUSES.some((status) => status === previous)
+          && effectiveAcquisitionStatus(row) === ACQUISITION_STATUS.imported;
+      });
+      if (importedTransition) await onChanged?.();
+    } catch (reason) {
+      if (options.reportErrors) {
+        error = messageFor(reason, "Failed to load child monitoring");
+      }
+    } finally {
+      if (options.showLoading && cardsKey === key) loading = false;
+    }
+  }
+
+  /**
+   * Provider-backed Entity monitoring and graph-backed Wanted requests are separate capabilities.
+   * Existing monitors remain controllable even if their metadata plugin is offline. Historical
+   * acquisition rows are display state, never authority to create a new monitor.
+   */
+  function canSetMonitoring(row: ChildMonitoringRow): boolean {
+    return row.monitor !== null || row.canMonitor || row.canRequest;
+  }
+
+  function isActive(row: ChildMonitoringRow): boolean {
+    return monitorIsActive(row.monitor);
+  }
+
+  function hasActiveAcquisition(row: ChildMonitoringRow): boolean {
+    return acquisitionStatusShouldPoll(effectiveAcquisitionStatus(row));
+  }
+
+  function isPreparingMetadata(row: ChildMonitoringRow): boolean {
+    return effectiveAcquisitionStatus(row) === null
+      && isActive(row)
+      && row.canRequest
+      && isWanted(row.card.entity.capabilities);
+  }
+
+  function isDeletingFiles(row: ChildMonitoringRow): boolean {
+    return monitorIsDeletingFiles(row.monitor);
+  }
+
+  function isStopping(row: ChildMonitoringRow): boolean {
+    return monitorIsStopping(row.monitor);
+  }
+
+  function hasUnknownMonitorStatus(row: ChildMonitoringRow): boolean {
+    return monitorHasUnknownStatus(row.monitor);
+  }
+
+  function isAcquisitionStopping(row: ChildMonitoringRow): boolean {
+    return ACQUISITION_STATUS.stopping !== undefined
+      && row.acquisition?.status === ACQUISITION_STATUS.stopping;
+  }
+
+  function transitionLocked(row: ChildMonitoringRow): boolean {
+    return isStopping(row)
+      || isDeletingFiles(row)
+      || hasUnknownMonitorStatus(row)
+      || isAcquisitionStopping(row);
+  }
+
+  function isChecked(row: ChildMonitoringRow): boolean {
+    return isActive(row) || isDeletingFiles(row) || hasUnknownMonitorStatus(row);
+  }
+
+  function rowStatus(row: ChildMonitoringRow): string {
+    const acquisitionStatus = effectiveAcquisitionStatus(row);
+    const acquisitionLabel = acquisitionStatus ? acquisitionLabelFor(acquisitionStatus) : null;
+    if (isDeletingFiles(row)) return "Deleting files…";
+    if (isAcquisitionStopping(row) || isStopping(row)) return "Stopping…";
+    if (hasUnknownMonitorStatus(row)) return "Updating…";
+    if (isPreparingMetadata(row)) return "Preparing metadata · Monitoring";
+    if (isActive(row)) return acquisitionLabel ? `${acquisitionLabel} · Monitoring` : "Monitoring";
+    if (row.monitor) return acquisitionLabel ? `${acquisitionLabel} · Paused` : "Paused";
+    if (acquisitionStatus && acquisitionStatus !== ACQUISITION_STATUS.imported) {
+      return `${acquisitionLabel} · Not monitored`;
+    }
+    if (isWanted(row.card.entity.capabilities)) {
+      return canSetMonitoring(row) ? "Wanted · Not monitored" : "Wanted";
+    }
+    if (canSetMonitoring(row)) return acquisitionLabel ? `${acquisitionLabel} · Not monitored` : "Not monitored";
+    return "On disk";
+  }
+
+  function acquisitionLabelFor(status: string): string {
+    if (status === ACQUISITION_STATUS.stopping) return "Stopping…";
+    if (status === ACQUISITION_STATUS.imported) return "Imported";
+    if (status === ACQUISITION_STATUS.cancelled) return "Cancelled";
+    return acquisitionStatusDisplay(status).label;
+  }
+
+  /**
+   * The compact monitor-state API is direct-only, while thumbnail status membership intentionally
+   * projects through the structural subtree. Select the most actionable state across both so an old
+   * terminal season acquisition cannot hide episode work happening underneath it.
+   */
+  function effectiveAcquisitionStatus(row: ChildMonitoringRow): string | null {
+    const statuses = [
+      ...(row.acquisition ? [row.acquisition.status] : []),
+      ...(row.card.acquisitionStatuses ?? []),
+    ];
+    const priority = [
+      ACQUISITION_STATUS.downloading,
+      ACQUISITION_STATUS.importing,
+      ACQUISITION_STATUS.downloaded,
+      ACQUISITION_STATUS.waitingForDownloadClient,
+      ACQUISITION_STATUS.queued,
+      ACQUISITION_STATUS.waitingForRelease,
+      ACQUISITION_STATUS.searching,
+      ACQUISITION_STATUS.pending,
+      ACQUISITION_STATUS.stopping,
+      ACQUISITION_STATUS.manualSearchRequired,
+      ACQUISITION_STATUS.awaitingSelection,
+      ACQUISITION_STATUS.failed,
+      ACQUISITION_STATUS.manualImportRequired,
+      ACQUISITION_STATUS.cancelled,
+      ACQUISITION_STATUS.imported,
+    ];
+    return priority.find((status) => statuses.includes(status))
+      ?? row.acquisition?.status
+      ?? row.card.latestAcquisitionStatus
+      ?? row.card.wantedStatus
+      ?? null;
+  }
+
+  function cardHasActiveAcquisition(card: EntityThumbnailCard): boolean {
+    return acquisitionStatusShouldPoll(card.wantedStatus)
+      || acquisitionStatusShouldPoll(card.latestAcquisitionStatus)
+      || card.acquisitionStatuses?.some(acquisitionStatusShouldPoll) === true;
+  }
+
+  async function setChildMonitoring(row: ChildMonitoringRow, monitored: boolean): Promise<void> {
+    if (
+      isDeletingFiles(row)
+      || hasUnknownMonitorStatus(row)
+      || isAcquisitionStopping(row)
+      || (isStopping(row) && monitored)
+    ) {
+      throw new Error("Cleanup is still in progress.");
+    }
+    if (monitored) {
+      await enableMonitoring(row);
+      return;
+    }
+    if (row.monitor) await stopMonitor(row.monitor.id);
+  }
+
+  async function enableMonitoring(row: ChildMonitoringRow): Promise<void> {
+    if (row.monitor) {
+      if (!isActive(row)) await resumeMonitor(row.monitor.id);
+      return;
+    }
+    // A fileless requestable leaf must commit first so its initial search starts immediately. It may
+    // also be provider-monitorable, but a bare monitor waits for the periodic sweep. Source-backed
+    // children without request work enter through the stable Entity/plugin identity monitor path.
+    if (row.canRequest) {
+      await commitEntityRequest(row.card.entity.id);
+      return;
+    }
+    if (row.canMonitor) {
+      await startEntityMonitor(row.card.entity.id);
+      return;
+    }
+    throw new Error("This item cannot be monitored independently.");
+  }
+
+  async function toggleChild(row: ChildMonitoringRow, monitored: boolean): Promise<void> {
+    if (acting) return;
+    busyIds = [...busyIds, row.card.entity.id];
+    error = null;
+    outcome = null;
+    try {
+      try {
+        await setChildMonitoring(row, monitored);
+      } catch (reason) {
+        error = `${row.card.entity.title}: ${messageFor(reason, "Failed to update monitoring")}`;
+        return;
+      }
+
+      if (await reconcileAfterMutation(true)) {
+        outcome = "Monitoring updated. Some page details will refresh shortly.";
+      }
+    } finally {
+      busyIds = busyIds.filter((id) => id !== row.card.entity.id);
+    }
+  }
+
+  async function applyToAll(monitored: boolean): Promise<void> {
+    if (acting || loading) return;
+    bulkBusy = true;
+    error = null;
+    outcome = null;
+    const targets = actionableRows.filter((row) =>
+      !transitionLocked(row) && (monitored ? !isActive(row) : row.monitor !== null),
+    );
+    let updated = 0;
+    const failures: string[] = [];
+    for (const row of targets) {
+      try {
+        await setChildMonitoring(row, monitored);
+        updated += 1;
+      } catch (reason) {
+        failures.push(`${row.card.entity.title}: ${messageFor(reason, "Update failed")}`);
+      }
+    }
+
+    const ownerRefreshFailed = await reconcileAfterMutation(updated > 0);
+    bulkBusy = false;
+
+    const result = failures.length > 0
+      ? `${updated} updated; ${failures.length} failed. ${failures.join(" · ")}`
+      : `${updated} ${updated === 1 ? "item" : "items"} updated.`;
+    outcome = ownerRefreshFailed
+      ? `${result} Some page details will refresh shortly.`
+      : result;
+  }
+
+  /**
+   * The local child snapshot is authoritative for this control and always refreshes after a mutation.
+   * The owning page refresh is useful for counts/children but cannot turn an already-accepted server
+   * mutation into a UI failure, so its rejection becomes only a deferred-refresh notice.
+   */
+  async function reconcileAfterMutation(notifyOwner: boolean): Promise<boolean> {
+    const ownerRefresh = notifyOwner && onChanged
+      ? Promise.resolve().then(() => onChanged())
+      : Promise.resolve();
+    const [, ownerResult] = await Promise.allSettled([
+      loadRows(cardsKey, { waitForCurrent: true, reportErrors: true }),
+      ownerRefresh,
+    ]);
+    return ownerResult.status === "rejected";
+  }
+
+  function messageFor(reason: unknown, fallback: string): string {
+    return reason instanceof Error ? reason.message : fallback;
+  }
+</script>
+
+{#if cards.length > 0}
+  <section class="child-monitoring" aria-label={sectionTitle}>
+    <Button
+      type="button"
+      variant="ghost"
+      size="md"
+      class="h-auto min-h-control-lg w-full cursor-pointer justify-between rounded-none px-control-pad py-2"
+      aria-expanded={open}
+      onclick={expand}
+    >
+      <span class="header-title">
+        <Layers class="h-4 w-4 text-text-accent" />
+        {sectionTitle}
+        <Badge variant="secondary">{cards.length}</Badge>
+        {#if activityCounts.downloading > 0}<Badge variant="success">{activityCounts.downloading} downloading</Badge>{/if}
+        {#if activityCounts.preparing > 0}<Badge variant="secondary">{activityCounts.preparing} preparing</Badge>{/if}
+        {#if activityCounts.searching > 0}<Badge variant="secondary">{activityCounts.searching} searching</Badge>{/if}
+        {#if activityCounts.importing > 0}<Badge variant="secondary">{activityCounts.importing} importing</Badge>{/if}
+        {#if activeAcquisitionCount > 0 && Object.values(activityCounts).every((count) => count === 0)}
+          <Badge variant="secondary">{activeAcquisitionCount} active</Badge>
+        {/if}
+      </span>
+      <ChevronDown class={cn("h-4 w-4 text-text-muted transition-transform", open && "rotate-180")} />
+    </Button>
+
+    {#if open}
+      <div class="body">
+        <p class="activity-help">
+          Monitoring controls future searches and retries. Turning it off does not stop active downloads.
+        </p>
+        <div class="toolbar">
+          <span class="toolbar-label">{childLabel}</span>
+          <Button
+            type="button"
+            size="sm"
+            variant="ghost"
+            disabled={loading || acting || !actionableRows.some((row) => !isActive(row) && !transitionLocked(row))}
+            onclick={() => void applyToAll(true)}
+          >
+            Monitor all
+          </Button>
+          <Button
+            type="button"
+            size="sm"
+            variant="ghost"
+            disabled={loading || acting || !rows.some((row) => row.monitor !== null && !transitionLocked(row))}
+            onclick={() => void applyToAll(false)}
+          >
+            Unmonitor all
+          </Button>
+        </div>
+
+        {#if error}<p class="message error">{error}</p>{/if}
+        {#if outcome}<p class="message">{outcome}</p>{/if}
+
+        {#if loading}
+          <p class="loading"><Loader2 class="h-4 w-4 animate-spin" /> Loading monitoring state…</p>
+        {:else}
+          <ul class="rows">
+            {#each rows as row (row.card.entity.id)}
+              {@const href = resolveEntityThumbnailHref(row.card)}
+              {@const active = isActive(row) || hasActiveAcquisition(row)}
+              {@const checked = isChecked(row)}
+              {@const busy = busyIds.includes(row.card.entity.id)}
+              <li class="row">
+                <span class="row-copy">
+                  {#if href}
+                    <a class="row-title" {href}>{row.card.entity.title}</a>
+                  {:else}
+                    <span class="row-title">{row.card.entity.title}</span>
+                  {/if}
+                  <span class:active class="row-status">{rowStatus(row)}</span>
+                </span>
+                {#if isStopping(row)}
+                  <Button
+                    type="button"
+                    size="sm"
+                    variant="ghost"
+                    disabled={acting || busy}
+                    title={`Retry unmonitor cleanup for ${row.card.entity.title}`}
+                    onclick={() => void toggleChild(row, false)}
+                  >
+                    Retry cleanup
+                  </Button>
+                {/if}
+                <Toggle
+                  checked={checked}
+                  disabled={acting || busy || transitionLocked(row) || !canSetMonitoring(row)}
+                  ariaLabel={`Monitor ${row.card.entity.title}`}
+                  onchange={(value) => void toggleChild(row, value)}
+                />
+              </li>
+            {/each}
+          </ul>
+        {/if}
+      </div>
+    {/if}
+  </section>
+{/if}
+
+<style>
+  .child-monitoring {
+    display: flex;
+    flex-direction: column;
+    min-width: 0;
+    border: 1px solid var(--color-border-subtle);
+    border-radius: var(--radius-sm);
+    background: var(--color-surface-1);
+  }
+  .header-title {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 0.5rem;
+    min-width: 0;
+    font-family: var(--font-heading);
+    font-size: var(--text-control);
+    font-weight: 600;
+  }
+  .toolbar-label,
+  .row-status {
+    font-family: var(--font-mono);
+    font-size: var(--text-caption);
+  }
+  .row-status {
+    color: var(--color-text-muted);
+  }
+  .body {
+    display: grid;
+    gap: var(--spacing-control-gap);
+    padding: 0 var(--spacing-control-pad) var(--spacing-control-pad);
+  }
+  .toolbar {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: var(--spacing-control-gap-sm);
+  }
+  .activity-help {
+    margin: 0;
+    max-width: 68rem;
+    color: var(--color-text-muted);
+    font-size: var(--text-caption);
+    line-height: 1.45;
+  }
+  .toolbar-label {
+    margin-right: auto;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    color: var(--color-text-secondary);
+  }
+  .rows {
+    display: grid;
+    margin: 0;
+    padding: 0;
+    border: 1px solid var(--color-border-subtle);
+    border-radius: var(--radius-xs);
+    list-style: none;
+  }
+  .row {
+    display: flex;
+    align-items: center;
+    gap: 0.75rem;
+    min-width: 0;
+    padding: var(--spacing-control-gap) var(--spacing-control-pad);
+    border-bottom: 1px solid var(--color-border-subtle);
+  }
+  .row:last-child {
+    border-bottom: 0;
+  }
+  .row-copy {
+    display: grid;
+    flex: 1;
+    min-width: 0;
+    gap: 0.12rem;
+  }
+  .row-title {
+    overflow: hidden;
+    color: var(--color-text-primary);
+    font-size: var(--text-control);
+    font-weight: 500;
+    text-decoration: none;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  a.row-title:hover {
+    color: var(--color-text-accent);
+  }
+  .row-status.active {
+    color: var(--color-text-accent);
+  }
+  .loading {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    color: var(--color-text-muted);
+    font-size: var(--text-label);
+  }
+  .message {
+    margin: 0;
+    color: var(--color-text-muted);
+    font-size: var(--text-caption);
+  }
+  .message.error {
+    color: var(--color-error-text, #f87171);
+  }
+</style>

@@ -1,0 +1,1615 @@
+using System.Text.Json;
+using Microsoft.Extensions.Logging.Abstractions;
+using Microsoft.EntityFrameworkCore;
+using Prismedia.Application.Settings;
+using Prismedia.Application.Videos;
+using Prismedia.Contracts.Playback;
+using Prismedia.Domain.Entities;
+using Prismedia.Infrastructure.Persistence;
+using Prismedia.Infrastructure.Persistence.Entities;
+using Prismedia.Infrastructure.Processes;
+using Prismedia.Infrastructure.Videos;
+
+namespace Prismedia.Infrastructure.Tests;
+
+public sealed class HlsAssetServiceTests : IDisposable {
+    private const string SegmentLengthText = "6";
+    private readonly string _cacheRoot = Path.Combine(Path.GetTempPath(), $"prismedia-hls-assets-{Guid.NewGuid():N}");
+
+    public HlsAssetServiceTests() {
+        Directory.CreateDirectory(_cacheRoot);
+    }
+
+    [Fact]
+    public async Task ResolvesHls2ManifestAndSegmentAssets() {
+        var videoId = Guid.Parse("11111111-1111-1111-1111-111111111111");
+        var packageDir = Path.Combine(_cacheRoot, "hls2", videoId.ToString(), "v", "720p");
+        Directory.CreateDirectory(packageDir);
+        var manifestPath = Path.Combine(_cacheRoot, "hls2", videoId.ToString(), "master.m3u8");
+        var segmentPath = Path.Combine(packageDir, "seg_00000.ts");
+        await File.WriteAllTextAsync(manifestPath, "#EXTM3U");
+        await File.WriteAllTextAsync(segmentPath, "segment");
+
+        var service = new HlsAssetService(new HlsAssetServiceOptions(_cacheRoot));
+        var manifest = await service.GetAssetAsync(videoId, "master.m3u8", null, CancellationToken.None);
+        var segment = await service.GetAssetAsync(videoId, "v/720p/seg_00000.ts", null, CancellationToken.None);
+
+        Assert.NotNull(manifest);
+        Assert.Equal("application/vnd.apple.mpegurl", manifest.ContentType);
+        Assert.Equal("public, max-age=60", manifest.CacheControl);
+        Assert.NotNull(segment);
+        Assert.Equal("video/mp2t", segment.ContentType);
+        Assert.Equal("public, max-age=31536000, immutable", segment.CacheControl);
+    }
+
+    [Fact]
+    public async Task RejectsTraversalOutsidePackageRoot() {
+        var videoId = Guid.Parse("22222222-2222-2222-2222-222222222222");
+        var service = new HlsAssetService(new HlsAssetServiceOptions(_cacheRoot));
+
+        var asset = await service.GetAssetAsync(videoId, "../secret.ts", null, CancellationToken.None);
+
+        Assert.Null(asset);
+    }
+
+    [Fact]
+    public async Task ServingAnAssetMarksTheItemRecentlyRequested() {
+        var videoId = Guid.Parse("33333333-3333-3333-3333-333333333333");
+        var service = new HlsAssetService(new HlsAssetServiceOptions(_cacheRoot));
+
+        // A miss still counts: the client is fetching, so its cached output must not be evicted even
+        // while it retries a segment that is not there yet.
+        await service.GetAssetAsync(videoId, "index.m3u8", null, CancellationToken.None);
+
+        Assert.Contains(videoId, HlsAssetService.RecentlyRequestedItemIds(TimeSpan.FromMinutes(2)));
+    }
+
+    [Fact]
+    public async Task RecentlyRequestedItemsExpireOutsideTheWindow() {
+        var videoId = Guid.Parse("44444444-4444-4444-4444-444444444444");
+        var service = new HlsAssetService(new HlsAssetServiceOptions(_cacheRoot));
+
+        await service.GetAssetAsync(videoId, "index.m3u8", null, CancellationToken.None);
+
+        Assert.DoesNotContain(videoId, HlsAssetService.RecentlyRequestedItemIds(TimeSpan.Zero));
+    }
+
+    [Fact]
+    public void RemuxSegmentDurationsMatchFfmpegStreamCopyBoundaries() {
+        // Models a 1080p source with a 2.002s GOP (keyframe every 2.002s) over ~1951.296s, which is
+        // exactly what ffmpeg's stream-copy HLS muxer cuts into 325 segments: 324 of 6.006s (three
+        // GOPs each, the first keyframe at/after every 6s mark) plus a short final segment.
+        const double gop = 2.002;
+        const double totalDuration = 1951.296;
+        var keyframes = new List<HlsAssetService.RemuxKeyframe>();
+        for (var t = 0.0; t < totalDuration; t += gop) {
+            var pts = Math.Round(t, 6);
+            keyframes.Add(new HlsAssetService.RemuxKeyframe(pts, pts));
+        }
+
+        var durations = HlsAssetService.BuildRemuxSegmentDurations(keyframes, totalDuration);
+
+        Assert.Equal(325, durations.Count);
+        Assert.All(durations.Take(durations.Count - 1), duration => Assert.Equal(6.006, duration, 3));
+        Assert.Equal(totalDuration, durations.Sum(), 3);
+        // The final segment is shorter and never starts a new boundary for the trailing sub-6s keyframes.
+        Assert.True(durations[^1] < 6.006);
+    }
+
+    [Fact]
+    public void RemuxSegmentDurationsCutOnFixedGridNotDriftingFromPreviousCut() {
+        // Irregular, scene-cut keyframes (real VBR content) expose the bug a regular GOP hides.
+        // ffmpeg cuts at the first keyframe at/after each fixed 6s grid line (6, 12, 18, ...), so the
+        // 12s cut lands on the keyframe at 12.813 — giving a 5.839s second segment. A rule that instead
+        // waits 6s past the PREVIOUS cut (6.974) would require >= 12.974 and skip 12.813, drifting to a
+        // longer 6.740s segment and, cumulatively, fewer/misaligned segments than ffmpeg writes.
+        var keyframes = ClosedGop(0.0, 4.972, 5.339, 6.974, 10.444, 11.645, 12.813, 13.714, 20.721);
+
+        var durations = HlsAssetService.BuildRemuxSegmentDurations(keyframes, 25.0);
+
+        Assert.Equal(6.974, durations[0], 3); // first cut: first keyframe >= 6
+        Assert.Equal(5.839, durations[1], 3); // second cut: first keyframe >= 12 (12.813), NOT >= 12.974
+        Assert.Equal(7.908, durations[2], 3); // third cut: first keyframe >= 18 (20.721)
+        Assert.Equal(25.0, durations.Sum(), 3);
+    }
+
+    [Fact]
+    public void RemuxSegmentDurationsCutShortWhenLongGopOvershootsThreshold() {
+        // A long GOP that overshoots a grid line, followed by a keyframe just past it, is where the
+        // threshold-advance rule matters. ffmpeg advances its cut threshold by exactly one segment length
+        // (6 -> 12 -> 18 -> 24) and cuts at the first keyframe at/after the current threshold; it does NOT
+        // jump the threshold past the keyframe that triggered the cut. Verified empirically against
+        // Keyframes [0,19,20,25] over a 30s source produce FOUR segments [19,1,5,5].
+        // (Jumping the threshold past the cut would skip the keyframe at 20 and wrongly produce [19,6,5].)
+        var keyframes = ClosedGop(0.0, 19.0, 20.0, 25.0);
+
+        var durations = HlsAssetService.BuildRemuxSegmentDurations(keyframes, 30.0);
+
+        Assert.Equal([19.0, 1.0, 5.0, 5.0], durations);
+    }
+
+    [Fact]
+    public void RemuxKeyframeProbeFindsOpenGopLeadingPictures() {
+        // Verbatim ffprobe "packet=pts_time,flags" output (decode order) from an x265 encode across a
+        // CRA boundary. The keyframe presents at 5.000, but the three RASL pictures that decode after it
+        // present at 4.875-4.958 — so the segment starting there really begins at 4.875, an eighth of a
+        // second before its own keyframe. Open GOP is x265's DEFAULT, so this is the common case.
+        const string probeOutput = """
+            0.000000,K__
+            0.042000,___
+            0.083000,___
+            4.750000,___
+            4.792000,___
+            5.000000,K__
+            4.917000,___
+            4.875000,___
+            4.958000,___
+            5.042000,___
+            10.000000,K__
+            9.917000,___
+            9.875000,___
+            """;
+
+        var keyframes = HlsAssetService.ParseRemuxKeyframes(probeOutput);
+
+        Assert.Equal(3, keyframes.Count);
+        // The stream's first segment has nothing decodable before it, so it presents at its keyframe.
+        Assert.Equal(0.0, keyframes[0].PresentationStartPts, 3);
+        Assert.True(keyframes[0].IsIndependent);
+        Assert.Equal(5.0, keyframes[1].KeyframePts, 3);
+        Assert.Equal(4.875, keyframes[1].PresentationStartPts, 3);
+        Assert.False(keyframes[1].IsIndependent);
+        Assert.Equal(9.875, keyframes[2].PresentationStartPts, 3);
+        Assert.False(HlsAssetService.SegmentsAreIndependent(keyframes));
+    }
+
+    [Fact]
+    public void RemuxKeyframeProbeTreatsClosedGopAsIndependent() {
+        // A closed GOP (x264's default) never presents a picture before its keyframe, so every segment
+        // starts exactly where the playlist says and the independence claim is earned.
+        const string probeOutput = """
+            0.000000,K__
+            0.042000,___
+            5.000000,K__
+            5.042000,___
+            """;
+
+        var keyframes = HlsAssetService.ParseRemuxKeyframes(probeOutput);
+
+        Assert.Equal(2, keyframes.Count);
+        Assert.Equal(5.0, keyframes[1].PresentationStartPts, 3);
+        Assert.True(HlsAssetService.SegmentsAreIndependent(keyframes));
+    }
+
+    [Fact]
+    public void RemuxSegmentDurationsMeasureFromPresentationStartsNotKeyframes() {
+        // Open-GOP boundaries: ffmpeg cuts in decode order at the keyframe, but each segment after the
+        // first presents 0.125s earlier at its leading pictures. Dating the segments from their keyframes
+        // (10.000 - 0.000 = 10.000) leaves a hole at every boundary, because the media actually there
+        // starts at 9.875. WebKit stalls and re-fetches on that hole; hls.js silently re-aligns.
+        const double lead = 0.125;
+        var keyframes = new List<HlsAssetService.RemuxKeyframe> {
+            new(0.0, 0.0),
+            new(5.0, 5.0 - lead),
+            new(10.0, 10.0 - lead),
+            new(15.0, 15.0 - lead),
+        };
+
+        var durations = HlsAssetService.BuildRemuxSegmentDurations(keyframes, 20.0);
+
+        // Cuts still land on the 6s grid (first keyframe >= 6 is 10.0, then >= 12 is 15.0).
+        Assert.Equal(3, durations.Count);
+        Assert.Equal(9.875, durations[0], 3); // 0.000 -> 9.875, not 0 -> 10.000
+        Assert.Equal(5.0, durations[1], 3); // 9.875 -> 14.875
+        Assert.Equal(5.125, durations[2], 3); // 14.875 -> end
+        // No gaps and no overlaps: the declared timeline covers exactly the media that exists.
+        Assert.Equal(20.0, durations.Sum(), 3);
+    }
+
+    [Fact]
+    public void RemuxKeyframeProbeDetectsLeadingPicturesThatAppearOnlyLaterInTheFile() {
+        // The bug that shipped: a real 1080p10 HEVC episode mixes IDR scene-cut keyframes with periodic
+        // CRA keyframes. Its first 60s held only scene cuts (lead 0), so a bounded probe certified the whole
+        // file as closed-GOP — and the playlist then dated every later segment from its keyframe, which is
+        // the discrepancy WebKit stalls on. Verbatim ffprobe output from that file around 49-73s.
+        const string probeOutput = """
+            49.216000,K__
+            49.249000,___
+            50.284000,K__
+            51.285000,K__
+            52.419000,K__
+            52.452000,___
+            60.761000,K__
+            60.594000,___
+            60.627000,___
+            69.102000,K__
+            69.002000,___
+            72.472000,K__
+            72.505000,___
+            """;
+
+        var keyframes = HlsAssetService.ParseRemuxKeyframes(probeOutput);
+
+        // The early scene cuts really are independent...
+        Assert.True(keyframes[1].IsIndependent); // 50.284
+        Assert.True(keyframes[3].IsIndependent); // 52.419
+        // ...but the periodic keyframes carry leading pictures, with DIFFERENT leads, so no single measured
+        // constant could describe this file either.
+        Assert.Equal(60.594, keyframes[4].PresentationStartPts, 3);
+        Assert.Equal(0.167, keyframes[4].KeyframePts - keyframes[4].PresentationStartPts, 3);
+        Assert.Equal(0.100, keyframes[5].KeyframePts - keyframes[5].PresentationStartPts, 3);
+        Assert.False(HlsAssetService.SegmentsAreIndependent(keyframes));
+    }
+
+    [Fact]
+    public void RemuxVodPlaylistOmitsIndependentSegmentsWhenBoundariesAreNot() {
+        var openGop = HlsAssetService.BuildRemuxVodPlaylist([6.0, 6.0], independentSegments: false);
+        var closedGop = HlsAssetService.BuildRemuxVodPlaylist([6.0, 6.0], independentSegments: true);
+
+        // Claiming independence for CRA-start segments is what makes strict clients treat the boundary as
+        // a hard decode point and fail there.
+        Assert.DoesNotContain("#EXT-X-INDEPENDENT-SEGMENTS", openGop);
+        Assert.Contains("#EXT-X-INDEPENDENT-SEGMENTS", closedGop);
+    }
+
+    [Fact]
+    public void RemuxVodPlaylistIsCompleteAndSeekable() {
+        var durations = new List<double> { 6.006, 6.006, 4.2 };
+
+        var playlist = HlsAssetService.BuildRemuxVodPlaylist(durations);
+
+        Assert.StartsWith("#EXTM3U", playlist);
+        Assert.Contains("#EXT-X-PLAYLIST-TYPE:VOD", playlist);
+        Assert.Contains("#EXT-X-MAP:URI=\"init.mp4\"", playlist);
+        Assert.Contains("#EXT-X-TARGETDURATION:6", playlist);
+        Assert.Contains("#EXTINF:6.006000,\nseg_00000.m4s", playlist);
+        Assert.Contains("#EXTINF:4.200000,\nseg_00002.m4s", playlist);
+        Assert.EndsWith("#EXT-X-ENDLIST\n", playlist);
+        // A growing EVENT playlist (the old behavior) would limit the seekable range; assert we never emit it.
+        Assert.DoesNotContain("EVENT", playlist);
+    }
+
+    [Fact]
+    public void RemuxVodPlaylistCarriesSelectedAudioStreamIndexOnMediaUris() {
+        var playlist = HlsAssetService.BuildRemuxVodPlaylist(
+            [6.006, 4.2],
+            audioStreamIndex: 2,
+            copyAudio: true);
+
+        var query = $"{VideoPlaybackProtocol.AudioStreamIndexQuery}=2&{VideoPlaybackProtocol.CopyAudioQuery}=true";
+        Assert.Contains($"#EXT-X-MAP:URI=\"init.mp4?{query}\"", playlist);
+        Assert.Contains($"#EXTINF:6.006000,\nseg_00000.m4s?{query}", playlist);
+        Assert.Contains($"#EXTINF:4.200000,\nseg_00001.m4s?{query}", playlist);
+    }
+
+    [Fact]
+    public void RemuxEventPlaylistCarriesSelectedAudioStreamIndexOnMediaUris() {
+        const string eventPlaylist = """
+            #EXTM3U
+            #EXT-X-VERSION:7
+            #EXT-X-MAP:URI="init.mp4"
+            #EXTINF:6.006000,
+            seg_00000.m4s
+            #EXTINF:6.006000,
+            seg_00001.m4s?audioStreamIndex=2
+            """;
+
+        var playlist = HlsAssetService.RewriteRemuxPlaylistUris(
+            eventPlaylist,
+            audioStreamIndex: 2,
+            copyAudio: true);
+
+        var query = $"{VideoPlaybackProtocol.AudioStreamIndexQuery}=2&{VideoPlaybackProtocol.CopyAudioQuery}=true";
+        Assert.Contains($"#EXT-X-MAP:URI=\"init.mp4?{query}\"", playlist);
+        Assert.Contains($"#EXTINF:6.006000,\nseg_00000.m4s?{query}", playlist);
+        Assert.Contains($"#EXTINF:6.006000,\nseg_00001.m4s?{query}", playlist);
+        Assert.DoesNotContain("audioStreamIndex=2?audioStreamIndex=2", playlist);
+        Assert.DoesNotContain("audioStreamIndex=2&audioStreamIndex=2", playlist);
+    }
+
+    [Fact]
+    public void RemuxCopiesNegotiatedAudioAndPreservesChannelsWhenTranscodingUnsupportedSources() {
+        // AAC is already the browser-safe target codec, so even 7.1 sources must be packet-copied rather
+        // than put through another lossy AAC generation. Codecs the client may not decode are converted
+        // to AAC while retaining their source channel count and padding any leading timestamp gap.
+        Assert.Equal(
+            ["-c:a", "copy"],
+            HlsAssetService.RemuxAudioArguments(RemuxAudioSource("aac", channels: 8), audioStreamIndex: null));
+        Assert.Equal(
+            ["-c:a", "aac", "-ac", "6", "-b:a", "384k", "-ar", "48000", "-af", "aresample=async=1:first_pts=0"],
+            HlsAssetService.RemuxAudioArguments(RemuxAudioSource("eac3"), audioStreamIndex: null));
+        Assert.Equal(
+            ["-c:a", "aac", "-ac", "8", "-b:a", "512k", "-ar", "48000", "-af", "aresample=async=1:first_pts=0"],
+            HlsAssetService.RemuxAudioArguments(RemuxAudioSource("truehd", channels: 8), audioStreamIndex: null));
+        Assert.Equal(
+            ["-c:a", "copy"],
+            HlsAssetService.RemuxAudioArguments(
+                RemuxAudioSource("ac3"),
+                audioStreamIndex: null,
+                copyAudio: true));
+        // An explicit absolute stream index resolves the codec of that stream.
+        Assert.Equal(
+            ["-c:a", "copy"],
+            HlsAssetService.RemuxAudioArguments(RemuxAudioSource("aac"), audioStreamIndex: 1));
+    }
+
+    [Fact]
+    public async Task RemuxSegmentGenerationMapsRequestedAudioAndPreservesFragmentTimeline() {
+        var videoId = Guid.Parse("24242424-2424-2424-2424-242424242424");
+        var sourcePath = Path.Combine(_cacheRoot, "multi-audio.mkv");
+        await File.WriteAllTextAsync(sourcePath, "source");
+        var process = new ManifestWritingProcessExecutor();
+        var service = new HlsAssetService(
+            new HlsAssetServiceOptions(_cacheRoot),
+            new FakeVideoSourceService(new VideoSourceFile(
+                videoId,
+                sourcePath,
+                "video/x-matroska",
+                false,
+                DurationSeconds: 60,
+                Width: 1920,
+                Height: 1080,
+                Streams: [
+                    new VideoSourceStream(
+                        StreamIndex: 0, Type: "Video", Codec: "h264", Language: null, Title: null,
+                        Width: 1920, Height: 1080, FrameRate: 24, BitRate: null, SampleRate: null, Channels: null,
+                        IsDefault: true, IsForced: false),
+                    new VideoSourceStream(
+                        StreamIndex: 1, Type: "Audio", Codec: "aac", Language: "ita", Title: "Italian",
+                        Width: null, Height: null, FrameRate: null, BitRate: null, SampleRate: 48000, Channels: 2,
+                        IsDefault: true, IsForced: false),
+                    new VideoSourceStream(
+                        StreamIndex: 2, Type: "Audio", Codec: "ac3", Language: "eng", Title: "English",
+                        Width: null, Height: null, FrameRate: null, BitRate: null, SampleRate: 48000, Channels: 2,
+                        IsDefault: false, IsForced: false)
+                ])),
+            process,
+            NullLogger<HlsAssetService>.Instance);
+
+        var segment = await service.GetAssetAsync(
+            videoId,
+            "v/remux/seg_00000.m4s",
+            2,
+            CancellationToken.None,
+            copyAudio: true);
+
+        Assert.NotNull(segment);
+        var arguments = Assert.Single(process.ArgumentHistory);
+        var mapIndexes = arguments
+            .Select((argument, index) => (argument, index))
+            .Where(entry => entry.argument == "-map")
+            .Select(entry => entry.index)
+            .ToArray();
+        Assert.Contains(mapIndexes, index => arguments[index + 1] == "0:2?");
+        Assert.DoesNotContain(mapIndexes, index => arguments[index + 1] == "0:1?");
+        Assert.Contains("-copyts", arguments);
+        Assert.Contains("-start_at_zero", arguments);
+        var avoidNegativeTimestampsIndex = arguments.ToList().IndexOf("-avoid_negative_ts");
+        Assert.True(avoidNegativeTimestampsIndex >= 0);
+        Assert.Equal("disabled", arguments[avoidNegativeTimestampsIndex + 1]);
+        var segmentOptionsIndex = arguments.ToList().IndexOf("-hls_segment_options");
+        Assert.True(segmentOptionsIndex >= 0);
+        Assert.Equal("movflags=+frag_discont", arguments[segmentOptionsIndex + 1]);
+        var audioCodecIndex = arguments.ToList().IndexOf("-c:a");
+        Assert.True(audioCodecIndex >= 0);
+        Assert.Equal("copy", arguments[audioCodecIndex + 1]);
+    }
+
+    [Fact]
+    public async Task PreparedRemuxReturnsCompleteVodOnFirstManifestRequest() {
+        var videoId = Guid.Parse("25252525-2525-2525-2525-252525252525");
+        var sourcePath = Path.Combine(_cacheRoot, "cold-first-play.mkv");
+        await File.WriteAllTextAsync(sourcePath, "source");
+        var source = new VideoSourceFile(
+            videoId,
+            sourcePath,
+            "video/x-matroska",
+            false,
+            DurationSeconds: 18,
+            Width: 1920,
+            Height: 1080,
+            Container: "matroska",
+            VideoCodec: "h264",
+            AudioCodec: "aac");
+        var process = new RemuxPreparationProcessExecutor();
+        var service = new HlsAssetService(
+            new HlsAssetServiceOptions(_cacheRoot),
+            new FakeVideoSourceService(source),
+            process,
+            NullLogger<HlsAssetService>.Instance);
+
+        var prepared = await Task.WhenAll(
+            service.PrepareAsync(source, CancellationToken.None),
+            service.PrepareAsync(source, CancellationToken.None));
+        var playlistAsset = await service.GetAssetAsync(
+            videoId,
+            "v/remux/stream.m3u8",
+            null,
+            CancellationToken.None);
+
+        Assert.All(prepared, Assert.True);
+        Assert.Equal(1, process.ProbeCount);
+        Assert.False(process.ProbeWasLowPriority);
+        Assert.NotNull(playlistAsset);
+        var playlist = await File.ReadAllTextAsync(playlistAsset.Path);
+        Assert.Contains("#EXT-X-PLAYLIST-TYPE:VOD", playlist);
+        Assert.Contains("#EXT-X-ENDLIST", playlist);
+        Assert.DoesNotContain("#EXT-X-PLAYLIST-TYPE:EVENT", playlist);
+    }
+
+    private static VideoSourceFile RemuxAudioSource(string audioCodec, int channels = 6) =>
+        new(
+            EntityId: Guid.NewGuid(),
+            Path: "/media/x.mkv",
+            ContentType: "video/x-matroska",
+            DirectPlayable: false,
+            VideoCodec: "hevc",
+            Streams: [
+                new VideoSourceStream(
+                    StreamIndex: 0, Type: "Video", Codec: "hevc", Language: null, Title: null,
+                    Width: 1920, Height: 1080, FrameRate: 24, BitRate: null, SampleRate: null, Channels: null,
+                    IsDefault: true, IsForced: false),
+                new VideoSourceStream(
+                    StreamIndex: 1, Type: "Audio", Codec: audioCodec, Language: "eng", Title: null,
+                    Width: null, Height: null, FrameRate: null, BitRate: null, SampleRate: 48000, Channels: channels,
+                    IsDefault: true, IsForced: false)
+            ]);
+
+    private static VideoSourceFile HevcSource(string videoCodec, int? dvProfile, bool rpu) =>
+        new(
+            EntityId: Guid.NewGuid(),
+            Path: "/media/x.mkv",
+            ContentType: "video/x-matroska",
+            DirectPlayable: false,
+            VideoCodec: videoCodec,
+            Streams: [new VideoSourceStream(
+                StreamIndex: 0, Type: "Video", Codec: videoCodec, Language: null, Title: null,
+                Width: 3840, Height: 1920, FrameRate: 24, BitRate: null, SampleRate: null, Channels: null,
+                IsDefault: true, IsForced: false, DvProfile: dvProfile, RpuPresentFlag: rpu)]);
+
+    [Fact]
+    public void DolbyVisionRemuxIsTaggedHvc1NotDvh1SoNonDoviBrowsersAcceptIt() {
+        // A Dolby Vision Profile 8 stream is tagged plain hvc1, NOT dvh1: a dvh1 sample entry advertises
+        // Dolby Vision and a browser whose MSE can't decode it (e.g. Chromium) rejects the buffer
+        // outright. With hvc1 the browser decodes the HEVC base layer and ignores the DV RPU.
+        var args = HlsAssetService.HevcSampleEntryTagArguments(HevcSource("hevc", dvProfile: 8, rpu: true));
+
+        Assert.Equal(["-tag:v", "hvc1"], args);
+    }
+
+    [Fact]
+    public void PlainHevcRemuxIsTaggedHvc1() {
+        // Non-Dolby-Vision HEVC (SDR/HDR10/HLG) keeps the hvc1 tag Safari/WebKit require.
+        var args = HlsAssetService.HevcSampleEntryTagArguments(HevcSource("hevc", dvProfile: null, rpu: false));
+
+        Assert.Equal(["-tag:v", "hvc1"], args);
+    }
+
+    [Fact]
+    public void NonHevcRemuxAddsNoTagOverride() {
+        var args = HlsAssetService.HevcSampleEntryTagArguments(HevcSource("h264", dvProfile: null, rpu: false));
+
+        Assert.Empty(args);
+    }
+
+    [Fact]
+    public async Task VirtualManifestIsVodAndCoversFullDuration() {
+        var videoId = Guid.Parse("33333333-3333-3333-3333-333333333333");
+        var sourcePath = Path.Combine(_cacheRoot, "source.mkv");
+        await File.WriteAllTextAsync(sourcePath, "source");
+        var process = new ManifestWritingProcessExecutor();
+        var service = new HlsAssetService(
+            new HlsAssetServiceOptions(_cacheRoot),
+            new FakeVideoSourceService(new VideoSourceFile(
+                videoId,
+                sourcePath,
+                "video/x-matroska",
+                false,
+                DurationSeconds: 13,
+                Width: 3840,
+                Height: 1920,
+                BitRate: 22_000_000,
+                VideoCodec: "hevc")),
+            process,
+            NullLogger<HlsAssetService>.Instance);
+
+        var master = await service.GetAssetAsync(videoId, "master.m3u8", null, CancellationToken.None);
+        var variant = await service.GetAssetAsync(videoId, "v/720p/stream.m3u8", null, CancellationToken.None);
+
+        Assert.NotNull(master);
+        var masterPlaylist = await File.ReadAllTextAsync(master.Path);
+        // Single-variant default (adaptive bitrate off): only the top, source-capped rung is advertised,
+        // matching the reference media server's single-stream default so a client quality switch cannot
+        // spawn a second concurrent transcode.
+        Assert.Contains("v/40mbps/stream.m3u8", masterPlaylist);
+        Assert.Contains("RESOLUTION=3840x1920", masterPlaylist);
+        Assert.DoesNotContain("v/20mbps/stream.m3u8", masterPlaylist);
+        Assert.DoesNotContain("v/8mbps/stream.m3u8", masterPlaylist);
+        Assert.DoesNotContain("v/720kbps/stream.m3u8", masterPlaylist);
+        Assert.NotNull(variant);
+        var playlist = await File.ReadAllTextAsync(variant.Path);
+        Assert.Contains("#EXT-X-PLAYLIST-TYPE:VOD", playlist);
+        Assert.Contains("#EXT-X-TARGETDURATION:6", playlist);
+        Assert.Contains("#EXTINF:1.000000,", playlist);
+        Assert.Contains("#EXT-X-ENDLIST", playlist);
+        Assert.False(process.WasCalled);
+    }
+
+    [Fact]
+    public async Task VirtualMainPlaylistReturnsSingleVariantPlaylist() {
+        var videoId = Guid.Parse("33333333-3333-3333-3333-333333333335");
+        var sourcePath = Path.Combine(_cacheRoot, "source.mkv");
+        await File.WriteAllTextAsync(sourcePath, "source");
+        var process = new ManifestWritingProcessExecutor();
+        var service = new HlsAssetService(
+            new HlsAssetServiceOptions(_cacheRoot),
+            new FakeVideoSourceService(new VideoSourceFile(
+                videoId,
+                sourcePath,
+                "video/x-matroska",
+                false,
+                DurationSeconds: 13,
+                Width: 1920,
+                Height: 1080,
+                BitRate: 8_000_000,
+                VideoCodec: "h264")),
+            process,
+            NullLogger<HlsAssetService>.Instance);
+
+        var main = await service.GetAssetAsync(
+            videoId,
+            VideoPlaybackProtocol.Hls.MainPlaylist,
+            audioStreamIndex: 2,
+            CancellationToken.None);
+
+        Assert.NotNull(main);
+        var playlist = await File.ReadAllTextAsync(main.Path);
+        Assert.Contains("#EXT-X-PLAYLIST-TYPE:VOD", playlist);
+        Assert.Contains("seg_00000.ts?audioStreamIndex=2", playlist);
+        Assert.DoesNotContain("#EXT-X-STREAM-INF", playlist);
+        Assert.False(process.WasCalled);
+    }
+
+    [Fact]
+    public async Task VirtualMasterAdvertisesFullLadderWhenAdaptiveBitrateEnabled() {
+        var videoId = Guid.Parse("33333333-3333-3333-3333-333333333334");
+        var sourcePath = Path.Combine(_cacheRoot, "source.mkv");
+        await File.WriteAllTextAsync(sourcePath, "source");
+        var service = new HlsAssetService(
+            new HlsAssetServiceOptions(_cacheRoot, EnableAdaptiveBitrate: true),
+            new FakeVideoSourceService(new VideoSourceFile(
+                videoId,
+                sourcePath,
+                "video/x-matroska",
+                false,
+                DurationSeconds: 13,
+                Width: 3840,
+                Height: 1920,
+                BitRate: 22_000_000,
+                VideoCodec: "hevc")),
+            new ManifestWritingProcessExecutor(),
+            NullLogger<HlsAssetService>.Instance);
+
+        var master = await service.GetAssetAsync(videoId, "master.m3u8", null, CancellationToken.None);
+
+        Assert.NotNull(master);
+        var masterPlaylist = await File.ReadAllTextAsync(master.Path);
+        // With adaptive bitrate enabled the full ladder is advertised so the player can switch quality.
+        Assert.Contains("v/40mbps/stream.m3u8", masterPlaylist);
+        Assert.Contains("v/20mbps/stream.m3u8", masterPlaylist);
+        Assert.Contains("v/8mbps/stream.m3u8", masterPlaylist);
+        Assert.Contains("v/720kbps/stream.m3u8", masterPlaylist);
+        Assert.Contains("RESOLUTION=2880x1440", masterPlaylist);
+        Assert.Contains("RESOLUTION=960x480", masterPlaylist);
+    }
+
+    [Fact]
+    public async Task VirtualManifestAdvertisesGeneratedTrickplayPlaylist() {
+        await using var db = CreateContext();
+        var videoId = Guid.Parse("55555555-5555-5555-5555-555555555555");
+        db.Entities.Add(new EntityRow {
+            Id = videoId,
+            KindCode = EntityKind.Video.ToCode(),
+            Title = "Video",
+            CreatedAt = DateTimeOffset.UtcNow,
+            UpdatedAt = DateTimeOffset.UtcNow
+        });
+        db.TrickplayInfos.Add(new TrickplayInfoRow {
+            EntityId = videoId,
+            Width = 280,
+            Height = 158,
+            TileWidth = 4,
+            TileHeight = 4,
+            ThumbnailCount = 16,
+            IntervalSeconds = 7,
+            Bandwidth = 1234,
+            CreatedAt = DateTimeOffset.UtcNow,
+            UpdatedAt = DateTimeOffset.UtcNow
+        });
+        await db.SaveChangesAsync();
+        var sourcePath = Path.Combine(_cacheRoot, "source.mkv");
+        await File.WriteAllTextAsync(sourcePath, "source");
+        var service = new HlsAssetService(
+            new HlsAssetServiceOptions(_cacheRoot),
+            new FakeVideoSourceService(new VideoSourceFile(
+                videoId,
+                sourcePath,
+                "video/x-matroska",
+                false,
+                DurationSeconds: 13,
+                Width: 1920,
+                Height: 960)),
+            new ManifestWritingProcessExecutor(),
+            NullLogger<HlsAssetService>.Instance,
+            db);
+
+        var master = await service.GetAssetAsync(videoId, "master.m3u8", null, CancellationToken.None);
+
+        Assert.NotNull(master);
+        var content = await File.ReadAllTextAsync(master.Path);
+        Assert.Contains(
+            $"#EXT-X-IMAGE-STREAM-INF:BANDWIDTH=1234,RESOLUTION=280x158,CODECS=\"jpeg\",URI=\"{VideoPlaybackProtocol.TrickplayPlaylistPath(videoId, 280)}\"",
+            content);
+    }
+
+    [Fact]
+    public async Task ConcurrentVirtualCacheRefreshesDoNotRaceDirectoryDeletion() {
+        var videoId = Guid.Parse("66666666-6666-6666-6666-666666666666");
+        var sourcePath = Path.Combine(_cacheRoot, "source.mkv");
+        await File.WriteAllTextAsync(sourcePath, "source");
+        var virtualRoot = Path.Combine(_cacheRoot, "hlsv", videoId.ToString());
+        Directory.CreateDirectory(Path.Combine(virtualRoot, "v", "720p"));
+        await File.WriteAllTextAsync(
+            Path.Combine(virtualRoot, "metadata.json"),
+            """
+            {
+              "SourcePath": "/stale/source.mkv",
+              "SourceSize": 1,
+              "SourceModifiedUtc": "2001-01-01T00:00:00Z",
+              "DurationSeconds": 1,
+              "Renditions": ["720p"]
+            }
+            """);
+        await File.WriteAllTextAsync(Path.Combine(virtualRoot, "v", "720p", "seg_00000.ts"), "stale");
+        var source = new VideoSourceFile(
+            videoId,
+            sourcePath,
+            "video/x-matroska",
+            false,
+            DurationSeconds: 13,
+            Width: 1920,
+            Height: 960);
+        var service = new HlsAssetService(
+            new HlsAssetServiceOptions(_cacheRoot),
+            new CoordinatedVideoSourceService(source, expectedCalls: 12),
+            new ManifestWritingProcessExecutor(),
+            NullLogger<HlsAssetService>.Instance);
+
+        var requests = Enumerable.Range(0, 12)
+            .Select(index => service.GetAssetAsync(
+                videoId,
+                index % 2 == 0 ? "master.m3u8" : "v/720p/stream.m3u8",
+                null,
+                CancellationToken.None))
+            .ToArray();
+        var assets = await Task.WhenAll(requests);
+
+        Assert.All(assets, Assert.NotNull);
+        Assert.True(File.Exists(Path.Combine(virtualRoot, "metadata.json")));
+    }
+
+    [Fact]
+    public async Task VirtualCacheFromPriorFormatVersionIsRefreshed() {
+        var videoId = Guid.Parse("88888888-8888-8888-8888-888888888888");
+        var sourcePath = Path.Combine(_cacheRoot, "source.mkv");
+        await File.WriteAllTextAsync(sourcePath, "source");
+        var sourceInfo = new FileInfo(sourcePath);
+        var virtualRoot = Path.Combine(_cacheRoot, "hlsv", videoId.ToString());
+        Directory.CreateDirectory(Path.Combine(virtualRoot, "v", "720p"));
+        await File.WriteAllTextAsync(
+            Path.Combine(virtualRoot, "metadata.json"),
+            $$"""
+            {
+              "SourcePath": "{{sourcePath.Replace("\\", "\\\\")}}",
+              "SourceSize": {{sourceInfo.Length}},
+              "SourceModifiedUtc": "{{sourceInfo.LastWriteTimeUtc:O}}",
+              "DurationSeconds": 13,
+              "Renditions": ["720p"],
+              "FormatVersion": 12
+            }
+            """);
+        await File.WriteAllTextAsync(Path.Combine(virtualRoot, "v", "720p", "seg_00000.ts"), "old");
+        var service = new HlsAssetService(
+            new HlsAssetServiceOptions(_cacheRoot),
+            new FakeVideoSourceService(new VideoSourceFile(
+                videoId,
+                sourcePath,
+                "video/x-matroska",
+                false,
+                DurationSeconds: 13,
+                Width: 1920,
+                Height: 960)),
+            new ManifestWritingProcessExecutor(),
+            NullLogger<HlsAssetService>.Instance);
+
+        var asset = await service.GetAssetAsync(videoId, "master.m3u8", null, CancellationToken.None);
+
+        Assert.NotNull(asset);
+        var metadata = await File.ReadAllTextAsync(Path.Combine(virtualRoot, "metadata.json"));
+        // Asserted against the stale version rather than the current one, so bumping the format to discard
+        // bad cached output does not require editing this test.
+        Assert.DoesNotContain("\"FormatVersion\": 12", metadata);
+        Assert.False(File.Exists(Path.Combine(virtualRoot, "v", "720p", "seg_00000.ts")));
+    }
+
+    [Fact]
+    public async Task VirtualSegmentStartsContinuousRenditionGeneration() {
+        var videoId = Guid.Parse("44444444-4444-4444-4444-444444444444");
+        var sourcePath = Path.Combine(_cacheRoot, "source.mkv");
+        await File.WriteAllTextAsync(sourcePath, "source");
+        var process = new ManifestWritingProcessExecutor();
+        var service = new HlsAssetService(
+            // Pin the software encoder so the libx264 assertion is host-independent; on macOS the
+            // Auto profile resolves to VideoToolbox, which is covered by its own test.
+            new HlsAssetServiceOptions(_cacheRoot, HlsTranscoderProfile.Software),
+            new FakeVideoSourceService(new VideoSourceFile(
+                videoId,
+                sourcePath,
+                "video/x-matroska",
+                false,
+                DurationSeconds: 13,
+                Width: 1920,
+                Height: 960)),
+            process,
+            NullLogger<HlsAssetService>.Instance);
+
+        var segment = await service.GetAssetAsync(videoId, "v/720p/seg_00000.ts", null, CancellationToken.None);
+
+        Assert.NotNull(segment);
+        Assert.Equal("video/mp2t", segment.ContentType);
+        Assert.True(process.WasCalled);
+        Assert.Contains(process.ArgumentHistory, arguments =>
+            arguments.Contains("-hls_segment_filename"));
+        Assert.Contains(process.ArgumentHistory, arguments =>
+            arguments.Contains("libx264"));
+    }
+
+    [Fact]
+    public async Task VirtualSegmentsUseVideoToolboxEncoderWhenConfigured() {
+        var videoId = Guid.Parse("42424242-4242-4242-4242-424242424242");
+        var sourcePath = Path.Combine(_cacheRoot, "source.mkv");
+        await File.WriteAllTextAsync(sourcePath, "source");
+        var process = new ManifestWritingProcessExecutor();
+        var service = new HlsAssetService(
+            new HlsAssetServiceOptions(_cacheRoot, HlsTranscoderProfile.VideoToolbox),
+            new FakeVideoSourceService(new VideoSourceFile(
+                videoId,
+                sourcePath,
+                "video/x-matroska",
+                false,
+                DurationSeconds: 13,
+                Width: 1920,
+                Height: 960)),
+            process,
+            NullLogger<HlsAssetService>.Instance);
+
+        var segment = await service.GetAssetAsync(videoId, "v/720p/seg_00000.ts", null, CancellationToken.None);
+
+        Assert.NotNull(segment);
+        var arguments = Assert.Single(process.ArgumentHistory);
+        Assert.Contains("h264_videotoolbox", arguments);
+        Assert.Contains("-allow_sw", arguments);
+        Assert.DoesNotContain("libx264", arguments);
+    }
+
+    [Fact]
+    public async Task VirtualSegmentsUseVaapiEncoderWhenConfigured() {
+        var videoId = Guid.Parse("43434343-4343-4343-4343-434343434343");
+        var sourcePath = Path.Combine(_cacheRoot, "source.mkv");
+        await File.WriteAllTextAsync(sourcePath, "source");
+        var process = new ManifestWritingProcessExecutor();
+        var service = new HlsAssetService(
+            new HlsAssetServiceOptions(_cacheRoot, HlsTranscoderProfile.Vaapi, VaapiDevice: "/dev/dri/renderD129"),
+            new FakeVideoSourceService(new VideoSourceFile(
+                videoId,
+                sourcePath,
+                "video/x-matroska",
+                false,
+                DurationSeconds: 13,
+                Width: 1920,
+                Height: 960)),
+            process,
+            NullLogger<HlsAssetService>.Instance);
+
+        var segment = await service.GetAssetAsync(videoId, "v/720p/seg_00000.ts", null, CancellationToken.None);
+
+        Assert.NotNull(segment);
+        var arguments = Assert.Single(process.ArgumentHistory);
+        Assert.Contains("-vaapi_device", arguments);
+        Assert.Contains("/dev/dri/renderD129", arguments);
+        Assert.Contains(arguments, argument =>
+            argument.Contains("scale_vaapi=w=1440:h=720:format=nv12", StringComparison.Ordinal));
+        Assert.Contains("h264_vaapi", arguments);
+        Assert.DoesNotContain("libx264", arguments);
+    }
+
+    [Fact]
+    public async Task VirtualSegmentsUseSavedHlsTranscoderSettings() {
+        await using var db = CreateContext();
+        var videoId = Guid.Parse("45454545-4545-4545-4545-454545454545");
+        var sourcePath = Path.Combine(_cacheRoot, "source.mkv");
+        await File.WriteAllTextAsync(sourcePath, "source");
+        db.AppSettings.AddRange(
+            SettingRow(AppSettings.Hls.TranscoderProfile.Key, "Vaapi"),
+            SettingRow(AppSettings.Hls.FfmpegPath.Key, "/usr/local/bin/ffmpeg-gpu"),
+            SettingRow(AppSettings.Hls.VaapiDevice.Key, "/dev/dri/renderD129"));
+        await db.SaveChangesAsync();
+        var process = new ManifestWritingProcessExecutor();
+        var service = new HlsAssetService(
+            new HlsAssetServiceOptions(_cacheRoot),
+            new FakeVideoSourceService(new VideoSourceFile(
+                videoId,
+                sourcePath,
+                "video/x-matroska",
+                false,
+                DurationSeconds: 13,
+                Width: 1920,
+                Height: 960)),
+            process,
+            NullLogger<HlsAssetService>.Instance,
+            db);
+
+        var segment = await service.GetAssetAsync(videoId, "v/720p/seg_00000.ts", null, CancellationToken.None);
+
+        Assert.NotNull(segment);
+        Assert.Equal("/usr/local/bin/ffmpeg-gpu", Assert.Single(process.FileNameHistory));
+        var arguments = Assert.Single(process.ArgumentHistory);
+        Assert.Contains("/dev/dri/renderD129", arguments);
+        Assert.Contains("h264_vaapi", arguments);
+    }
+
+    [Fact]
+    public async Task VirtualSegmentsAreGeneratedByOneContinuousHlsMuxer() {
+        var videoId = Guid.Parse("77777777-7777-7777-7777-777777777777");
+        var sourcePath = Path.Combine(_cacheRoot, "source.mkv");
+        await File.WriteAllTextAsync(sourcePath, "source");
+        var process = new ManifestWritingProcessExecutor();
+        var service = new HlsAssetService(
+            new HlsAssetServiceOptions(_cacheRoot),
+            new FakeVideoSourceService(new VideoSourceFile(
+                videoId,
+                sourcePath,
+                "video/x-matroska",
+                false,
+                DurationSeconds: 13,
+                Width: 1920,
+                Height: 960)),
+            process,
+            NullLogger<HlsAssetService>.Instance);
+
+        var segment = await service.GetAssetAsync(videoId, "v/720p/seg_00001.ts", null, CancellationToken.None);
+
+        Assert.NotNull(segment);
+        var arguments = Assert.Single(process.ArgumentHistory);
+        Assert.Contains("-f", arguments);
+        Assert.Contains("hls", arguments);
+        Assert.Contains("-hls_time", arguments);
+        Assert.Contains(SegmentLengthText, arguments);
+        Assert.Contains("-hls_segment_filename", arguments);
+        Assert.Contains("-hls_flags", arguments);
+        Assert.Contains("temp_file", arguments);
+        Assert.Contains("-start_number", arguments);
+        var startNumberIndex = arguments.ToList().IndexOf("-start_number");
+        Assert.True(startNumberIndex >= 0);
+        Assert.Equal("0", arguments[startNumberIndex + 1]);
+        Assert.Contains("-copyts", arguments);
+        Assert.Contains("-avoid_negative_ts", arguments);
+        Assert.Contains("disabled", arguments);
+        Assert.DoesNotContain("-output_ts_offset", arguments);
+    }
+
+    [Fact]
+    public async Task FarVirtualSegmentStartsGenerationWithOneSegmentPreroll() {
+        var videoId = Guid.Parse("99999999-9999-9999-9999-999999999999");
+        var sourcePath = Path.Combine(_cacheRoot, "source.mkv");
+        await File.WriteAllTextAsync(sourcePath, "source");
+        var process = new ManifestWritingProcessExecutor();
+        var service = new HlsAssetService(
+            new HlsAssetServiceOptions(_cacheRoot),
+            new FakeVideoSourceService(new VideoSourceFile(
+                videoId,
+                sourcePath,
+                "video/x-matroska",
+                false,
+                DurationSeconds: 180,
+                Width: 1920,
+                Height: 960)),
+            process,
+            NullLogger<HlsAssetService>.Instance);
+
+        var segment = await service.GetAssetAsync(videoId, "v/720p/seg_00020.ts", null, CancellationToken.None);
+
+        Assert.NotNull(segment);
+        var arguments = Assert.Single(process.ArgumentHistory);
+        Assert.Contains("-ss", arguments);
+        Assert.Contains("114.000", arguments);
+        var audioFilterIndex = arguments.ToList().IndexOf("-af");
+        Assert.True(audioFilterIndex >= 0);
+        Assert.Equal("aresample=async=1:first_pts=5472000", arguments[audioFilterIndex + 1]);
+        Assert.Contains("-start_number", arguments);
+        var startNumberIndex = arguments.ToList().IndexOf("-start_number");
+        Assert.True(startNumberIndex >= 0);
+        Assert.Equal("19", arguments[startNumberIndex + 1]);
+        Assert.DoesNotContain("-t", arguments);
+    }
+
+    [Fact]
+    public async Task FarVirtualSegmentPrerollsSoRequestedSegmentIsGenerated() {
+        var videoId = Guid.Parse("cccccccc-cccc-cccc-cccc-cccccccccccc");
+        var sourcePath = Path.Combine(_cacheRoot, "source.mkv");
+        await File.WriteAllTextAsync(sourcePath, "source");
+        var process = new WritesOnlyNextSegmentProcessExecutor();
+        var service = new HlsAssetService(
+            new HlsAssetServiceOptions(_cacheRoot),
+            new FakeVideoSourceService(new VideoSourceFile(
+                videoId,
+                sourcePath,
+                "video/x-matroska",
+                false,
+                DurationSeconds: 180,
+                Width: 1920,
+                Height: 960)),
+            process,
+            NullLogger<HlsAssetService>.Instance);
+
+        var segment = await service.GetAssetAsync(videoId, "v/720p/seg_00020.ts", null, CancellationToken.None);
+
+        Assert.NotNull(segment);
+        Assert.Equal("seg_00020.ts", Path.GetFileName(segment.Path));
+        var arguments = Assert.Single(process.ArgumentHistory);
+        Assert.Contains("-ss", arguments);
+        Assert.Contains("114.000", arguments);
+        Assert.Contains("-start_number", arguments);
+        var startNumberIndex = arguments.ToList().IndexOf("-start_number");
+        Assert.True(startNumberIndex >= 0);
+        Assert.Equal("19", arguments[startNumberIndex + 1]);
+    }
+
+    [Fact]
+    public async Task FarVirtualSegmentStartsSeparateGenerationWhenInitialGenerationIsStillRunning() {
+        var videoId = Guid.Parse("ffffffff-ffff-ffff-ffff-ffffffffffff");
+        var sourcePath = Path.Combine(_cacheRoot, "source.mkv");
+        await File.WriteAllTextAsync(sourcePath, "source");
+        var process = new BlockingInitialSegmentProcessExecutor();
+        var service = new HlsAssetService(
+            new HlsAssetServiceOptions(_cacheRoot),
+            new FakeVideoSourceService(new VideoSourceFile(
+                videoId,
+                sourcePath,
+                "video/x-matroska",
+                false,
+                DurationSeconds: 600,
+                Width: 1920,
+                Height: 960)),
+            process,
+            NullLogger<HlsAssetService>.Instance);
+
+        var initialSegment = service.GetAssetAsync(videoId, "v/720p/seg_00000.ts", null, CancellationToken.None);
+        await process.InitialGenerationStarted.Task.WaitAsync(TimeSpan.FromSeconds(5));
+
+        // A segment far beyond the running generation's reuse window is treated as a forward seek:
+        // it starts a fresh generation at the seek point and the original generation is replaced.
+        var farSegment = await service.GetAssetAsync(videoId, "v/720p/seg_00070.ts", null, CancellationToken.None)
+            .WaitAsync(TimeSpan.FromSeconds(5));
+
+        process.ReleaseInitialGeneration();
+        var replacedInitialSegment = await initialSegment.WaitAsync(TimeSpan.FromSeconds(5));
+
+        Assert.Null(replacedInitialSegment);
+        Assert.NotNull(farSegment);
+        Assert.Equal("seg_00070.ts", Path.GetFileName(farSegment.Path));
+        Assert.Equal(2, process.ArgumentHistory.Count);
+        Assert.Contains(process.ArgumentHistory, arguments => {
+            var startNumberIndex = arguments.ToList().IndexOf("-start_number");
+            return startNumberIndex >= 0 && arguments[startNumberIndex + 1] == "0";
+        });
+        Assert.Contains(process.ArgumentHistory, arguments => {
+            var startNumberIndex = arguments.ToList().IndexOf("-start_number");
+            return startNumberIndex >= 0 && arguments[startNumberIndex + 1] == "69";
+        });
+    }
+
+    [Fact]
+    public async Task FarVirtualSegmentDoesNotCancelOtherActiveRenditionsForSameAudioTrack() {
+        var videoId = Guid.Parse("eeeeeeee-eeee-eeee-eeee-eeeeeeeeeeee");
+        var sourcePath = Path.Combine(_cacheRoot, "source.mkv");
+        await File.WriteAllTextAsync(sourcePath, "source");
+        var process = new BlockingInitialSegmentProcessExecutor();
+        var service = new HlsAssetService(
+            new HlsAssetServiceOptions(_cacheRoot),
+            new FakeVideoSourceService(new VideoSourceFile(
+                videoId,
+                sourcePath,
+                "video/x-matroska",
+                false,
+                DurationSeconds: 180,
+                Width: 3840,
+                Height: 1920)),
+            process,
+            NullLogger<HlsAssetService>.Instance);
+
+        var initialSegment = service.GetAssetAsync(videoId, "v/8mbps/seg_00000.ts", null, CancellationToken.None);
+        await process.InitialGenerationStarted.Task.WaitAsync(TimeSpan.FromSeconds(5));
+
+        var farSegment = await service.GetAssetAsync(videoId, "v/720kbps/seg_00020.ts", null, CancellationToken.None)
+            .WaitAsync(TimeSpan.FromSeconds(5));
+        process.ReleaseInitialGeneration();
+        var completedInitialSegment = await initialSegment.WaitAsync(TimeSpan.FromSeconds(5));
+
+        Assert.NotNull(completedInitialSegment);
+        Assert.Equal("seg_00000.ts", Path.GetFileName(completedInitialSegment.Path));
+        Assert.NotNull(farSegment);
+        Assert.Equal("seg_00020.ts", Path.GetFileName(farSegment.Path));
+        Assert.Contains(process.ArgumentHistory, arguments =>
+            arguments.Any(argument => argument.Contains("/8mbps/", StringComparison.Ordinal)) &&
+            arguments.Contains("0"));
+        Assert.Contains(process.ArgumentHistory, arguments =>
+            arguments.Any(argument => argument.Contains("/720kbps/", StringComparison.Ordinal)) &&
+            arguments.Contains("19"));
+    }
+
+    [Fact]
+    public async Task CancellingPlaybackSessionCancelsActiveVirtualGenerationForItem() {
+        var videoId = Guid.Parse("fefefefe-fefe-fefe-fefe-fefefefefefe");
+        var sourcePath = Path.Combine(_cacheRoot, "source.mkv");
+        await File.WriteAllTextAsync(sourcePath, "source");
+        var process = new BlockingInitialSegmentProcessExecutor();
+        var service = new HlsAssetService(
+            new HlsAssetServiceOptions(_cacheRoot),
+            new FakeVideoSourceService(new VideoSourceFile(
+                videoId,
+                sourcePath,
+                "video/x-matroska",
+                false,
+                DurationSeconds: 180,
+                Width: 1920,
+                Height: 960)),
+            process,
+            NullLogger<HlsAssetService>.Instance);
+        var sessions = new TranscodeSessionService();
+        sessions.Register("session-1", videoId);
+
+        var initialSegment = service.GetAssetAsync(videoId, "v/720p/seg_00000.ts", null, CancellationToken.None);
+        await process.InitialGenerationStarted.Task.WaitAsync(TimeSpan.FromSeconds(5));
+
+        await sessions.CancelAsync("session-1", CancellationToken.None);
+        process.ReleaseInitialGeneration();
+        var cancelledSegment = await initialSegment.WaitAsync(TimeSpan.FromSeconds(5));
+
+        Assert.Null(cancelledSegment);
+    }
+
+    [Fact]
+    public async Task VirtualSegmentsUseDefaultSourceAudioStream() {
+        var videoId = Guid.Parse("bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb");
+        var sourcePath = Path.Combine(_cacheRoot, "source.mkv");
+        await File.WriteAllTextAsync(sourcePath, "source");
+        var process = new ManifestWritingProcessExecutor();
+        var service = new HlsAssetService(
+            new HlsAssetServiceOptions(_cacheRoot),
+            new FakeVideoSourceService(new VideoSourceFile(
+                videoId,
+                sourcePath,
+                "video/x-matroska",
+                false,
+                DurationSeconds: 180,
+                Width: 1920,
+                Height: 960,
+                Streams:
+                [
+                    new(0, "Video", "h264", null, "Video", 1920, 960, 24, null, null, null, true, false),
+                    new(1, "Audio", "aac", "spa", "Spanish", null, null, null, null, 48000, 2, false, false),
+                    new(2, "Audio", "aac", "eng", "English", null, null, null, null, 48000, 2, true, false)
+                ])),
+            process,
+            NullLogger<HlsAssetService>.Instance);
+
+        var segment = await service.GetAssetAsync(videoId, "v/720p/seg_00000.ts", null, CancellationToken.None);
+
+        Assert.NotNull(segment);
+        var arguments = Assert.Single(process.ArgumentHistory);
+        Assert.Contains("-map", arguments);
+        Assert.Contains("0:2?", arguments);
+    }
+
+    [Fact]
+    public async Task VirtualSegmentsToneMapHdrSourcesToBt709SoftwareOutput() {
+        var videoId = Guid.Parse("abababab-abab-abab-abab-abababababab");
+        var sourcePath = Path.Combine(_cacheRoot, "hdr-source.mkv");
+        await File.WriteAllTextAsync(sourcePath, "source");
+        var process = new ManifestWritingProcessExecutor();
+        var service = new HlsAssetService(
+            new HlsAssetServiceOptions(_cacheRoot, HlsTranscoderProfile.Vaapi),
+            new FakeVideoSourceService(new VideoSourceFile(
+                videoId,
+                sourcePath,
+                "video/x-matroska",
+                false,
+                DurationSeconds: 180,
+                Width: 3840,
+                Height: 2160,
+                Streams:
+                [
+                    new(0, "Video", "hevc", null, "Video", 3840, 2160, 24, null, null, null, true, false) {
+                        PixelFormat = "yuv420p10le",
+                        ColorTransfer = "smpte2084",
+                        ColorPrimaries = "bt2020",
+                        ColorSpace = "bt2020nc"
+                    }
+                ])),
+            process,
+            NullLogger<HlsAssetService>.Instance);
+
+        var segment = await service.GetAssetAsync(videoId, "v/8mbps/seg_00000.ts", null, CancellationToken.None);
+
+        Assert.NotNull(segment);
+        var arguments = Assert.Single(process.ArgumentHistory);
+        Assert.Contains("libx264", arguments);
+        Assert.DoesNotContain("h264_vaapi", arguments);
+        Assert.Contains(arguments, argument =>
+            argument.Contains("zscale=t=linear", StringComparison.Ordinal) &&
+            argument.Contains("tonemap=tonemap=hable", StringComparison.Ordinal) &&
+            argument.Contains("zscale=t=bt709:m=bt709:p=bt709", StringComparison.Ordinal) &&
+            argument.Contains("format=yuv420p", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public async Task VirtualSegmentsUseTonemapxForDolbyVisionProfileFiveSources() {
+        var videoId = Guid.Parse("bcbcbcbc-bcbc-bcbc-bcbc-bcbcbcbcbcbc");
+        var sourcePath = Path.Combine(_cacheRoot, "dovi-source.mkv");
+        await File.WriteAllTextAsync(sourcePath, "source");
+        var process = new ManifestWritingProcessExecutor();
+        var service = new HlsAssetService(
+            new HlsAssetServiceOptions(_cacheRoot, HlsTranscoderProfile.Software),
+            new FakeVideoSourceService(new VideoSourceFile(
+                videoId,
+                sourcePath,
+                "video/x-matroska",
+                false,
+                DurationSeconds: 180,
+                Width: 3840,
+                Height: 1920,
+                Streams:
+                [
+                    new(0, "Video", "hevc", null, "Video", 3840, 1920, 24, null, null, null, true, false) {
+                        PixelFormat = "yuv420p10le",
+                        ColorRange = "pc",
+                        DvProfile = 5,
+                        DvLevel = 6,
+                        RpuPresentFlag = true,
+                        BlPresentFlag = true,
+                        DvBlSignalCompatibilityId = 0
+                    }
+                ])),
+            process,
+            NullLogger<HlsAssetService>.Instance);
+
+        var segment = await service.GetAssetAsync(videoId, "v/8mbps/seg_00000.ts", null, CancellationToken.None);
+
+        Assert.NotNull(segment);
+        var arguments = Assert.Single(process.ArgumentHistory);
+        // Profile 5 must tone-map via tonemapx (which applies the Dolby Vision RPU) on the full-res
+        // decoded frames BEFORE scaling — swscale would otherwise drop the RPU side data — and must
+        // not force input colour tags. See FfmpegToneMapping for the rationale.
+        Assert.Contains(arguments, argument =>
+            argument.Contains("tonemapx=tonemap=bt2390", StringComparison.Ordinal) &&
+            argument.Contains("peak=100", StringComparison.Ordinal) &&
+            argument.Contains("r=tv:format=yuv420p", StringComparison.Ordinal) &&
+            !argument.Contains("setparams", StringComparison.Ordinal) &&
+            argument.IndexOf("tonemapx", StringComparison.Ordinal) <
+                argument.IndexOf("scale=", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public async Task VirtualSegmentsUseHdrToneMappingForDolbyVisionProfileEightSources() {
+        var videoId = Guid.Parse("c8c8c8c8-c8c8-c8c8-c8c8-c8c8c8c8c8c8");
+        var sourcePath = Path.Combine(_cacheRoot, "dovi-profile-eight-source.mkv");
+        await File.WriteAllTextAsync(sourcePath, "source");
+        var process = new ManifestWritingProcessExecutor();
+        var service = new HlsAssetService(
+            new HlsAssetServiceOptions(_cacheRoot, HlsTranscoderProfile.Software),
+            new FakeVideoSourceService(new VideoSourceFile(
+                videoId,
+                sourcePath,
+                "video/x-matroska",
+                false,
+                DurationSeconds: 180,
+                Width: 3840,
+                Height: 1920,
+                Streams:
+                [
+                    new(0, "Video", "hevc", null, "Video", 3840, 1920, 24, null, null, null, true, false) {
+                        PixelFormat = "yuv420p10le",
+                        ColorTransfer = "smpte2084",
+                        ColorPrimaries = "bt2020",
+                        ColorSpace = "bt2020nc",
+                        DvProfile = 8,
+                        DvLevel = 6,
+                        RpuPresentFlag = true,
+                        BlPresentFlag = true,
+                        DvBlSignalCompatibilityId = 1
+                    }
+                ])),
+            process,
+            NullLogger<HlsAssetService>.Instance);
+
+        var segment = await service.GetAssetAsync(videoId, "v/8mbps/seg_00000.ts", null, CancellationToken.None);
+
+        Assert.NotNull(segment);
+        var arguments = Assert.Single(process.ArgumentHistory);
+        Assert.DoesNotContain(arguments, argument => argument.Contains("tonemapx", StringComparison.Ordinal));
+        Assert.Contains(arguments, argument =>
+            argument.Contains("zscale=t=linear", StringComparison.Ordinal) &&
+            argument.Contains("tonemap=tonemap=hable", StringComparison.Ordinal) &&
+            argument.Contains("format=yuv420p", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public async Task VirtualSegmentsRetryToneMappedSourcesWithBasicSoftwareOutputWhenFilterIsMissing() {
+        var videoId = Guid.Parse("d9d9d9d9-d9d9-d9d9-d9d9-d9d9d9d9d9d9");
+        var sourcePath = Path.Combine(_cacheRoot, "dovi-profile-eight-missing-filter-source.mkv");
+        await File.WriteAllTextAsync(sourcePath, "source");
+        var process = new MissingToneMapFilterThenWritingProcessExecutor();
+        var service = new HlsAssetService(
+            new HlsAssetServiceOptions(_cacheRoot, HlsTranscoderProfile.Software),
+            new FakeVideoSourceService(new VideoSourceFile(
+                videoId,
+                sourcePath,
+                "video/x-matroska",
+                false,
+                DurationSeconds: 180,
+                Width: 3840,
+                Height: 1920,
+                Streams:
+                [
+                    new(0, "Video", "hevc", null, "Video", 3840, 1920, 24, null, null, null, true, false) {
+                        PixelFormat = "yuv420p10le",
+                        ColorTransfer = "smpte2084",
+                        ColorPrimaries = "bt2020",
+                        ColorSpace = "bt2020nc",
+                        DvProfile = 8,
+                        DvLevel = 6,
+                        RpuPresentFlag = true,
+                        BlPresentFlag = true,
+                        DvBlSignalCompatibilityId = 1
+                    }
+                ])),
+            process,
+            NullLogger<HlsAssetService>.Instance);
+
+        var segment = await service.GetAssetAsync(videoId, "v/8mbps/seg_00000.ts", null, CancellationToken.None);
+
+        Assert.NotNull(segment);
+        Assert.Equal(2, process.ArgumentHistory.Count);
+        Assert.Contains(process.ArgumentHistory[0], argument =>
+            argument.Contains("zscale=t=linear", StringComparison.Ordinal) &&
+            argument.Contains("tonemap=tonemap=hable", StringComparison.Ordinal));
+        Assert.Contains(process.ArgumentHistory[1], argument =>
+            argument.Contains("scale=w=-2:h=1080", StringComparison.Ordinal) &&
+            argument.Contains("format=yuv420p", StringComparison.Ordinal));
+        Assert.DoesNotContain(process.ArgumentHistory[1], argument => argument.Contains("tonemap", StringComparison.Ordinal));
+        Assert.True(File.Exists(segment.Path));
+    }
+
+    [Fact]
+    public async Task MissingVirtualSegmentReturnsNullAsset() {
+        var videoId = Guid.Parse("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa");
+        var sourcePath = Path.Combine(_cacheRoot, "source.mkv");
+        await File.WriteAllTextAsync(sourcePath, "source");
+        var service = new HlsAssetService(
+            new HlsAssetServiceOptions(_cacheRoot),
+            new FakeVideoSourceService(new VideoSourceFile(
+                videoId,
+                sourcePath,
+                "video/x-matroska",
+                false,
+                DurationSeconds: 180,
+                Width: 1920,
+                Height: 960)),
+            new MissingSegmentProcessExecutor(),
+            NullLogger<HlsAssetService>.Instance);
+
+        var segment = await service.GetAssetAsync(videoId, "v/720p/seg_00020.ts", null, CancellationToken.None);
+
+        Assert.Null(segment);
+    }
+
+    [Fact]
+    public async Task FailedVirtualSegmentGenerationReturnsNullAsset() {
+        var videoId = Guid.Parse("dddddddd-dddd-dddd-dddd-dddddddddddd");
+        var sourcePath = Path.Combine(_cacheRoot, "source.mkv");
+        await File.WriteAllTextAsync(sourcePath, "source");
+        var service = new HlsAssetService(
+            new HlsAssetServiceOptions(_cacheRoot),
+            new FakeVideoSourceService(new VideoSourceFile(
+                videoId,
+                sourcePath,
+                "video/x-matroska",
+                false,
+                DurationSeconds: 180,
+                Width: 1920,
+                Height: 960)),
+            new FailingProcessExecutor(),
+            NullLogger<HlsAssetService>.Instance);
+
+        var segment = await service.GetAssetAsync(videoId, "v/720p/seg_00000.ts", null, CancellationToken.None);
+
+        Assert.Null(segment);
+    }
+
+    public void Dispose() {
+        if (Directory.Exists(_cacheRoot)) {
+            DeleteDirectoryWithRetry(_cacheRoot);
+        }
+    }
+
+    private static void DeleteDirectoryWithRetry(string path) {
+        for (var attempt = 0; attempt < 5; attempt++) {
+            try {
+                Directory.Delete(path, recursive: true);
+                return;
+            } catch (IOException) when (attempt < 4) {
+                Thread.Sleep(50);
+            }
+        }
+    }
+
+    private static PrismediaDbContext CreateContext() {
+        var options = new DbContextOptionsBuilder<PrismediaDbContext>()
+            .UseInMemoryDatabase($"hls-assets-{Guid.NewGuid():N}")
+            .Options;
+
+        return new PrismediaDbContext(options);
+    }
+
+    private static AppSettingRow SettingRow(string key, string value) {
+        var now = DateTimeOffset.UtcNow;
+        return new AppSettingRow {
+            Key = key,
+            ValueJson = JsonSerializer.Serialize(value),
+            CreatedAt = now,
+            UpdatedAt = now,
+        };
+    }
+
+    private static List<HlsAssetService.RemuxKeyframe> ClosedGop(params double[] times) =>
+        times.Select(time => new HlsAssetService.RemuxKeyframe(time, time)).ToList();
+
+    private sealed class FakeVideoSourceService : IVideoSourceService {
+        private readonly VideoSourceFile _source;
+
+        public FakeVideoSourceService(VideoSourceFile source) {
+            _source = source;
+        }
+
+        public Task<VideoSourceFile?> GetSourceAsync(Guid id, CancellationToken cancellationToken) {
+            return Task.FromResult(id == _source.EntityId ? _source : null);
+        }
+    }
+
+    private sealed class CoordinatedVideoSourceService : IVideoSourceService {
+        private readonly VideoSourceFile _source;
+        private readonly int _expectedCalls;
+        private readonly TaskCompletionSource _allArrived = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        private int _calls;
+
+        public CoordinatedVideoSourceService(VideoSourceFile source, int expectedCalls) {
+            _source = source;
+            _expectedCalls = expectedCalls;
+        }
+
+        public async Task<VideoSourceFile?> GetSourceAsync(Guid id, CancellationToken cancellationToken) {
+            if (Interlocked.Increment(ref _calls) >= _expectedCalls) {
+                _allArrived.TrySetResult();
+            }
+
+            await _allArrived.Task.WaitAsync(TimeSpan.FromSeconds(5), cancellationToken);
+            return id == _source.EntityId ? _source : null;
+        }
+    }
+
+    private sealed class ManifestWritingProcessExecutor : ProcessExecutor {
+        public bool WasCalled { get; private set; }
+        public IReadOnlyList<string> LastArguments { get; private set; } = [];
+        public List<string> FileNameHistory { get; } = [];
+        public List<IReadOnlyList<string>> ArgumentHistory { get; } = [];
+
+        public override async Task<ProcessExecutionResult> RunAsync(
+            string fileName,
+            IReadOnlyList<string> arguments,
+            IReadOnlyDictionary<string, string>? environment,
+            CancellationToken cancellationToken, bool lowPriority = false) {
+            WasCalled = true;
+            LastArguments = arguments;
+            FileNameHistory.Add(fileName);
+            ArgumentHistory.Add(arguments);
+            var outputPath = arguments[^1];
+            Directory.CreateDirectory(Path.GetDirectoryName(outputPath)!);
+            var segmentPatternIndex = arguments.ToList().IndexOf("-hls_segment_filename");
+            if (segmentPatternIndex >= 0 &&
+                segmentPatternIndex < arguments.Count - 1) {
+                var segmentPattern = arguments[segmentPatternIndex + 1];
+                var startNumberIndex = arguments.ToList().IndexOf("-start_number");
+                var startNumber = startNumberIndex >= 0 &&
+                    startNumberIndex < arguments.Count - 1 &&
+                    int.TryParse(arguments[startNumberIndex + 1], out var parsedStart)
+                        ? parsedStart
+                        : 0;
+                for (var index = startNumber; index < startNumber + 5; index++) {
+                    await File.WriteAllTextAsync(
+                        segmentPattern.Replace("%05d", index.ToString("00000")),
+                        "segment",
+                        cancellationToken);
+                }
+            }
+
+            await File.WriteAllTextAsync(outputPath, "segment", cancellationToken);
+            return new ProcessExecutionResult(0, string.Empty, string.Empty);
+        }
+    }
+
+    private sealed class RemuxPreparationProcessExecutor : ProcessExecutor {
+        public int ProbeCount { get; private set; }
+        public bool ProbeWasLowPriority { get; private set; }
+
+        public override async Task<ProcessExecutionResult> RunAsync(
+            string fileName,
+            IReadOnlyList<string> arguments,
+            IReadOnlyDictionary<string, string>? environment,
+            CancellationToken cancellationToken,
+            bool lowPriority = false) {
+            if (arguments.Contains("packet=pts_time,flags")) {
+                ProbeCount++;
+                ProbeWasLowPriority = lowPriority;
+                return new ProcessExecutionResult(
+                    0,
+                    "0.000000,K__\n6.000000,K__\n12.000000,K__\n",
+                    string.Empty);
+            }
+
+            var outputPath = arguments[^1];
+            Directory.CreateDirectory(Path.GetDirectoryName(outputPath)!);
+            await File.WriteAllTextAsync(
+                outputPath,
+                "#EXTM3U\n#EXT-X-PLAYLIST-TYPE:EVENT\n",
+                cancellationToken);
+            return new ProcessExecutionResult(0, string.Empty, string.Empty);
+        }
+    }
+
+    private sealed class MissingSegmentProcessExecutor : ProcessExecutor {
+        public override async Task<ProcessExecutionResult> RunAsync(
+            string fileName,
+            IReadOnlyList<string> arguments,
+            IReadOnlyDictionary<string, string>? environment,
+            CancellationToken cancellationToken, bool lowPriority = false) {
+            var outputPath = arguments[^1];
+            Directory.CreateDirectory(Path.GetDirectoryName(outputPath)!);
+            await File.WriteAllTextAsync(outputPath, "playlist", cancellationToken);
+            return new ProcessExecutionResult(0, string.Empty, string.Empty);
+        }
+    }
+
+    private sealed class FailingProcessExecutor : ProcessExecutor {
+        public override Task<ProcessExecutionResult> RunAsync(
+            string fileName,
+            IReadOnlyList<string> arguments,
+            IReadOnlyDictionary<string, string>? environment,
+            CancellationToken cancellationToken, bool lowPriority = false) =>
+            Task.FromResult(new ProcessExecutionResult(1, string.Empty, "No such filter: 'tonemapx'"));
+    }
+
+    private sealed class MissingToneMapFilterThenWritingProcessExecutor : ProcessExecutor {
+        public List<IReadOnlyList<string>> ArgumentHistory { get; } = [];
+
+        public override async Task<ProcessExecutionResult> RunAsync(
+            string fileName,
+            IReadOnlyList<string> arguments,
+            IReadOnlyDictionary<string, string>? environment,
+            CancellationToken cancellationToken, bool lowPriority = false) {
+            ArgumentHistory.Add(arguments);
+            if (arguments.Any(argument => argument.Contains("tonemap", StringComparison.Ordinal))) {
+                return new ProcessExecutionResult(1, string.Empty, "No such filter: 'zscale'");
+            }
+
+            var outputPath = arguments[^1];
+            Directory.CreateDirectory(Path.GetDirectoryName(outputPath)!);
+            var segmentPatternIndex = arguments.ToList().IndexOf("-hls_segment_filename");
+            if (segmentPatternIndex >= 0 && segmentPatternIndex < arguments.Count - 1) {
+                var segmentPattern = arguments[segmentPatternIndex + 1];
+                await File.WriteAllTextAsync(segmentPattern.Replace("%05d", "00000"), "segment", cancellationToken);
+            }
+
+            await File.WriteAllTextAsync(outputPath, "playlist", cancellationToken);
+            return new ProcessExecutionResult(0, string.Empty, string.Empty);
+        }
+    }
+
+    private sealed class WritesOnlyNextSegmentProcessExecutor : ProcessExecutor {
+        public List<IReadOnlyList<string>> ArgumentHistory { get; } = [];
+
+        public override async Task<ProcessExecutionResult> RunAsync(
+            string fileName,
+            IReadOnlyList<string> arguments,
+            IReadOnlyDictionary<string, string>? environment,
+            CancellationToken cancellationToken, bool lowPriority = false) {
+            ArgumentHistory.Add(arguments);
+            var outputPath = arguments[^1];
+            Directory.CreateDirectory(Path.GetDirectoryName(outputPath)!);
+            var segmentPatternIndex = arguments.ToList().IndexOf("-hls_segment_filename");
+            var startNumberIndex = arguments.ToList().IndexOf("-start_number");
+            if (segmentPatternIndex >= 0 &&
+                startNumberIndex >= 0 &&
+                segmentPatternIndex < arguments.Count - 1 &&
+                startNumberIndex < arguments.Count - 1 &&
+                int.TryParse(arguments[startNumberIndex + 1], out var startNumber)) {
+                var segmentPattern = arguments[segmentPatternIndex + 1];
+                await File.WriteAllTextAsync(
+                    segmentPattern.Replace("%05d", (startNumber + 1).ToString("00000")),
+                    "segment",
+                    cancellationToken);
+            }
+
+            await File.WriteAllTextAsync(outputPath, "playlist", cancellationToken);
+            return new ProcessExecutionResult(0, string.Empty, string.Empty);
+        }
+    }
+
+    private sealed class BlockingInitialSegmentProcessExecutor : ProcessExecutor {
+        private readonly TaskCompletionSource _releaseInitialGeneration = new(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        public TaskCompletionSource InitialGenerationStarted { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        public List<IReadOnlyList<string>> ArgumentHistory { get; } = [];
+
+        public void ReleaseInitialGeneration() {
+            _releaseInitialGeneration.TrySetResult();
+        }
+
+        public override async Task<ProcessExecutionResult> RunAsync(
+            string fileName,
+            IReadOnlyList<string> arguments,
+            IReadOnlyDictionary<string, string>? environment,
+            CancellationToken cancellationToken, bool lowPriority = false) {
+            ArgumentHistory.Add(arguments);
+            var outputPath = arguments[^1];
+            Directory.CreateDirectory(Path.GetDirectoryName(outputPath)!);
+
+            var segmentPatternIndex = arguments.ToList().IndexOf("-hls_segment_filename");
+            var startNumberIndex = arguments.ToList().IndexOf("-start_number");
+            var segmentPattern = segmentPatternIndex >= 0 && segmentPatternIndex < arguments.Count - 1
+                ? arguments[segmentPatternIndex + 1]
+                : null;
+            var startNumber = startNumberIndex >= 0 &&
+                startNumberIndex < arguments.Count - 1 &&
+                int.TryParse(arguments[startNumberIndex + 1], out var parsedStart)
+                    ? parsedStart
+                    : 0;
+
+            if (startNumber == 0) {
+                InitialGenerationStarted.TrySetResult();
+                await _releaseInitialGeneration.Task.WaitAsync(TimeSpan.FromSeconds(5), cancellationToken);
+            }
+
+            if (segmentPattern is not null) {
+                var segmentToWrite = startNumber == 0 ? startNumber : startNumber + 1;
+                await File.WriteAllTextAsync(
+                    segmentPattern.Replace("%05d", segmentToWrite.ToString("00000")),
+                    "segment",
+                    cancellationToken);
+            }
+
+            await File.WriteAllTextAsync(outputPath, "playlist", cancellationToken);
+            return new ProcessExecutionResult(0, string.Empty, string.Empty);
+        }
+    }
+}

@@ -1,0 +1,406 @@
+using Microsoft.EntityFrameworkCore;
+using Microsoft.Extensions.Logging.Abstractions;
+using Prismedia.Application.Acquisition;
+using Prismedia.Application.Entities;
+using Prismedia.Application.Jobs;
+using Prismedia.Application.Jobs.Handlers;
+using Prismedia.Application.Requests;
+using Prismedia.Contracts.Acquisition;
+using Prismedia.Contracts.Entities;
+using Prismedia.Contracts.Plugins;
+using Prismedia.Domain.Entities;
+using Prismedia.Infrastructure.Acquisition;
+using Prismedia.Infrastructure.Persistence;
+using Prismedia.Infrastructure.Persistence.Entities;
+using Prismedia.Infrastructure.Plugins;
+
+namespace Prismedia.Infrastructure.Tests;
+
+/// <summary>
+/// Covers the request-time metadata enrichment handler: it fills the held acquisition's gaps from the
+/// provider lookup, skips when there is no external identity to look up, and is a best-effort no-op when the provider
+/// returns nothing.
+/// </summary>
+public sealed class AcquisitionEnrichJobHandlerTests {
+    [Fact]
+    public async Task LeafEnrichmentRepairsMissingEpisodeIdentityWithoutRecreatingTheRequest() {
+        await using var db = CreateContext();
+        var entityId = Guid.NewGuid();
+        var id = await SeedAsync(db, "tmdbepisode", "123:2:4", null, entityId);
+        var row = await db.Acquisitions.SingleAsync(row => row.Id == id);
+        row.Kind = EntityKind.VideoEpisode;
+        db.Entities.Add(new EntityRow {
+            Id = entityId, KindCode = EntityKind.VideoEpisode.ToCode(), Title = "Existing wanted episode", IsWanted = true
+        });
+        await db.SaveChangesAsync();
+        var patch = EmptyPatch() with {
+            Positions = new Dictionary<string, int> {
+                [EntityPositionCodes.Season] = 2, [EntityPositionCodes.Episode] = 4
+            }
+        };
+
+        await RunAsync(db, new FakeEnricher(new RequestMetadataEnrichment(null, null, null, patch)), id);
+
+        Assert.Equal(4, (await db.Entities.FindAsync(entityId))!.SortOrder);
+        var input = await AcquisitionTestFactory.Store(db).GetSearchInputAsync(id, CancellationToken.None);
+        Assert.Equal(2, input!.SeasonNumber);
+        Assert.Equal(4, input.EpisodeNumber);
+        Assert.Single(await db.Entities.ToArrayAsync());
+        Assert.Single(await db.Acquisitions.ToArrayAsync());
+    }
+
+    [Fact]
+    public async Task FillsGapsFromTheProviderLookup() {
+        await using var db = CreateContext();
+        var id = await SeedAsync(db, identityNamespace: "openlibrary", identityValue: "OL123W", posterUrl: null);
+        var enricher = new FakeEnricher(new RequestMetadataEnrichment("A fuller description from the provider.", "http://covers/OL123W.jpg", 2024));
+
+        await RunAsync(db, enricher, id);
+
+        var row = await db.Acquisitions.AsNoTracking().FirstAsync(a => a.Id == id);
+        Assert.Equal("http://covers/OL123W.jpg", row.PosterUrl);
+        Assert.Equal("A fuller description from the provider.", row.Description);
+        Assert.Equal(2024, row.Year);
+        Assert.Equal("openlibrary:OL123W", enricher.LookedUp);
+    }
+
+    [Fact]
+    public async Task SkipsWhenThereIsNoExternalIdentityToLookUp() {
+        await using var db = CreateContext();
+        var id = await SeedAsync(db, identityNamespace: null, identityValue: null, posterUrl: null);
+        var enricher = new FakeEnricher(new RequestMetadataEnrichment("x", "y", 1));
+
+        await RunAsync(db, enricher, id);
+
+        Assert.Null(enricher.LookedUp); // never queried the provider
+        Assert.Null((await db.Acquisitions.AsNoTracking().FirstAsync(a => a.Id == id)).PosterUrl);
+    }
+
+    [Fact]
+    public async Task ProviderMissLeavesHeldMetadataUntouched() {
+        await using var db = CreateContext();
+        var id = await SeedAsync(db, identityNamespace: "openlibrary", identityValue: "OL9W", posterUrl: "http://held");
+        var enricher = new FakeEnricher(null); // provider couldn't resolve it
+
+        await RunAsync(db, enricher, id);
+
+        Assert.Equal("http://held", (await db.Acquisitions.AsNoTracking().FirstAsync(a => a.Id == id)).PosterUrl);
+    }
+
+    [Fact]
+    public async Task ChildHydrationReusesItsProviderResponseForAcquisitionMetadata() {
+        await using var db = CreateContext();
+        var entityId = Guid.NewGuid();
+        var id = await SeedAsync(
+            db,
+            identityNamespace: "musicbrainzreleasegroup",
+            identityValue: "RG1",
+            posterUrl: null,
+            entityId);
+        var enricher = new FakeEnricher(new RequestMetadataEnrichment("duplicate", "http://duplicate", 1999));
+        var childHydrator = new FakeChildHydrator(
+            new RequestChildHydrationResult(
+                Hydrated: true,
+                new RequestMetadataEnrichment("album detail", "http://covers/RG1.jpg", 2024)));
+
+        await RunAsync(db, enricher, id, childHydrator);
+
+        var row = await db.Acquisitions.AsNoTracking().FirstAsync(a => a.Id == id);
+        Assert.Equal(entityId, childHydrator.EntityId);
+        Assert.Null(enricher.LookedUp);
+        Assert.Equal("http://covers/RG1.jpg", row.PosterUrl);
+        Assert.Equal("album detail", row.Description);
+        Assert.Equal(2024, row.Year);
+    }
+
+    [Fact]
+    public async Task RefreshesTypedEntityDatesAndMakesWaitingMonitorDue() {
+        await using var db = CreateContext();
+        var entityId = Guid.NewGuid();
+        var id = await SeedAsync(
+            db,
+            identityNamespace: "tmdb",
+            identityValue: "123",
+            posterUrl: null,
+            entityId,
+            AcquisitionStatus.WaitingForRelease);
+        var patch = EmptyPatch() with {
+            DateEntries = [new EntityMetadataDatePatch(EntityDateType.StreamingRelease, "2026-09-01")]
+        };
+        var metadata = new RecordingMetadataPatchService();
+        var monitors = new RecordingMonitorStore();
+
+        await RunAsync(
+            db,
+            new FakeEnricher(new RequestMetadataEnrichment(null, null, null, patch)),
+            id,
+            metadata: metadata,
+            monitors: monitors,
+            releaseTiming: new FixedReleaseTimingService(AcquisitionReleaseTimingDecision.Ready));
+
+        Assert.Equal(entityId, metadata.EntityId);
+        Assert.Equal(MetadataPatchField.Dates.ToCode(), Assert.Single(metadata.Request!.Fields));
+        Assert.Equal(EntityDateType.StreamingRelease, Assert.Single(metadata.Request.Patch.DateEntries).Type);
+        Assert.Equal(id, Assert.Single(monitors.Due));
+    }
+
+    [Fact]
+    public async Task ProviderMissKeepsReleaseGateWaitingAndEnablesDatePrompt() {
+        await using var db = CreateContext();
+        var id = await SeedAsync(
+            db,
+            identityNamespace: "tmdb",
+            identityValue: "404",
+            posterUrl: null,
+            entityId: Guid.NewGuid(),
+            status: AcquisitionStatus.WaitingForRelease);
+
+        await RunAsync(
+            db,
+            new FakeEnricher(null),
+            id,
+            releaseTiming: new FixedReleaseTimingService(new AcquisitionReleaseTimingDecision(
+                false,
+                EntityDateType.StreamingRelease,
+                WaitingForMetadata: true)));
+
+        var row = await db.Acquisitions.AsNoTracking().SingleAsync(acquisition => acquisition.Id == id);
+        Assert.Equal(AcquisitionStatus.WaitingForRelease, row.Status);
+        Assert.True(row.ReleaseDateMetadataUnavailable);
+        Assert.Contains("did not return", row.StatusMessage);
+        Assert.Contains("enter the date", row.StatusMessage);
+    }
+
+    [Fact]
+    public async Task UserSuppliedReleaseDateResumesManualHoldAndMakesMonitorDue() {
+        await using var db = CreateContext();
+        var entityId = Guid.NewGuid();
+        var id = await SeedAsync(
+            db,
+            identityNamespace: "tmdb",
+            identityValue: "123",
+            posterUrl: null,
+            entityId,
+            AcquisitionStatus.ManualSearchRequired);
+        var monitors = new RecordingMonitorStore();
+        var handler = new AcquisitionReleaseDateChangeHandler(
+            AcquisitionTestFactory.Store(db),
+            new FixedReleaseTimingService(AcquisitionReleaseTimingDecision.Ready),
+            monitors);
+
+        await handler.HandleAsync(entityId, CancellationToken.None);
+
+        var row = await db.Acquisitions.AsNoTracking().SingleAsync(acquisition => acquisition.Id == id);
+        Assert.Equal(AcquisitionStatus.WaitingForRelease, row.Status);
+        Assert.False(row.ReleaseDateMetadataUnavailable);
+        Assert.Equal(id, Assert.Single(monitors.Due));
+    }
+
+    [Fact]
+    public async Task KnownFutureDateRemainsOnReleaseWaitWithoutMakingMonitorDue() {
+        await using var db = CreateContext();
+        var id = await SeedAsync(
+            db,
+            identityNamespace: "tmdb",
+            identityValue: "123",
+            posterUrl: null,
+            entityId: Guid.NewGuid(),
+            status: AcquisitionStatus.WaitingForRelease);
+        var monitors = new RecordingMonitorStore();
+
+        await RunAsync(
+            db,
+            new FakeEnricher(new RequestMetadataEnrichment(null, null, null)),
+            id,
+            monitors: monitors,
+            releaseTiming: new FixedReleaseTimingService(new AcquisitionReleaseTimingDecision(
+                false,
+                EntityDateType.StreamingRelease,
+                SearchNotBefore: new DateOnly(2027, 1, 1))));
+
+        Assert.Equal(
+            AcquisitionStatus.WaitingForRelease,
+            (await db.Acquisitions.AsNoTracking().SingleAsync(acquisition => acquisition.Id == id)).Status);
+        Assert.Empty(monitors.Due);
+    }
+
+    [Fact]
+    public async Task ProviderFailureKeepsReleaseGateRetryable() {
+        await using var db = CreateContext();
+        var id = await SeedAsync(
+            db,
+            identityNamespace: "tmdb",
+            identityValue: "123",
+            posterUrl: null,
+            entityId: Guid.NewGuid(),
+            status: AcquisitionStatus.WaitingForRelease);
+
+        await RunAsync(
+            db,
+            new ThrowingEnricher(),
+            id,
+            releaseTiming: new FixedReleaseTimingService(new AcquisitionReleaseTimingDecision(
+                false,
+                EntityDateType.StreamingRelease,
+                WaitingForMetadata: true)));
+
+        Assert.Equal(
+            AcquisitionStatus.WaitingForRelease,
+            (await db.Acquisitions.AsNoTracking().SingleAsync(acquisition => acquisition.Id == id)).Status);
+    }
+
+    private static async Task RunAsync(
+        PrismediaDbContext db,
+        IRequestMetadataEnricher enricher,
+        Guid id,
+        FakeChildHydrator? childHydrator = null,
+        IEntityMetadataPatchService? metadata = null,
+        IMonitorStore? monitors = null,
+        IAcquisitionReleaseTimingService? releaseTiming = null) {
+        var handler = new AcquisitionEnrichJobHandler(
+            AcquisitionTestFactory.Store(db),
+            enricher,
+            childHydrator ?? new FakeChildHydrator(null),
+            NullLogger<AcquisitionEnrichJobHandler>.Instance,
+            metadata,
+            monitors,
+            releaseTiming,
+            entityPositions: new EntityMetadataApplyService(db, new PluginArtworkServiceOptions(Path.GetTempPath())));
+        var job = new JobRunSnapshot(
+            Guid.NewGuid(), JobType.AcquisitionEnrich, JobRunStatus.Running, 0, null,
+            AcquisitionJobPayload.Serialize(id), null, null, null, DateTimeOffset.UtcNow, DateTimeOffset.UtcNow, null);
+        await handler.HandleAsync(new JobContext(job, new NoopJobQueue()), CancellationToken.None);
+    }
+
+    private static async Task<Guid> SeedAsync(
+        PrismediaDbContext db,
+        string? identityNamespace,
+        string? identityValue,
+        string? posterUrl,
+        Guid? entityId = null,
+        AcquisitionStatus status = AcquisitionStatus.Pending) {
+        var now = DateTimeOffset.UtcNow;
+        var id = Guid.NewGuid();
+        db.Acquisitions.Add(new AcquisitionRow {
+            Id = id, Status = status, Title = "B", ExternalIdsJson = "{}", SourceUrlsJson = "[]",
+            IdentityNamespace = identityNamespace, IdentityValue = identityValue, PosterUrl = posterUrl,
+            EntityId = entityId, CreatedAt = now, UpdatedAt = now
+        });
+        await db.SaveChangesAsync();
+        return id;
+    }
+
+    private static PrismediaDbContext CreateContext() =>
+        new(new DbContextOptionsBuilder<PrismediaDbContext>().UseInMemoryDatabase(Guid.NewGuid().ToString()).Options);
+
+    private static EntityMetadataPatch EmptyPatch() => new(
+        null,
+        null,
+        new Dictionary<string, string>(),
+        [],
+        [],
+        null,
+        [],
+        new Dictionary<string, string>(),
+        new Dictionary<string, int>(),
+        new Dictionary<string, int>(),
+        null);
+
+    private sealed class FakeEnricher(RequestMetadataEnrichment? result) : IRequestMetadataEnricher {
+        public string? LookedUp { get; private set; }
+        public Task<RequestMetadataEnrichment?> LookupByIdAsync(EntityKind kind, ExternalIdentity identity, bool hideNsfw, CancellationToken cancellationToken) {
+            LookedUp = RequestProposalReading.FormatQualifiedIdentity(identity);
+            return Task.FromResult(result);
+        }
+    }
+
+    private sealed class ThrowingEnricher : IRequestMetadataEnricher {
+        public Task<RequestMetadataEnrichment?> LookupByIdAsync(
+            EntityKind kind,
+            ExternalIdentity identity,
+            bool hideNsfw,
+            CancellationToken cancellationToken) => throw new HttpRequestException("provider offline");
+    }
+
+    private sealed class FixedReleaseTimingService(AcquisitionReleaseTimingDecision decision)
+        : IAcquisitionReleaseTimingService {
+        public Task<AcquisitionReleaseTimingDecision> EvaluateAsync(
+            Guid? entityId,
+            Guid? profileId,
+            EntityKind kind,
+            CancellationToken cancellationToken) => Task.FromResult(decision);
+    }
+
+    private sealed class FakeChildHydrator(RequestChildHydrationResult? result) : IRequestChildHydrator {
+        public Guid? EntityId { get; private set; }
+
+        public Task<RequestChildHydrationResult?> HydrateAsync(
+            Guid entityId,
+            bool hideNsfw,
+            CancellationToken cancellationToken) {
+            EntityId = entityId;
+            return Task.FromResult(result);
+        }
+    }
+
+    private sealed class RecordingMetadataPatchService : IEntityMetadataPatchService {
+        public Guid? EntityId { get; private set; }
+        public EntityMetadataUpdateRequest? Request { get; private set; }
+
+        public Task<EntityMetadataPatchResult> ApplyPatchAsync(
+            Guid entityId,
+            EntityMetadataUpdateRequest request,
+            string? expectedKind,
+            CancellationToken cancellationToken) {
+            EntityId = entityId;
+            Request = request;
+            return Task.FromResult(EntityMetadataPatchResult.Applied);
+        }
+    }
+
+    private sealed class RecordingMonitorStore : IMonitorStore {
+        public List<Guid> Due { get; } = [];
+
+        public Task MarkSearchDueByAcquisitionAsync(Guid acquisitionId, CancellationToken cancellationToken) {
+            Due.Add(acquisitionId);
+            return Task.CompletedTask;
+        }
+
+        public Task<MonitorView> StartAsync(Guid acquisitionId, EntityKind kind, string title, string? author, CancellationToken cancellationToken) => throw new NotSupportedException();
+        public Task<MonitorView> StartForEntityAsync(Guid entityId, EntityKind kind, string title, AcquisitionTargeting? targeting, MonitorPreset? preset, CancellationToken cancellationToken) => throw new NotSupportedException();
+        public Task<bool> DeleteAsync(Guid monitorId, CancellationToken cancellationToken) => throw new NotSupportedException();
+        public Task<bool> RetargetAsync(Guid fromAcquisitionId, Guid toAcquisitionId, CancellationToken cancellationToken) => throw new NotSupportedException();
+        public Task<bool> SetStatusAsync(Guid monitorId, MonitorStatus status, CancellationToken cancellationToken) => throw new NotSupportedException();
+        public Task<IReadOnlyList<MonitorView>> ListAsync(CancellationToken cancellationToken) => throw new NotSupportedException();
+        public Task<IReadOnlyList<DueMonitor>> ListDueMonitorsAsync(int defaultIntervalMinutes, CancellationToken cancellationToken) => throw new NotSupportedException();
+        public Task<WantedPage> ListMissingAsync(int page, int pageSize, EntityKind? kind, CancellationToken cancellationToken) => throw new NotSupportedException();
+        public Task<WantedPage> ListCutoffUnmetAsync(int page, int pageSize, EntityKind? kind, CancellationToken cancellationToken) => throw new NotSupportedException();
+        public Task<MonitorView?> GetByAcquisitionAsync(Guid acquisitionId, CancellationToken cancellationToken) => throw new NotSupportedException();
+        public Task<MonitorView?> GetByEntityAsync(Guid entityId, CancellationToken cancellationToken) => throw new NotSupportedException();
+        public Task<IReadOnlyList<MonitorView>> ListForEntityAsync(Guid entityId, CancellationToken cancellationToken) => throw new NotSupportedException();
+        public Task<AcquisitionTargeting?> GetTargetingByEntityAsync(Guid entityId, CancellationToken cancellationToken) => throw new NotSupportedException();
+        public Task<MonitorPreset?> GetPresetByEntityAsync(Guid entityId, CancellationToken cancellationToken) => throw new NotSupportedException();
+        public Task<Guid?> CreateUpgradeChildAsync(Guid monitorId, CancellationToken cancellationToken) => throw new NotSupportedException();
+        public Task ResolveUpgradeChildAsync(Guid childId, bool succeeded, CancellationToken cancellationToken) => throw new NotSupportedException();
+        public Task MarkSearchedAsync(Guid monitorId, CancellationToken cancellationToken) => throw new NotSupportedException();
+        public Task<bool> HasActiveMonitorsAsync(CancellationToken cancellationToken) => throw new NotSupportedException();
+    }
+
+    private sealed class NoopJobQueue : IJobQueueService {
+        public Task<JobRunSnapshot> EnqueueAsync(EnqueueJobRequest request, CancellationToken cancellationToken) => throw new NotSupportedException();
+        public Task<bool> HasPendingAsync(JobType type, string? targetEntityId, CancellationToken cancellationToken) => Task.FromResult(false);
+        public Task UpdateProgressAsync(Guid id, int progress, string? message, CancellationToken cancellationToken) => Task.CompletedTask;
+        public Task<IReadOnlyList<JobRunSnapshot>> ListAsync(bool hideNsfw, CancellationToken cancellationToken) => throw new NotSupportedException();
+        public Task<JobRunSnapshot> EnqueueAsync(JobType type, CancellationToken cancellationToken) => throw new NotSupportedException();
+        public Task<int> EnqueueBatchAsync(IReadOnlyList<EnqueueJobRequest> requests, CancellationToken cancellationToken) => throw new NotSupportedException();
+        public Task<int> CancelAsync(JobType? type, CancellationToken cancellationToken) => throw new NotSupportedException();
+        public Task<bool> CancelRunAsync(Guid id, CancellationToken cancellationToken) => throw new NotSupportedException();
+        public Task<int> ClearFailuresAsync(JobType? type, CancellationToken cancellationToken) => throw new NotSupportedException();
+        public Task<JobRunSnapshot?> ClaimNextAsync(string workerId, CancellationToken cancellationToken) => throw new NotSupportedException();
+        public Task<int> RecoverStaleRunningAsync(string currentWorkerId, TimeSpan staleAfter, CancellationToken cancellationToken) => throw new NotSupportedException();
+        public Task CompleteAsync(Guid id, string? message, CancellationToken cancellationToken) => throw new NotSupportedException();
+        public Task FailAsync(Guid id, string message, TimeSpan retryDelay, CancellationToken cancellationToken) => throw new NotSupportedException();
+        public Task<IReadOnlyList<JobQueueCount>> GetQueueCountsAsync(bool hideNsfw, CancellationToken cancellationToken) => throw new NotSupportedException();
+        public Task<int> PruneHistoryAsync(TimeSpan retention, CancellationToken cancellationToken) => throw new NotSupportedException();
+    }
+}

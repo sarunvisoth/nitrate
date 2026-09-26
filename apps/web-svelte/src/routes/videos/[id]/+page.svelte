@@ -1,0 +1,945 @@
+<script lang="ts">
+  import { onMount } from "svelte";
+  import { beforeNavigate, goto } from "$app/navigation";
+  import { page } from "$app/state";
+  import {
+    Captions,
+    CloudDownload,
+    Info,
+    MapPin,
+    Play,
+    SlidersHorizontal,
+    Users,
+  } from "@lucide/svelte";
+  import { cn } from "@prismedia/ui-svelte";
+  import EntityDetailPageState from "$lib/components/entities/EntityDetailPageState.svelte";
+  import EntityDetailHeroDates from "$lib/components/entities/EntityDetailHeroDates.svelte";
+  import { useEntityDetailPage } from "$lib/components/entities/entity-detail-page-controller.svelte";
+  import { fetchEntity, fetchEntityThumbnails, type EntityCardFull } from "$lib/api/entities";
+  import { fetchSettingsValues, type LibrarySettings } from "$lib/api/settings";
+  import { updateEntityConsumption } from "$lib/api/consumption";
+  import { reportVideoPlayback } from "$lib/api/playback";
+  import type { VideoPlaybackPlanResponse } from "$lib/api/generated/model";
+  import {
+    loadPlaybackPlan as loadPlaybackPlanRequest,
+    negotiateForceTranscodeSrc,
+  } from "$lib/player/playback-negotiation";
+  import { durationToSeconds } from "$lib/utils/format";
+  import { settingKeys, valuesToLibrarySettings } from "$lib/settings/app-settings";
+  import { getCapability, isPlayableVideo } from "$lib/api/capabilities";
+  import { refreshAfterManagedFileRevert } from "$lib/entities/entity-file-management";
+  import { useIdentifyDetailAction } from "$lib/components/identify/use-identify-detail-action.svelte";
+  import type { EntityDetailCredit, EntityDetailTag } from "$lib/entities/entity-detail";
+  import { entityCardToDetailCard, type EntityDetailCardFull } from "$lib/entities/entity-detail";
+  import {
+    hydrateStandardRelationshipCards,
+    thumbnailsToCards,
+    type EntityThumbnailCard,
+  } from "$lib/entities/entity-relationship-thumbnails";
+  import { resolveEntityHref } from "$lib/entities/entity-routes";
+  import { CAPABILITY_KIND, CREDIT_ROLE, ENTITY_KIND, type EntityKindCode } from "$lib/entities/entity-codes";
+  import { extractVideoPlayerProps, getConsumptionState } from "$lib/entities/video-capabilities";
+  import { ConsumptionActivityClock } from "$lib/entities/consumption-activity-clock";
+  import NsfwBlur from "$lib/components/nsfw/NsfwBlur.svelte";
+  import { isWanted } from "$lib/api/capabilities";
+  import EntityAcquisitionCard from "$lib/components/acquisitions/EntityAcquisitionCard.svelte";
+  import { useEntityAcquisition } from "$lib/components/acquisitions/use-entity-acquisition.svelte";
+  import EntityDetail, {
+    type EntityDetailActionButton,
+    type EntityDetailSection,
+    type EntityDetailTab,
+  } from "$lib/components/entities/EntityDetail.svelte";
+  import VideoPlayer, {
+    type VideoPlayerHandle,
+  } from "$lib/components/VideoPlayer.svelte";
+  import VideoDetailSectionContent from "./VideoDetailSectionContent.svelte";
+  import VideoTranscriptPanel from "$lib/components/VideoTranscriptPanel.svelte";
+  import {
+    buildSubtitleDefaults,
+    clampTranscriptDockPercent,
+    readTranscriptDockPreferences,
+    writeTranscriptDockPreference,
+    writeTranscriptDockWidth,
+  } from "./video-page-state";
+
+  let playbackPlan = $state.raw<VideoPlaybackPlanResponse | null>(null);
+  let librarySettings = $state<LibrarySettings | null>(null);
+  let relationshipCredits = $state<EntityDetailCredit[]>([]);
+  let relationshipStudio = $state<EntityDetailCredit | null>(null);
+  let relationshipTags = $state<EntityDetailTag[]>([]);
+  // When this video is an episode, the series it belongs to (resolved by walking the
+  // season → series parent chain) so it can be linked from the breadcrumb and the detail tab.
+  let seriesCard = $state<EntityThumbnailCard | null>(null);
+  let seriesRef = $state<{ id: string; title: string } | null>(null);
+
+  const detail = useEntityDetailPage<EntityCardFull>({
+    loadKey: () => page.params.id ?? "",
+    load: async ({ signal }) => {
+      const nextVideo = await fetchEntity(page.params.id ?? "", { signal });
+
+      const relationshipsPromise = hydrateVideoRelationships(nextVideo, signal);
+      const playbackPlanPromise = isPlayableVideo(nextVideo.capabilities)
+        ? loadPlaybackPlan(
+            nextVideo.id,
+            playbackPlan?.sessionId,
+            selectedAudioStreamIndex,
+          )
+        : null;
+      const [relationships, nextPlaybackPlan] = await Promise.all([
+        relationshipsPromise,
+        playbackPlanPromise,
+      ]);
+      signal.throwIfAborted();
+
+      playbackPlan = nextPlaybackPlan;
+      relationshipCredits = relationships.credits;
+      relationshipStudio = relationships.studio;
+      relationshipTags = relationships.relationshipTags;
+      seriesCard = relationships.seriesCard;
+      seriesRef = relationships.seriesRef;
+      return nextVideo;
+    },
+    breadcrumbs: (currentVideo) => [
+      { label: "Videos", href: "/videos" },
+      ...(seriesRef ? [{ label: seriesRef.title, href: `/series/${seriesRef.id}` }] : []),
+      { label: currentVideo.title },
+    ],
+  });
+  const video = $derived(detail.entity);
+
+  let playerHandle: VideoPlayerHandle | undefined = $state();
+  let currentTime = $state(0);
+  let displayTime = $state(0);
+  let activeSubtitleId = $state<string | null>(null);
+  let selectedAudioStreamIndex = $state<number | null>(null);
+  let subtitleChoiceLocked = $state(false);
+  let playTracked = false;
+  let resumeApplied = false;
+  let playbackUpdateTimer: ReturnType<typeof setInterval> | null = null;
+  let lastReportedTime = 0;
+  // True between the player's play and pause events. A stall does not pause the player, so this
+  // stays true while playback is wedged — which is exactly when the session must keep pinging.
+  let playbackActive = false;
+  const viewingActivityClock = new ConsumptionActivityClock();
+  // Tracks which video id the playback session belongs to. Used so a same-video metadata
+  // refresh (e.g. onTracksChanged) does not reset playback tracking and kill the update timer.
+  let trackedVideoId: string | null = null;
+  let hydratedSubtitlePrefsKey = "";
+
+  // ── Transcript dock plumbing ───────────────────────────────────────
+  let userWantsDock = $state(false);
+  let dockVideoPercent = $state(80);
+  let isDesktopViewport = $state(false);
+  let videoWrapperEl: HTMLDivElement | null = $state(null);
+  let videoWrapperHeight = $state<number | null>(null);
+  let isResizing = false;
+
+  const card = $derived.by((): EntityDetailCardFull | null => {
+    if (!video) return null;
+    return {
+      ...entityCardToDetailCard(video),
+      tags: relationshipTags,
+      credits: relationshipCredits,
+      studio: relationshipStudio,
+    };
+  });
+  const identifyAction = useIdentifyDetailAction(() => video);
+  // A phantom episode has no file to play — the Acquisition detail tab offers "Search for release"
+  // and the acquisition management surface instead of the player.
+  const entityWanted = $derived(!!video && isWanted(video.capabilities));
+  const heroActions = $derived.by((): EntityDetailActionButton[] =>
+    identifyAction.action ? [identifyAction.action] : []);
+  const videoId = $derived(video?.id ?? "");
+
+  // Wanted/tracking state (search, releases, live download, monitoring, cancel) lives in the
+  // Acquisition detail tab; the tab only appears while the video has an acquisition story.
+  const acq = useEntityAcquisition({
+    entityId: () => video?.id,
+    capabilities: () => video?.capabilities,
+    onChanged: () => detail.reload({ showLoading: false }),
+    onStatusChanged: () => detail.reload({ showLoading: false }),
+    onPruned: () => goto(seriesRef ? `/series/${seriesRef.id}` : "/videos"),
+  });
+  const fileManagement = {
+    onDeleted: () => goto(seriesRef ? `/series/${seriesRef.id}` : "/videos"),
+    onReverted: () => refreshAfterManagedFileRevert(acq, () => detail.reload({ showLoading: false })),
+  };
+
+  const playerProps = $derived.by(() => {
+    if (!video || entityWanted) return null;
+    return extractVideoPlayerProps(video.id, video.capabilities, playbackPlan, selectedAudioStreamIndex);
+  });
+
+  const primaryStudio = $derived(relationshipStudio);
+
+  // Built-in sections (description, tags, studio, credits, links, stats, dates,
+  // classification, technical, source) come from EntityDetail's core catalog; only
+  // route-specific sections and label overrides are declared here.
+  const detailSections = $derived.by((): EntityDetailSection[] => [
+    {
+      id: "playback",
+      label: "Playback",
+      icon: Play,
+      hidden: !playbackState,
+    },
+    {
+      // Series back-link rail for episodes; the custom content renders its own labeled row.
+      id: "related",
+      hidden: !seriesCard,
+    },
+    {
+      id: "credits",
+      label: "Cast",
+      icon: Users,
+    },
+    {
+      id: "markers",
+      label: "Markers",
+      count: card?.markers.length ?? 0,
+    },
+    {
+      id: "transcript",
+      label: "Transcript",
+      count: playerProps?.subtitleTracks.length ?? 0,
+    },
+    { id: "acquisition" },
+  ]);
+
+  const detailTabs = $derived.by((): EntityDetailTab[] => {
+    if (!card) return [];
+    return [
+      {
+        id: "details",
+        label: "Details",
+        icon: Info,
+        sections: ["description", "playback", "tags", "related", "studio", "credits"],
+      },
+      {
+        id: "metadata",
+        label: "Metadata",
+        icon: SlidersHorizontal,
+        sections: ["stats", "dates", "classification", "technical", "source", "links"],
+        layout: "grid",
+      },
+      {
+        id: "markers",
+        label: "Markers",
+        icon: MapPin,
+        count: card.markers.length,
+        sections: ["markers"],
+      },
+      {
+        id: "transcript",
+        label: "Transcript",
+        icon: Captions,
+        count: playerProps?.subtitleTracks.length ?? 0,
+        sections: ["transcript"],
+      },
+      ...(acq.visible
+        ? [{ id: "acquisition", label: "Acquisition", icon: CloudDownload, sections: ["acquisition"] }]
+        : []),
+    ];
+  });
+
+  // The phantom-episode branch shows metadata-only tabs — no playback, markers, transcript, or
+  // series rail exist yet — plus the same Acquisition tab, which owns the actionable wanted state.
+  const wantedDetailTabs = $derived.by((): EntityDetailTab[] => [
+    {
+      id: "details",
+      label: "Details",
+      icon: Info,
+      sections: ["description", "tags", "studio", "credits"],
+    },
+    {
+      id: "metadata",
+      label: "Metadata",
+      icon: SlidersHorizontal,
+      sections: ["stats", "dates", "classification", "source", "links"],
+      layout: "grid",
+    },
+    ...(acq.visible
+      ? [{ id: "acquisition", label: "Acquisition", icon: CloudDownload, sections: ["acquisition"] }]
+      : []),
+  ]);
+
+  const dates = $derived(card?.dates ?? []);
+
+  const flagsNsfw = $derived.by(() => {
+    if (!video) return false;
+    const cap = getCapability(video.capabilities, CAPABILITY_KIND.flags);
+    return cap?.isNsfw === true;
+  });
+
+  const playbackState = $derived.by(() => {
+    if (!video) return null;
+    return getConsumptionState(video.capabilities);
+  });
+
+  const durationSeconds = $derived.by(() => {
+    if (!video) return 0;
+    return durationToSeconds(getCapability(video.capabilities, CAPABILITY_KIND.technical)?.duration ?? null) ?? 0;
+  });
+  const initialPlaybackTime = $derived(
+    playbackState && !playbackState.completedAt && playbackState.resumeSeconds > 5
+      ? playbackState.resumeSeconds
+      : 0,
+  );
+
+  let playbackBusy = $state(false);
+
+  /** Resumes inline playback from the stored position and brings the player into view. */
+  function handleResume() {
+    if (!playbackState) return;
+    resumeApplied = true;
+    playerHandle?.seekTo(playbackState.resumeSeconds);
+    videoWrapperEl?.scrollIntoView({ behavior: "smooth", block: "start" });
+  }
+
+  /** Marks the video watched or unwatched via the shared playback capability, then refreshes. */
+  async function handleToggleWatched(watched: boolean) {
+    if (!video || playbackBusy) return;
+    playbackBusy = true;
+    try {
+      await updateEntityConsumption(video.id, { completed: watched });
+      await refreshVideo();
+    } catch {
+      // best-effort; the card reflects the last known state on failure
+    } finally {
+      playbackBusy = false;
+    }
+  }
+
+  /**
+   * Resets playback to the beginning through the shared playback capability.
+   */
+  async function handleStartOver() {
+    if (!video || playbackBusy) return;
+    playbackBusy = true;
+    try {
+      await updateEntityConsumption(video.id, { positionSeconds: 0 });
+      resumeApplied = true;
+      playerHandle?.seekTo(0);
+      await refreshVideo();
+    } catch {
+      // best-effort
+    } finally {
+      playbackBusy = false;
+    }
+  }
+
+  const hasSubtitles = $derived((playerProps?.subtitleTracks.length ?? 0) > 0);
+  const subtitlesEnabled = $derived(activeSubtitleId != null);
+  const isTranscriptDockActive = $derived(userWantsDock && hasSubtitles && subtitlesEnabled);
+  const isTranscriptDocked = $derived(
+    userWantsDock && hasSubtitles && subtitlesEnabled && isDesktopViewport,
+  );
+  const isTranscriptInlineDocked = $derived(
+    isTranscriptDockActive && !isDesktopViewport,
+  );
+
+  const subtitleDefaults = $derived(buildSubtitleDefaults(librarySettings));
+  const defaultPlaybackMode = $derived<"direct" | "hls">(
+    librarySettings?.defaultPlaybackMode === "hls" ? "hls" : "direct",
+  );
+  const showCastControls = $derived(librarySettings?.showCastControls ?? true);
+
+  // ── Lifecycle ──────────────────────────────────────────────────────
+
+  // Flush the latest position before any client-side navigation (leaving the
+  // player or switching to another video) so resume points survive navigation.
+  beforeNavigate(() => {
+    flushPlaybackPosition();
+  });
+
+  onMount(() => {
+    let cancelled = false;
+
+    const dockPrefs = readTranscriptDockPreferences(window.localStorage);
+    userWantsDock = dockPrefs.docked;
+    dockVideoPercent = dockPrefs.videoPercent;
+
+    const mq = window.matchMedia("(min-width: 1024px)");
+    const updateViewport = () => (isDesktopViewport = mq.matches);
+    updateViewport();
+    mq.addEventListener("change", updateViewport);
+
+    void fetchSettingsValues([
+      settingKeys.playbackDefaultMode,
+      settingKeys.playbackShowCastControls,
+      settingKeys.subtitlesAutoEnable,
+      settingKeys.subtitlesPreferredLanguages,
+      settingKeys.subtitlesStyle,
+      settingKeys.subtitlesFontScale,
+      settingKeys.subtitlesPositionPercent,
+      settingKeys.subtitlesOpacity,
+    ])
+      .then((config) => {
+        if (!cancelled) librarySettings = valuesToLibrarySettings(config.values);
+      })
+      .catch(() => {});
+
+    return () => {
+      cancelled = true;
+      mq.removeEventListener("change", updateViewport);
+      flushPlaybackPosition();
+      if (playbackUpdateTimer) clearInterval(playbackUpdateTimer);
+    };
+  });
+
+  // Reset play tracking only when the video ID actually changes. A same-video metadata
+  // refresh (refreshVideo via onTracksChanged) reassigns `video` but must not tear down the
+  // in-flight playback session, or progress reporting would stop after the first update.
+  $effect(() => {
+    const nextId = video?.id ?? null;
+    if (nextId === trackedVideoId) return;
+    trackedVideoId = nextId;
+    playTracked = false;
+    resumeApplied = false;
+    playbackActive = false;
+    selectedAudioStreamIndex = null;
+    lastReportedTime = 0;
+    hydratedSubtitlePrefsKey = "";
+    if (playbackUpdateTimer) {
+      clearInterval(playbackUpdateTimer);
+      playbackUpdateTimer = null;
+    }
+  });
+
+  // Hydrate subtitle preference from localStorage.
+  $effect(() => {
+    if (typeof window === "undefined" || !video || !playerProps) return;
+    const videoId = video.id;
+    const trackIds = playerProps.subtitleTracks.map((t) => t.id).join(",");
+    const hydrationKey = `${videoId}:${trackIds}`;
+    if (!videoId || hydratedSubtitlePrefsKey === hydrationKey) return;
+    hydratedSubtitlePrefsKey = hydrationKey;
+    const saved = window.localStorage.getItem(`prismedia:subtitle-lang:${videoId}`);
+    if (saved) {
+      const restoredSubtitleId = saved === "__off__" ? null : saved;
+      const hasSavedTrack =
+        restoredSubtitleId == null ||
+        playerProps.subtitleTracks.some((t) => t.id === restoredSubtitleId);
+      if (hasSavedTrack) {
+        activeSubtitleId = restoredSubtitleId;
+        subtitleChoiceLocked = true;
+        return;
+      }
+    }
+    activeSubtitleId = null;
+    subtitleChoiceLocked = false;
+  });
+
+  // Mirror video wrapper height for docked transcript.
+  $effect(() => {
+    if (typeof window === "undefined") return;
+    const el = videoWrapperEl;
+    if (!el) return;
+    videoWrapperHeight = Math.round(el.getBoundingClientRect().height);
+    void isTranscriptDocked;
+    if (typeof ResizeObserver === "undefined") return;
+    const observer = new ResizeObserver((entries) => {
+      const entry = entries[0];
+      if (!entry) return;
+      const next = Math.round(entry.contentRect.height);
+      if (videoWrapperHeight !== next) videoWrapperHeight = next;
+    });
+    observer.observe(el);
+    return () => observer.disconnect();
+  });
+
+  // ── Data loading ───────────────────────────────────────────────────
+
+  /** Reloads the root entity without interrupting active playback. */
+  function refreshVideo(): Promise<void> {
+    return detail.reload({ showLoading: false });
+  }
+
+  async function hydrateVideoRelationships(nextVideo: EntityCardFull, signal: AbortSignal) {
+    const [relationships, series] = await Promise.all([
+      hydrateStandardRelationshipCards(nextVideo, { signal }),
+      resolveSeries(nextVideo, signal),
+    ]);
+    signal.throwIfAborted();
+    return { ...relationships, ...series };
+  }
+
+  /**
+   * Resolves the series an episode belongs to by walking the parent chain
+   * (episode → season → series), so the video can link back to its series. A standalone
+   * video leaves the series unset.
+   */
+  async function resolveSeries(nextVideo: EntityCardFull, signal: AbortSignal) {
+    const seasonId = nextVideo.parentEntityId;
+    if (!seasonId) return { seriesCard: null, seriesRef: null };
+    const [season] = await fetchEntityThumbnails([seasonId], { signal }).catch(() => []);
+    signal.throwIfAborted();
+    if (season?.kind !== ENTITY_KIND.videoSeason || !season.parentEntityId) {
+      return { seriesCard: null, seriesRef: null };
+    }
+    const [series] = await fetchEntityThumbnails([season.parentEntityId], { signal }).catch(() => []);
+    signal.throwIfAborted();
+    if (series?.kind !== ENTITY_KIND.videoSeries) return { seriesCard: null, seriesRef: null };
+    const href = resolveEntityHref(series.kind, series.id);
+    const [seriesCard] = thumbnailsToCards([series], { hrefFor: () => href });
+    return { seriesCard: seriesCard ?? null, seriesRef: { id: series.id, title: series.title } };
+  }
+
+  async function loadPlaybackPlan(
+    videoId: string,
+    sessionId?: string | null,
+    audioStreamIndex?: number | null,
+  ) {
+    return await loadPlaybackPlanRequest(videoId, {
+      sessionId,
+      audioStreamIndex,
+    });
+  }
+
+  // Player callback: re-negotiate a guaranteed-playable transcode after a fatal decode error.
+  async function forceTranscodeFallback(): Promise<string | null> {
+    if (!video) return null;
+    return negotiateForceTranscodeSrc(video, selectedAudioStreamIndex, playbackPlan?.sessionId);
+  }
+
+  // ── Player event handlers ──────────────────────────────────────────
+
+  function handleTimeUpdate(t: number) {
+    currentTime = t;
+    displayTime = t;
+
+    if (
+      !resumeApplied &&
+      video &&
+      playbackState &&
+      !playbackState.completedAt &&
+      playbackState.resumeSeconds > 5
+    ) {
+      resumeApplied = true;
+      playerHandle?.seekTo(playbackState.resumeSeconds);
+    }
+  }
+
+  /**
+   * Reports the current playback position to the backend so it can store a resume
+   * point (or derive completion when near the end). Used on pause-adjacent teardown
+   * and SPA navigation, complementing the periodic in-stream progress reports.
+   */
+  function flushPlaybackPosition() {
+    if (!playTracked || !video || !playerProps || currentTime <= 0) return;
+    const activitySeconds = viewingActivityClock.stop();
+    void reportVideoPlayback("stop", {
+      entityId: video.id,
+      sessionId: playerProps.sessionId,
+      positionSeconds: currentTime,
+      durationSeconds: playerProps.duration,
+      activitySeconds,
+    }).catch(() => {});
+  }
+
+  async function handlePlayStarted() {
+    if (playTracked || !video || !playerProps) return;
+    playTracked = true;
+
+    try {
+      await reportVideoPlayback("start", {
+        entityId: video.id,
+        sessionId: playerProps.sessionId,
+        positionSeconds: currentTime,
+        durationSeconds: playerProps.duration,
+      });
+    } catch {
+      // best-effort
+    }
+
+    if (!playbackUpdateTimer) {
+      const videoId = video.id;
+      playbackUpdateTimer = setInterval(() => {
+        if (!playerProps) return;
+        if (currentTime > 0 && Math.abs(currentTime - lastReportedTime) > 3) {
+          lastReportedTime = currentTime;
+          const activitySeconds = viewingActivityClock.take();
+          void reportVideoPlayback("progress", {
+            entityId: videoId,
+            sessionId: playerProps.sessionId,
+            positionSeconds: currentTime,
+            durationSeconds: playerProps.duration,
+            activitySeconds,
+          }).catch(() => {});
+          return;
+        }
+
+        // The playhead has not moved far enough to be worth a progress write. If the player still
+        // intends to play, it is stalled — buffering, or retrying a segment — and it is precisely
+        // then that the server must not treat the viewer as gone: a lapsed session drops the item
+        // out of the reaper's live set, which cancels its ffmpeg job and lets cache eviction delete
+        // the segments the player is still fetching, turning a recoverable stall into a 404 loop.
+        // A ping refreshes session liveness without touching resume or watch state. A deliberately
+        // paused player is genuinely idle, so it is left to expire as before.
+        if (!playbackActive) return;
+        void reportVideoPlayback("ping", {
+          entityId: videoId,
+          sessionId: playerProps.sessionId,
+          positionSeconds: currentTime,
+          durationSeconds: playerProps.duration,
+        }).catch(() => {});
+      }, 10_000);
+    }
+  }
+
+  function handlePlaybackActive() {
+    playbackActive = true;
+    viewingActivityClock.start();
+  }
+
+  function handlePlaybackPaused() {
+    playbackActive = false;
+    if (!playTracked || !video || !playerProps) return;
+    const activitySeconds = viewingActivityClock.stop();
+    if (!activitySeconds) return;
+    void reportVideoPlayback("progress", {
+      entityId: video.id,
+      sessionId: playerProps.sessionId,
+      positionSeconds: currentTime,
+      durationSeconds: playerProps.duration,
+      activitySeconds,
+    }).catch(() => {});
+  }
+
+  async function handleVideoEnded() {
+    playbackActive = false;
+    if (!video || !playerProps) return;
+    if (playbackUpdateTimer) {
+      clearInterval(playbackUpdateTimer);
+      playbackUpdateTimer = null;
+    }
+    const activitySeconds = viewingActivityClock.stop();
+    try {
+      // Report the real end position so the backend derives completion (and tears
+      // down the transcode session), then explicitly mark played as a guarantee.
+      await reportVideoPlayback("stop", {
+        entityId: video.id,
+        sessionId: playerProps.sessionId,
+        positionSeconds: currentTime,
+        durationSeconds: playerProps.duration,
+        completed: true,
+        activitySeconds,
+      });
+    } catch {
+      // best-effort
+    }
+  }
+
+  function handleActiveSubtitleChange(id: string | null) {
+    activeSubtitleId = id;
+    subtitleChoiceLocked = true;
+    if (typeof window !== "undefined" && video) {
+      window.localStorage.setItem(`prismedia:subtitle-lang:${video.id}`, id ?? "__off__");
+    }
+  }
+
+  async function handleAudioTrackChange(streamIndex: number) {
+    if (!video) return;
+    selectedAudioStreamIndex = streamIndex;
+    playbackPlan = await loadPlaybackPlan(video.id, playbackPlan?.sessionId, streamIndex);
+  }
+
+  function handleSeek(time: number) {
+    playerHandle?.seekTo(time);
+  }
+
+  // ── Transcript dock ────────────────────────────────────────────────
+
+  function toggleTranscriptDock() {
+    userWantsDock = !userWantsDock;
+    if (typeof window !== "undefined") {
+      writeTranscriptDockPreference(window.localStorage, userWantsDock);
+    }
+  }
+
+  function handleResizeStart(event: PointerEvent) {
+    event.preventDefault();
+    isResizing = true;
+    (event.currentTarget as Element | null)?.setPointerCapture?.(event.pointerId);
+  }
+
+  function handleResizeMove(event: PointerEvent) {
+    if (!isResizing) return;
+    const container = videoWrapperEl?.parentElement as HTMLElement | null;
+    if (!container) return;
+    const rect = container.getBoundingClientRect();
+    if (rect.width <= 0) return;
+    const pct = ((event.clientX - rect.left) / rect.width) * 100;
+    dockVideoPercent = clampTranscriptDockPercent(pct);
+  }
+
+  function handleResizeEnd(event: PointerEvent) {
+    if (!isResizing) return;
+    isResizing = false;
+    try {
+      (event.currentTarget as Element | null)?.releasePointerCapture?.(event.pointerId);
+    } catch {
+      // already released
+    }
+    if (typeof window !== "undefined") {
+      writeTranscriptDockWidth(window.localStorage, dockVideoPercent);
+    }
+  }
+
+</script>
+
+<svelte:head>
+  <title>{video?.title ?? "Video"} · Prismedia</title>
+</svelte:head>
+
+<div class="detail-page">
+  {#if detail.loadState === "loading"}
+    <div class="player-skeleton" aria-hidden="true"></div>
+  {/if}
+  <EntityDetailPageState
+    loadState={detail.loadState}
+    errorMessage={detail.errorMessage}
+    fallbackError="Failed to load video."
+    onRetry={detail.retry}
+    showHero={false}
+    tabCount={4}
+  >
+  {#if card && video && playerProps}
+    <NsfwBlur isNsfw={flagsNsfw}>
+      <div class={cn(isTranscriptDocked && "lg:flex lg:items-start lg:gap-0")}>
+        <div
+          bind:this={videoWrapperEl}
+          class={cn("player-surface", isTranscriptDocked && "lg:min-w-0")}
+          style={isTranscriptDocked ? `flex: 0 0 ${dockVideoPercent}%` : undefined}
+        >
+          <VideoPlayer
+            bind:handle={playerHandle}
+            src={playerProps.src}
+            directSrc={playerProps.directSrc}
+            codec={playerProps.codec}
+            sourceWidth={playerProps.sourceWidth}
+            sourceHeight={playerProps.sourceHeight}
+            colorPipelineLabel={playerProps.colorPipelineLabel}
+            resolutionLabel={playerProps.resolutionLabel}
+            dynamicRangeLabel={playerProps.dynamicRangeLabel}
+            videoCodecLabel={playerProps.videoCodecLabel}
+            audioFormatLabel={playerProps.audioFormatLabel}
+            streamMethod={playerProps.streamMethod}
+            qualityRungs={playerProps.qualityRungs}
+            poster={playerProps.poster}
+            mediaTitle={video.title}
+            mediaArtist={seriesRef?.title}
+            markers={playerProps.markers}
+            duration={playerProps.duration || undefined}
+            initialTime={initialPlaybackTime}
+            onPlayStarted={handlePlayStarted}
+            onPlaybackActive={handlePlaybackActive}
+            onPlaybackPaused={handlePlaybackPaused}
+            onTimeUpdate={handleTimeUpdate}
+            trickplayPlaylist={playerProps.trickplayPlaylist}
+            subtitleTracks={playerProps.subtitleTracks}
+            audioTrackOptions={playerProps.audioTracks}
+            onAudioTrackChange={handleAudioTrackChange}
+            activeSubtitleTrackId={activeSubtitleId}
+            onActiveSubtitleTrackIdChange={handleActiveSubtitleChange}
+            {subtitleChoiceLocked}
+            {subtitleDefaults}
+            isTranscriptSidecarOpen={userWantsDock && hasSubtitles}
+            onTranscriptSidecarToggle={toggleTranscriptDock}
+            {defaultPlaybackMode}
+            onForceTranscode={forceTranscodeFallback}
+            {showCastControls}
+            onEnded={handleVideoEnded}
+          />
+          {#if isTranscriptInlineDocked}
+            <div class="mt-2 lg:hidden">
+              <VideoTranscriptPanel
+                videoId={video.id}
+                tracks={playerProps.subtitleTracks}
+                activeTrackId={activeSubtitleId}
+                onActiveTrackIdChange={handleActiveSubtitleChange}
+                currentTime={displayTime}
+                onSeek={handleSeek}
+                onTracksChanged={refreshVideo}
+                variant="compact"
+                isDocked
+                onDockToggle={toggleTranscriptDock}
+              />
+            </div>
+          {/if}
+        </div>
+        {#if isTranscriptDocked}
+          <div
+            role="separator"
+            aria-label="Resize transcript panel"
+            aria-orientation="vertical"
+            onpointerdown={handleResizeStart}
+            onpointermove={handleResizeMove}
+            onpointerup={handleResizeEnd}
+            onpointercancel={handleResizeEnd}
+            class="hidden lg:flex w-2 shrink-0 cursor-col-resize items-center justify-center bg-surface-3 hover:bg-accent-950 active:bg-accent-950 transition-colors group"
+            style={`touch-action: none; ${videoWrapperHeight != null ? `height: ${videoWrapperHeight}px;` : ""}`}
+          >
+            <span
+              class="h-8 w-[2px] bg-border-default group-hover:bg-border-accent group-active:bg-border-accent transition-colors"
+            ></span>
+          </div>
+          <div
+            class="hidden lg:flex lg:flex-col lg:flex-1 lg:min-w-0 lg:overflow-hidden"
+            style={videoWrapperHeight != null ? `height: ${videoWrapperHeight}px` : undefined}
+          >
+            <VideoTranscriptPanel
+              videoId={video.id}
+              tracks={playerProps.subtitleTracks}
+              activeTrackId={activeSubtitleId}
+              onActiveTrackIdChange={handleActiveSubtitleChange}
+              currentTime={displayTime}
+              onSeek={handleSeek}
+              onTracksChanged={refreshVideo}
+              variant="list-only"
+              isDocked
+              onDockToggle={toggleTranscriptDock}
+            />
+          </div>
+        {/if}
+      </div>
+    </NsfwBlur>
+
+    <EntityDetail
+      {card}
+      wantedStatus={acq.acquisition?.summary.status ?? null}
+      onRatingChange={detail.changeRating}
+      onFavoriteToggle={detail.toggleFavorite}
+      onOrganizedToggle={detail.toggleOrganized}
+      onMetadataSave={detail.saveMetadata}
+      ratingBusy={detail.ratingBusy}
+      showHero={false}
+      posterSize="none"
+      tabs={detailTabs}
+      sections={detailSections}
+      actionButtons={heroActions}
+      defaultCreditRole={CREDIT_ROLE.actor}
+    >
+      {#snippet heroMeta()}
+        {#if primaryStudio}
+          <a href={resolveEntityHref(primaryStudio.kind as EntityKindCode, primaryStudio.id)} class="meta-item is-studio">{primaryStudio.title}</a>
+        {/if}
+        <EntityDetailHeroDates {dates} leadingSeparator={Boolean(primaryStudio)} />
+      {/snippet}
+
+
+      {#snippet sectionContent(section)}
+        {#if section.id === "acquisition"}
+          <EntityAcquisitionCard
+            {acq}
+            entity={video}
+            {fileManagement}
+            onCancelled={() => detail.reload({ showLoading: false })}
+            onImported={() => detail.reload({ showLoading: false })}
+          />
+        {:else}
+          <VideoDetailSectionContent
+            {section}
+            {card}
+            seriesCards={seriesCard ? [seriesCard] : []}
+            {videoId}
+            {playbackState}
+            {durationSeconds}
+            {playbackBusy}
+            {playerProps}
+            {isTranscriptDockActive}
+            {isTranscriptDocked}
+            {hasSubtitles}
+            {activeSubtitleId}
+            {displayTime}
+            getCurrentTime={() => currentTime}
+            onSeek={handleSeek}
+            onResume={handleResume}
+            onStartOver={handleStartOver}
+            onToggleWatched={handleToggleWatched}
+            onRefresh={refreshVideo}
+            onActiveSubtitleChange={handleActiveSubtitleChange}
+            onTranscriptDockToggle={toggleTranscriptDock}
+          />
+        {/if}
+      {/snippet}
+    </EntityDetail>
+  {:else if card && video && entityWanted}
+    <!-- A phantom episode: no file to play yet — metadata plus the Acquisition tab (search,
+         releases, live download, monitoring, cancel), exactly like a wanted movie or book. -->
+    <EntityDetail
+      {card}
+      wantedStatus={acq.acquisition?.summary.status ?? null}
+      onRatingChange={detail.changeRating}
+      onFavoriteToggle={detail.toggleFavorite}
+      onOrganizedToggle={detail.toggleOrganized}
+      onMetadataSave={detail.saveMetadata}
+      ratingBusy={detail.ratingBusy}
+      posterSize="medium"
+      actionButtons={heroActions}
+      tabs={wantedDetailTabs}
+      sections={detailSections}
+    >
+      {#snippet sectionContent(section)}
+        {#if section.id === "acquisition"}
+          <EntityAcquisitionCard
+            {acq}
+            entity={video}
+            {fileManagement}
+            onCancelled={() => detail.reload({ showLoading: false })}
+            onImported={() => detail.reload({ showLoading: false })}
+          />
+        {/if}
+      {/snippet}
+    </EntityDetail>
+  {/if}
+  </EntityDetailPageState>
+</div>
+
+<style>
+  .detail-page {
+    display: grid;
+    gap: 1.25rem;
+    padding: 0;
+    max-width: none;
+    margin: 0;
+  }
+
+  .player-skeleton {
+    aspect-ratio: 16 / 9;
+    background: #050508;
+    animation: pulse 1.2s ease-in-out infinite;
+  }
+
+  .player-surface {
+    background: #050508;
+  }
+
+  :global(.meta-item) {
+    white-space: nowrap;
+    font-size: 0.82rem;
+  }
+
+  :global(.meta-item.is-studio) {
+    color: var(--color-text-accent, #c7c9cc);
+    text-decoration: none;
+    transition: opacity 0.15s;
+  }
+
+  :global(.meta-item.is-studio:hover) {
+    opacity: 0.8;
+  }
+
+  :global(.meta-sep) {
+    display: inline-block;
+    width: 3px;
+    height: 3px;
+    margin: 0 0.5rem;
+    background: var(--color-text-muted, #8a93a6);
+    opacity: 0.5;
+  }
+
+  @keyframes pulse {
+    0%, 100% { opacity: 0.45; }
+    50% { opacity: 0.85; }
+  }
+</style>

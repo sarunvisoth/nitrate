@@ -1,0 +1,868 @@
+# Changelog
+
+Important user-facing changes are documented here. This changelog is intentionally curated and high level; use the git history for commit-by-commit detail.
+
+The format is based on [Keep a Changelog](https://keepachangelog.com/), and this project adheres to [Semantic Versioning](https://semver.org/).
+
+## [Unreleased]
+
+### Added
+
+- Monitored movies and TV units can look for better matches while keeping unattended automatic import holds available for review. Recovery compares episode coverage and profile quality, backs off from hours to weekly searches, and only cleans up superseded downloads after a replacement finishes importing. Unresolved foreign-season extras remain available for review.
+
+- A security policy and private vulnerability reporting guide explain how to report issues and how fixes are coordinated.
+
+- Automatic qBittorrent acquisitions on supported clients inspect torrent contents before releasing payload downloads. Wrong-content and redundant season packs can enter recovery before transferring media; metadata holds survive restarts and respect cancellation.
+
+- Quality profiles allow verified video replacements to change file containers by default. Turn off “Allow format changes” to require individual approval. Interrupted replacements preserve recovery evidence, episode identity, and playback history across container changes.
+
+- Replace or upload individual TV episodes, including older files imported through season packs. Replacement searches use current episode numbering and monitor preferences; files shared by multiple episodes require coverage-aware review.
+
+- Acquisition profiles now offer an ordered audio-language picker and editable starter rules for common languages, codecs, HDR, source formats, and lossless audio. Basic and Advanced edit the same reusable custom formats, with scores set per profile.
+
+- Movie and TV acquisition can search verified original, translated, and romanized titles from the selected metadata provider. Those names share strict identity checks and quality ranking through download validation, import, and coverage recovery.
+
+- Discover now includes a Track category for searching and requesting individual songs. Song imports preserve the selected recording's identity and select only its matching audio from a larger downloaded album.
+
+- M4B audiobooks now import embedded chapter windows, expose them as distinct Book chapters, and map matching ebook chapters to those windows without splitting or duplicating the source file.
+- Comics now have dedicated title, volume, and installment catalogs on the web, with capability-driven reading, right-to-left spreads, double-page handling, and sequence-aware continuation across ordered releases.
+- Loose comic-page folders can now become verified, naturally ordered managed CBZ sources at explicit comic boundaries. Prismedia keeps the original pages as protected provenance, rebuilds only when their content changes, and prunes only its own generated copies.
+- Comic archives now scan through an independent serialized-media pipeline that groups released installments beneath titles and optional volumes, preserves ComicInfo release metadata and reading direction, and builds generic page manifests without creating one Entity per page.
+- Serialized comic requests can now discover and monitor both collected volumes and independently released chapters or issues, search comic indexer categories with installment-aware matching, and import verified CBZ/ZIP payloads into the exact wanted Entity without folding uncollected releases into invented volumes.
+- Readable Entities can now expose a generic ordered page manifest and stream pages through shared Entity reader routes, with exact archive-member ordering and no page-Entity expansion.
+- Comic installments now use the same definition-owned manual upload and replacement contract as other concrete media files, while prose Books accept only their own readable or audio formats.
+- Serialized comics now have separate series, optional volume, and installment entity contracts, preserving the distinction between an independently released chapter or issue and a prose book's internal chapter markers.
+- Entity details now advertise ordered-sequence participation and directly playable audio through generated capabilities, giving every client one shared contract for sequence interactions and audio playback without media-kind checks.
+- Books that have both readable and audiobook renditions now include a Chapter Mapping tab. Mark the readable chapter where the first audiobook file begins to fill the map sequentially, override individual files when needed, and save the alignment for web and native clients.
+- Audiobook-to-ebook chapter matching is now computed once during library scans and stored with the book, instead of being recalculated by every client on every visit. The Chapter Mapping tab shows the stored map instantly, distinguishes automatic matches from your explicit choices, and refills the automatic layer whenever files, tracks, or your overrides change.
+- Book pages open in one round of requests: the readable chapter list (EPUB contents or chapter summaries with page counts) is persisted at scan time and served from the database, chapter page counts no longer require fetching every page of every chapter, and moving your reading position no longer refetches the contents at all.
+- Administrators can now grant content-request access to individual household members. Permitted members can discover and request media from both the web and native apps using their accessible libraries, while request activity, plugin management, and acquisition settings remain restricted to administrators.
+- TV downloads held for manual import now open an expected-episode review: Prismedia prefills unambiguous matches, lets each episode choose a downloaded video, supports one video satisfying several episodes, and keeps the complete payload in a collapsed audit list. Potentially dangerous companion files are blocked from selection while verified media remains mappable behind an explicit safety confirmation. A held release can also be rejected to remove its download data, blocklist it, and immediately search again.
+
+### Changed
+
+- Episode searches and automatic grabs reject releases whose distinctive title confidently identifies another episode in the known series catalog, even when the advertised season and episode number match. Unnamed, translated, ambiguous, and multi-episode releases retain their existing checks.
+
+- The Auto-grab setting now explains that it controls standalone searches. Library requests and monitored recovery continue downloading acceptable releases automatically.
+
+- Downloaded-file review shows the last verification failure beside each retained video and leaves failed or already-imported files unselected. Explicit retries still require full verification before import.
+
+- Untouched TV packs can import episodes that pass full verification while retaining damaged videos with their failure details for review. Missing-episode recovery then targets the episodes still unavailable, and interrupted imports preserve the verified subset.
+
+- Starting monitoring from an acquisition preserves its selected profile and library for later child requests. Existing monitoring choices, including an explicit reset to defaults, remain authoritative.
+
+- Newly acquired movies, episodes, and video replacements now fully decode video and audio before placement. Verification uses limited background processing; damaged or unverified downloads stay available for review without replacing owned files.
+
+- Audio-language preferences and rules exclude known work and episode titles, so a word such as French in a movie's name no longer rejects otherwise eligible releases or falsely confirms their audio language.
+
+- Language preferences and audio rules recognize common regional tags such as PT-BR, EN-US, and FR-CA, including underscore variants, without mistaking subtitle labels for audio.
+
+- Movie and episode title matching tolerates sentence punctuation and quotation marks around words while preserving meaningful numbers and symbol-only names.
+
+- Equally ranked acquisition releases keep a stable order across review and automatic selection.
+
+- Large TV packs reuse episode evidence across files and alignment passes, reducing repeated parsing and memory allocation during import planning.
+- The public site includes a complete icon set and website manifest, a refreshed social preview, clearer native download labels, and page-specific search and sharing metadata.
+- Product screenshots now load at sizes suited to the screen while retaining full-resolution originals; the mobile navigation keeps its menu and brand clear on narrow phones.
+- The homepage adds a real web playback demonstration, brings the product tour closer to the experience examples, and names supported indexers and download clients.
+- The homepage explains server setup earlier, links directly to the practical library workflow, and brings product demonstrations ahead of the founder story.
+- The homepage closes with clearer community links and useful setup, media, and native-app shortcuts.
+- The homepage shows fresh high-resolution web and native product captures, including a 4K Apple TV view in the stacked hero. Primary links now lead to the source repository, native downloads, and setup.
+- The public homepage adds a subtle spectrum atmosphere, a prism glass primary action, and familiar download and community buttons. The prism uses the Prismedia logo and connected media branches; motion follows system preferences.
+
+- Redesign the public homepage around a clearer introduction, the story behind Prismedia, and an interactive prism that follows scrolling. Media accents match the app, with a complete static illustration on phones and for reduced motion.
+
+- Replacement searches open in the main acquisition area instead of inside More acquisition actions. Closing the search returns to the current acquisition without changing the existing files.
+- Clicking an Entity grid thumbnail carries its artwork into the detail header on supported browsers. Back and forward navigation stay immediate, reduced motion skips the effect, and slow or unavailable artwork falls back to normal navigation.
+- Identify's content-type buttons now grow with their labels and queue counts, keeping icons and text aligned without overlapping adjacent rows on desktop or phones.
+- Entity editors warn before leaving a page with unsaved changes, including browser back navigation, refresh, and closing the tab.
+- Entity editors place Save and Cancel after the fields, with validation and save errors beside those actions. The unsaved-changes prompt uses a compact shared dialog with stacked phone actions instead of stretching across the screen.
+- Metadata cards share the available row width without empty reserved columns. Source paths and fingerprints use full-width, selectable values below their labels, and repeated labels no longer prevent cards from rendering.
+- Thumbnail chips retain colored icons and use smaller shared caption sizes than their titles. The two values stay on one row with compact text and icons on the narrowest cards.
+- Entity headers emphasize a main date or meaningful date range, with every milestone available in a labeled "More dates" popover. Album headers lead with the artist instead of repeating studio information already shown in Details.
+- Entity detail headers show acquisition status once beside the title across media types. Covers no longer repeat grid badges or create inactive keyboard stops, and decorative artwork is hidden from screen readers.
+- Thumbnail metadata keeps separate chip outlines even at dense grid sizes.
+- Collection rules display numeric units and allow duration, file-size, and audio units to be changed without rewriting saved thresholds. Compatible comparison changes retain entered values, empty numeric drafts stay incomplete, and the existing negated-all logic is labeled "Not all" accurately.
+- Captioned Entity grids now reduce their column count in narrow spaces before squeezing metadata into unreadable fragments. The density preference is preserved, and artwork-only media walls remain unrestricted.
+- Collection previews now show a clearly counted sample of full Entity thumbnails instead of library controls that only filtered the sample. Resolution and gallery-type rules use removable choices, and preview loading, failures, and empty results are distinct. Changing rules cancels obsolete previews.
+- Collection relationship rules now use searchable Entity selections with artwork for tags, people, studios, and series. Exact names, including commas, and existing series IDs are preserved; future names can still be entered without creating library Entities.
+- Collection rules use labeled, responsive fields and a searchable Entity-type picker instead of cramped toggle strips. Saved nested groups remain visible and intact during editing, and incomplete rules show guidance instead of misleading empty results.
+- Broad searches can load further direct and related Entity matches in bounded batches instead of silently stopping at the first page. Existing results stay visible during continuation, with retry for failed pages and no duplicate entries. Shared choice rows also stay within the available width in mobile Safari.
+- Search results use consistently sized Entity thumbnails with library artwork and status badges, clearer group headings, working result expansion, and retry feedback. Rating and type filters update fetched matches immediately; nonfunctional date filters have been removed.
+- Search, Request discovery, mixed-library grids, and download statuses now share spaced choice controls. Required filters stay visibly selected, and reselecting the current Request type preserves the search draft.
+- Downloads now uses readable, status-first rows on phones, opening transfer details in a full-height view with a clear return to the queue. Desktop retains its resizable table and inspector, and status filters use shared single-choice controls.
+- Entity thumbnails use readable shared status and metadata badges. List views place these beside the title instead of over small artwork, and selection checkboxes remain visible over bright images.
+- Collapsible related-content sections now visibly contain their toolbars and thumbnails, with clear Show/Hide controls. Mixed-library type filters use spaced chips with Entity-colored icons instead of cramped connected selectors.
+- Entity detail sections now extend behind the header with square top corners. Artwork editing uses an expandable set of labeled controls instead of buttons over the cover or an empty header overlay.
+- Entity editing now groups fields, dates, and references in a full-width responsive grid with consistently aligned save/cancel controls. Book acquisition rows separate availability from actions and use roomier shared controls.
+- Acquisition downloads now put progress, speed, and time remaining first, with technical details collapsed. Recovery actions share an aligned footer beneath the work area.
+- Entity controls and metadata chips now share readable sizes and spacing. Mobile detail actions keep their labels in an aligned grid below the artwork, and related entities retain full thumbnails.
+- Entity page actions now have larger touch targets and more breathing room. Library heading icons show their media-family color, while detail pages carry artwork colors into the active tab and a clearer background atmosphere.
+- Related-content sections now share consistent headings, counts, and empty states across artists, authors, albums, galleries, series, and seasons. Collapsed sections remember the correct preference when navigating between entities.
+- Track lists now prioritize titles and artists, keep play controls separate from row numbers, and only flag missing media. The Tracks library uses continuous numbering without album disc headings, with shared search and empty-state controls.
+- Entity metadata now consolidates provider links that point to the same website, uses clearer shared link rows, and fits cards to their content with consistently aligned labels and values.
+- Dashboard and related-entity shelves now share visible previous/next controls, with clearer cast counts and readable thumbnail captions at smaller sizes.
+- Entity pages now use clearer full-height tabs, readable metadata and descriptions, calmer tags and credit labels, and consistent shared empty and disclosure surfaces. Acquisition review now leads with the current problem and next action, while monitoring preferences move into a responsive settings column and file audits and history stay out of the primary path.
+- Readers, player settings, file actions, ratings, selection controls, and operational screens now use the shared themed UI foundation. Reader contents and media settings share keyboard dismissal and focus handling, while existing artwork layouts, Settings section identities, and library toolbar placement are preserved.
+- Relationship, tag, and collection pickers now share searchable keyboard navigation, removable selections, and clearer loading and retry states. Editors, dialogs, mobile navigation, progress indicators, and collection choices build on the same themed UI foundations without replacing Settings navigation or library toolbar layouts.
+- Global search now uses a shared command interface with clearer artwork rows, keyboard-accessible recent searches and full-result actions, visible navigation hints, and retry feedback, while preserving grouped results and layered dialog interaction.
+- Shared buttons, search fields, form labels, status badges, detail tabs, and navigation disclosures now build on themed shadcn-svelte components, with quieter toolbar styling and existing page layouts and section identities preserved.
+- Bulk-selection actions and page-size pickers now use shared keyboard-accessible controls with consistent focus handling, while keeping their existing toolbar placement.
+- Library toolbars retain their full-width search row, inline view and thumbnail controls, and separate selection strip while using shared keyboard-accessible controls. Identify provider search now shares keyboard navigation and focus handling with other menus.
+- Account, breadcrumb, and track menus now share keyboard navigation, focus return, and collision-aware positioning. Filter presets use a clearer panel with labeled fields and always-visible management actions.
+
+- Shared dropdowns and settings switches now use accessible component bases with clearer neutral styling, keyboard typeahead, disabled-option handling, and dialog-aware menus. Settings labels are easier to read and selectors expand to full width on small screens.
+- Shared audio players now advance any owning Entity through generic item-to-progress mappings. Book code constructs the chapter mapping, while web and Apple players use the same media-neutral playback and persistence contract as every other audio-capable Entity.
+- Saved audio queues now restore through one compact, exact batch projection instead of loading every queued item independently, preserving numeric durations and player metadata without query growth as queues get longer.
+
+### Removed
+
+- Deprecated kind-specific Entity detail reads have been removed; use `GET /api/entities/{id}` for every Entity kind.
+- Deprecated playback-statistics, Entity-playback mutation, and audio-track play-count routes have been removed in favor of the shared Consumption API.
+- Audio-track detail and saved-queue payloads no longer duplicate embedded artist and album fields outside the Entity's `embedded-audio-metadata` capability.
+
+### Fixed
+
+- Applying a reviewed Identify match no longer fails with a "400 Bad Request" when Prismedia is reached over a plain `http://` address on your network, such as `http://192.168.1.10:8008`. Identify apply, its live progress readout, and opening the comic reader all work on those addresses again; previously they only worked over HTTPS or from `localhost`.
+
+- Documentation search preserves queries typed while the page is still loading.
+- Older automatic TV imports incorrectly marked for manual review during upgrade can recover when their matching completed job proves automatic intent; explicit reviews and uncertain history remain protected.
+
+- TV searches can accept alternate episode numbering when complete, unambiguous catalog titles prove the requested content, while rejecting misleading number matches that name another episode.
+
+- Monitored TV downloads held by missing season or episode numbers now refresh provider metadata on a bounded schedule and reuse their retained files when numbering becomes available.
+
+- Newly monitored requests get their first background check before routine rechecks, preventing old “Awaiting release” states from lingering behind a large monitoring backlog.
+
+- Audio playback now enforces the same library-access restrictions as other media, including range requests and transcoding.
+
+- Individual-song searches check advertised filenames before automatic selection, avoiding different recordings or artist credits that would otherwise fail only at import. Exact track matches rank by profile and quality without penalties from unrelated peer folder names. Compilation-album imports still allow track performers to differ from the album artist.
+
+- Replacing a video preserves its exact source path when only the file extension’s capitalization differs, including on Linux.
+
+- Library scans preserve episode identity while an interrupted video replacement awaits recovery or review, and retry reserved files after recovery finishes.
+
+- Video replacement now verifies files before taking catalog locks, then keeps library scans outside the file swap and Source-binding transaction. Quality failures are rejected before full decoding, and changed verification evidence cannot be reused.
+
+- Long-running replacements are no longer restarted by stale-import recovery. Retried imports follow their current workflow and retain reviewed format-change approval.
+
+- Repair and upload actions remain available for owned TV episodes when monitoring is off.
+
+- Preserve independently changed library files and replacement recovery artifacts when they change while a downloaded video is being fully verified.
+
+- Recognize quoted Usenet multipart release names and recover reversible title encoding errors while preserving work, year, episode, and sample-file checks.
+
+- Untouched TV downloads now release the library scan lock during full verification, then recheck their files, episode mappings, ownership, and current profile before import. Changed plans return to review without overwriting a newer cancellation or losing partial-import recovery evidence.
+
+- Interrupted TV imports now verify already-placed video before finishing episode recovery, preserving damaged files and their recovery state for review.
+
+- Reviewed episode selections replace an untouched held import plan, so excluding a damaged file no longer retries it anyway. Partially applied plans keep their recovery evidence.
+
+- Known operating-system companion files no longer keep fully owned season packs eligible for redundant downloads when upgrades are disabled. Missing episodes still reopen the pack.
+
+- Movie and TV searches retry Latin-accent spelling variants when the original queries find no acceptable release. Equivalent accent spellings also receive equal title relevance without changing the requested work or episode numbering.
+
+- Explicit EP/Episode-numbered releases use verified absolute episode mappings during search and import. Individual episodes no longer pass season-pack searches simply because their names omit a season number.
+
+- Release ranking no longer penalizes complete titles for trailing technical details such as audio channels and encoder names. Explicit HDTS, HDCam, and related recording tags no longer masquerade as broadcast-quality video based on resolution alone.
+
+- Opening an acquisition profile brings its editor into view. Release preference editors use the shared searchable choices and preserve advanced conditions when switching views.
+
+- Built-in format preferences recognize underscore-separated codec and source tags while avoiding matches inside ordinary words.
+
+- Advanced release rules limit expensive regular expressions and prevent invalid or timed-out patterns from matching through exclusion.
+
+- Preferred audio languages now rank explicit matches above uncertain multi-audio and unmarked releases. Subtitle language tags, including Multi-Sub, no longer masquerade as audio evidence.
+
+- Monitoring can recover older fileless requests that lost both their selected profile and library, then search again using the saved monitor choices. Selected releases, active downloads, manual reviews, and import recovery state remain protected.
+
+- Fileless monitored items now retain their own selected quality profile and library when automatic maintenance or recovery starts a request, including separate ebook and audiobook choices.
+
+- Automatic TV imports held with a saved episode plan can resume when current quality rules or retained files change. Retries preserve the original mapping and partial imports, respect manual review and paused monitoring, and avoid repeating unchanged work.
+
+- Completed upgrades now follow the configured recycle-bin or latest-backup policy after committing recovery state, preventing routine upgrades from accumulating recovery copies. Newly recycled files receive the full retention window even when their original modification dates are old.
+
+- The bundled worker now restarts after a crash or forced termination, allowing interrupted background jobs to recover without leaving the worker offline.
+
+- Interrupted book, movie, and episode upgrades now recover from preparation saved before file replacement, preserving the original file and stable library ownership even when the database commit fails. Staging retains verifiable recovery evidence, and rejected downloads wait for durable failure handling before cleanup.
+
+- Picking another release now preserves an installed upgrade's recovery state until its remaining media processing finishes.
+
+- Upgrades whose files were installed successfully can now retry interrupted media processing without replacing or downloading the file again, while changed ownership remains held for review.
+
+- Successful upgrades now retain their download until required media processing finishes, then hand cleanup to the durable retry queue.
+
+- New TV episode files are now inspected before a pack starts placement, with per-file quality and destination-season profile checks that also apply when retrying pending files.
+
+- Automatic episode mapping repair now follows canonical season numbers, including specials, and retains conflicting season ownership for review.
+
+- TV specials in season zero now support import recovery and confident cross-season matching, importing monitored specials while retaining unmonitored extras for review.
+
+- Library healing and refresh now regenerate file fingerprints when existing hashes belong to an old source, another item, or a generated asset.
+
+- Failed book and video replacements now preserve downloaded candidates for retry, retain interrupted staging files, and keep successful upgrades installed when backup recycling fails.
+
+- Movie and episode upgrades now refresh enabled file fingerprints even when the replacement keeps the same source identity, preventing old hashes from describing the new file.
+
+- TV import planning now retains ambiguous episode and season ownership for review instead of selecting an arbitrary file or treating a duplicate episode as missing.
+
+- Episode replacements now recheck every current file owner before swapping, protecting newly shared episodes, changed mappings, and bundles whose episodes have split across different files during an interrupted import.
+
+- TV imports now use canonical season and episode positions consistently when checking existing files and matching catalog titles, so a different display order cannot hide coverage or create duplicate episode slots.
+
+- Compatible interrupted imports saved by an earlier build can resume or be replaced even when their checkpoint omitted a newer optional field. Changed attempts and unrecognized recovery data remain protected.
+
+- Interrupted TV imports recheck pending episode replacements against current file quality and profile preferences before swapping files, while preserving already completed replacements.
+
+- Imported movies and episodes with missing or stale inspection data now inspect their existing file before resuming automatic upgrade decisions, without creating another download during recovery.
+
+- Upgrade monitoring and the Wanted list now keep searching when a current file probe shows that an older release label overstates the resolution needed by the quality cutoff.
+
+- Video upgrades now wait for a fresh probe before completion, and reconciliation repairs stale technical metadata tied to an older source file.
+
+- Automatic upgrade monitoring inspects existing videos with missing file or subtitle metadata, then resumes searching after inspection without repeatedly probing failed files.
+
+- Retrying a downloaded upgrade now uses the original file-replacement workflow and rechecks current ownership, including when an older import job resumes.
+
+- Individual video upgrades preserve files shared by multiple episodes, blocking automatic grabs and retaining already-downloaded replacements for coverage review.
+
+- Monitored movies and episodes already in the library can enter automatic quality upgrades without prior download history, using verified file metadata and preserving existing ownership.
+
+- Upgrade searches and automatic grabs check the owned video’s measured resolution, avoiding downloads justified only by an unknown or stale quality label. Replacement rechecks the same measured improvement and verified subtitle gains.
+
+- Movie and episode monitors can recover a lost link to a matching completed import and resume the normal quality-profile upgrade checks while preserving their files and user choices.
+
+- Video upgrade checks reuse a single probe for picture, audio, and text-subtitle evidence per file, reducing repeated inspection work for large season packs.
+
+- Season-pack upgrades inspect each colliding video’s actual resolution, runtime, and audio languages before replacement. Cleaned filenames no longer hide proven improvements, mixed-quality packs are judged file by file, and uncertain replacements preserve both copies for review.
+
+- A season whose existing episodes share files stored elsewhere can adopt its first dedicated folder when more episodes arrive, keeping the wanted episode identities instead of creating duplicates.
+- Monitored TV seasons can recover confidently identified episode pairs from older automatic imports that assigned a file to the wrong scanner placeholder. Recovery preserves the file and its stable source identity, retains manual mappings and playback history for review, and records the correction in acquisition history.
+- TV upgrade planning includes owned episodes even when their season has no dedicated folder, protecting shared files from replacements that would lose episode coverage.
+- Rescanning a file shared by multiple episodes preserves its saved episode owners and seasons when filename numbering disagrees, avoiding duplicate episodes, reverted mappings, and incorrectly fulfilled wanted episodes.
+
+- Complete paired episode titles can distinguish their season when one title repeats elsewhere; competing complete matches remain held for review, and foreign extras still require monitoring.
+
+- TV files that clearly name several distinct episodes can cover those episodes even without season-and-episode markers, allowing complete paired files to import and previously unnecessary packs to reopen when coverage is missing.
+
+- TV searches and file mapping distinguish the series name from episode evidence, preventing numbers or repeated words in a show's title from identifying the wrong episode.
+
+- Generated season-and-episode catalog labels no longer override a download's explicit episode numbering as if they were descriptive titles.
+
+- Book upgrade requests retain the requested volume and rendition, so ebook upgrades cannot silently accept audio or a different volume.
+
+- Upgrade searches and imports follow the original item's repaired numbering, including verified absolute episode numbers, without changing file ownership before replacement.
+
+- Idle monitoring notices new requests and profile changes within its next 30-second check, while retaining configured indexer search intervals and failed-search backoff.
+
+- Absolute episode matching distinguishes episode numbers from codecs, audio channels, file sizes, and other technical numbers, and recognizes numbered anime revisions such as `500v2`.
+
+- Generic episode labels no longer masquerade as absolute numbering or override explicit season and episode markers. Tokenless downloads require descriptive titles or verified absolute positions before automatic mapping.
+
+- Prowlarr searches skip indexers whose download protocol has no enabled downloader, reducing unnecessary requests while preserving results when provider discovery is unavailable.
+
+- Complete episode metadata refreshes retire absolute numbers the provider no longer supports, keeping later searches from using stale numbering while preserving existing file bindings. Partial metadata enrichment retains existing ordering.
+
+- Leading bracketed release-group labels no longer hide otherwise matching video releases. Series, episode, sequel, and remake-year checks still apply to the title that follows.
+
+- Reopening metadata reviews refreshes both cached catalogs and completed review sessions after provider updates. Review and background lookups respect current provider availability before reusing cached results.
+
+- Generic TV episode placeholders no longer suppress provider checks when downloaded filenames contain descriptive episode titles, helping detect mislabeled files from absent seasons without adding lookups for quality-only filenames.
+
+- Monitored TV seasons can restore missing episode links from confidently identified paired files already in the library before requesting another download. Repairs preserve existing files and owners, respect manual mappings and paused monitors, and retry safely if reconciliation cannot be queued. The recorded import destination also supports repairs when older series lack library-location metadata.
+
+- Repeated episode titles in other seasons no longer block a TV file when its requested-season numbers and complete titles agree; conflicting or incomplete evidence still requires review.
+
+- Held TV recovery limits slow provider work per scheduler tick and rotates through the backlog, keeping download handoffs and monitoring responsive.
+
+- Manual TV mapping reviews suppress misleading episode suggestions and explain when local or provider titles identify content from another season.
+
+- Early season-download checks reconsider cross-season title evidence before declaring a pack already owned, keeping useful or ambiguous extras eligible when release numbering is misleading.
+
+- Unresolved TV imports can consult nearby seasons from the linked metadata provider to retain mislabeled extras whose correct season is absent locally. Lookups preserve local corrections, verify season identities, and allow monitoring to be paused while provider requests run.
+
+- Retained TV extras automatically resume when their destination season becomes monitored and the shared import planner can fill a catalog gap, without redownloading earlier imported episodes or bypassing year checks.
+
+- TV imports can fill monitored seasons with confidently identified extra episodes from a season pack, including paired files with conflicting release numbering. Unmonitored, ambiguous, and already-owned extras remain available for review.
+
+- Import planning rechecks current monitor state before electing cross-season placements, preserves elected plans through restart recovery, and cannot revive cancelled or superseded imports when a destination changes.
+
+- TV imports hold conflicting paired-episode title matches for review instead of reverting to contradictory release numbering.
+
+- Resuming a partial TV import retains the original filenames and measured sizes of files imported in earlier passes, preserving evidence needed for later mapping recovery.
+
+- TV import and recovery checks load owned episodes across all seasons together, avoiding a separate database read for every season in long-running series.
+
+- Automatic TV recovery can reconsider retained extras after a partial import when improved mapping evidence can fill a library gap, while preserving explicit review choices and newer download attempts.
+
+- Partial TV imports keep unmatched videos for review while cataloging matched episodes. Saved import recovery and downloader cleanup preserve those files until their mapping is resolved or the download is explicitly rejected.
+
+- Interrupted TV imports restore every episode covered by a combined file, including files renamed during placement, and retain incomplete mapping evidence for review.
+
+- SABnzbd imports now remove completed download files as well as client history, while preserving library copies, shared active payloads, and unsafe filesystem links. Existing completed Usenet transfers receive a guarded cleanup retry to recover files left by earlier versions.
+
+- Successful upgrades now retain exact downloader cleanup ownership after their temporary requests are consumed, so downloader outages and restarts cannot silently abandon the completed payload.
+
+- Download removal now rechecks shared ownership and seeding goals under the same lock as new grabs, preserving payloads another active request still needs. Upgrade cleanup also stays with its recorded downloader when that client is unavailable.
+
+- Held TV downloads can repair episodes whose catalog links remain after the underlying files disappear; recovery now shares the download admission check for actual files on disk.
+
+- Individual song imports recognize compact artist-and-title filenames while keeping instrumental, live, and other version labels distinct.
+
+- Download cleanup now keeps retrying when its recorded downloader configuration is temporarily unavailable, then resumes cleanup when that client returns.
+
+- Automatic video upgrades preserve both files for review when probing fails or either runtime is missing or invalid, preventing uncertain replacements and premature release blocklisting.
+
+- Cutoff Unmet now counts and paginates only items that still need upgrades, so completed upgrades no longer leave a nonzero count or hide missing upgrades behind empty pages.
+
+- Automatic movie imports and video upgrades now check the current profile against probed audio languages, and initial movie imports hold files whose resolution contradicts the release label. Explicit standard-definition disc encodes no longer inherit an HD quality rating.
+
+- Language preferences now match equivalent two-letter, three-letter, and named language declarations without treating short words in release titles as language tags.
+
+- Incomplete seasons can retry season packs after individual episode searches are exhausted, with a six-hour retry limit, protection for active downloads and manual review, and early rejection of previously observed packs that cannot fill current gaps.
+
+- Automatic grabs now recheck current profiles, request metadata, and owned quality before starting a new download, preserving indexer language and size evidence. Explicit manual picks and already-started downloader handoffs retain their existing behavior.
+
+- Movie imports now probe the primary video before placing files in the library and preserve unreadable payloads for review.
+
+- Invalid media-kind and other coded API values now return validation errors instead of internal server errors.
+
+- Automatic season downloads can stop early when their file lists prove they only contain already-owned episodes and upgrades are disabled. File-list evidence is rechecked against current mappings, files, and profile settings instead of permanently blocklisting the release; unknown content remains eligible.
+
+- Video upgrades now inspect and replace the main file when a sample companion is present, while multiple possible feature files still require review.
+
+- Held automatic TV imports now retry retained files when corrected mapping inputs can fill library gaps. Unchanged holds do not loop across restarts; incomplete transfers, explicit manual reviews, and paused monitoring remain protected.
+- Editing an owned title's quality profile now reopens eligible upgrade searches on the next monitor pass without inheriting the previous profile's retry cooldown.
+- HD-DVD releases now use their HD disc quality tier instead of passing profiles restricted to standard DVD.
+- Download polling and interrupted-request recovery continue when an unrelated recurring maintenance check fails.
+- Automatic video upgrades now compare measured runtimes and preserve both files for review when a replacement is substantially shorter than the owned copy.
+- Early download checks now use the same provider episode alignment as TV imports, preserving useful paired-episode files and deferring rejection when file names cannot prove an episode is absent.
+- Automatic movie searches no longer select individually posted CD parts as complete movies.
+- Movie and TV searches now reject releases labeled as samples or trailers before downloading, while preserving matches whose actual titles contain those words.
+- Retrying retained TV downloads can now repair missing links to combined episodes using byte-verified files already in the library, including packs that also add new episodes, without replacing identical media.
+- Background request enrichment now restores missing episode and other ordering metadata while preserving existing library corrections, so incomplete requests can recover without being recreated.
+- Existing requests now use corrected library season, episode, and volume numbers for subsequent searches and imports instead of retaining stale request-time mappings.
+- Automatic TV imports preserve completed downloads for review when requested episodes lack episode numbers, preventing duplicate catalog entries while season metadata is incomplete.
+
+- TV imports now preserve every explicitly numbered episode in combined files, including when provider titles are incomplete, and reject conflicting season or partial bundle identification instead of silently importing only one episode.
+
+- Completed upgrade downloads keep their protection against duplicate upgrades while waiting for import, applying a replacement, or recovering after a restart.
+
+- Changing the quality profile of an owned monitored title now governs its next upgrade search, including switching back to the default profile, while an ongoing upgrade keeps its selected profile.
+
+- Prowlarr searches now retrieve additional result pages from providers with more matches, recovering releases hidden beyond the first page without repeating searches against exhausted providers.
+
+- Newly supplied release dates now resume active waiting requests through the automatic search queue, without waiting for the recurring monitor backlog to drain. Paused monitoring and active transfers remain protected.
+
+- Monitored movies, episodes, and ebooks retain their imported quality baseline so enabling upgrades or raising a profile cutoff can resume upgrade searches after the original import.
+
+- Automatic upgrades and the Cutoff Unmet list now honor the acquisition’s assigned quality profile, so a different default profile cannot silently disable upgrades or trigger unwanted ones.
+- Docker builds include workspace dependency patches, restoring dev image publishing and Docker Compose builds after the documentation search update.
+- Documentation tables scroll within the article on narrow screens instead of widening the page.
+
+- Opening plugin credentials no longer autofills the plugin search with your Prismedia login and hides the editor. Plugin searches now use the shared clear control and return focus to the empty search field.
+- Plugin navigation now uses the shared keyboard-accessible tabs. Confirmation dialogs focus Cancel, preserve failed actions for retry, and prevent dismissal while work is in progress. Request messages, dashboard placeholders, and diagnostic job history use the shared UI components.
+
+- Resolution filters now use the same source tiers as thumbnail badges, including cropped widescreen video. Grid and collection choices include 8K, 1440p, and lower-resolution SD, while unknown dimensions remain unclassified. Existing resolution-based collections may show corrected matches.
+
+- Entity thumbnail captions keep two metadata values on one row. Compact sizing reduces padding and removes decorative chip framing on the smallest cards so values stay readable; full metadata remains on detail pages.
+
+- New collection rules no longer silently restrict video fields to standalone Videos, excluding Movies and Episodes. Entity-type choices now follow the same backend policy as rule evaluation, while existing explicit restrictions remain unchanged.
+- Acquisition labels now agree across library cards, Downloads, and child activity. Pending, downloaded, and importing stages stay distinct, while attention states name the next step: Choose release or Review import.
+- Entity metadata combines repeated provider destinations into one link with aligned, readable IDs, without changing the editable source data. Personal milestones now appear under Dates rather than Release dates.
+- Untabbed Entity pages now use the same responsive editor as tabbed pages. Hidden fields and read-only relationships no longer appear as editable or enter the save selection.
+- Entity detail panels align with the header without dark side gutters, and narrow-screen title/rating fields stay within the shared edit grid.
+- Link editors now identify editing clearly, focus the field, and explain invalid entries. Metadata input errors are associated with their fields, manual upload is keyboard-accessible, and supporting acquisition sections no longer run together.
+- Date fields stay aligned within their columns in iOS Safari while retaining the native calendar picker.
+- Interrupted imports now show the failure reason and available recovery path instead of suggesting an unavailable torrent upload.
+- Metadata chips no longer combine a white background with light text. Mobile navigation icons align consistently, track ratings no longer overlap durations, and acquisition file actions stay inside their card instead of floating between sections.
+- Library searches with no matches now offer a direct reset instead of incorrectly saying the library is empty and asking you to scan folders. Reset preserves sorting and display preferences.
+- Global search no longer shows an older request's results after the query changes or activates a result when Enter is used on Clear.
+- Video playback shortcuts no longer also react to keys used by tabs, menus, sliders, or other focused controls.
+- Changing library sort, artwork layout, or selection no longer reveals a reset row or shifts the toolbar. Clear now removes only search and filters while keeping those browsing preferences.
+- Library sort direction now uses a distinct sorting icon and explicit tooltip so it is not confused with expanding the toolbar.
+- The library toolbar's Clear action now keeps its icon and label aligned in one compact button.
+- Fresh movie-library setup now persists discovered titles in bounded database batches, runs every playback-critical probe before optional enrichment, applies high-cardinality local sidecar relationships in the background, and defers long trickplay generation behind ordinary thumbnails and previews so the library becomes visible and playable without waiting for metadata expansion or background media work.
+- Videos now count as completed after 90% playback, so leaving during credits records the play. Completed items also stop advertising a final-second resume point, while manually marking an item watched still preserves its prior position if it is later marked incomplete.
+- The unified container now reasserts PostgreSQL-safe data-directory permissions immediately before database startup, so a named ACL cannot leave Prismedia stuck in a restart loop after the container restarts.
+- Native content requests now commit the exact review the user confirmed instead of rejecting harmless client-side JSON normalization as a changed provider proposal and trapping the request in a reload loop.
+- Album and artist playback queues now preserve each track's embedded artist when present, falling back to the album artist only for tracks without one.
+- qBittorrent connections now reuse authenticated sessions, refresh an expired cookie once, and back off rejected credentials so concurrent transfer polling cannot turn one bad login into an IP ban.
+- Wanted book placeholders no longer appear to own an ebook, expose reading progress controls, or enter the reader until a direct EPUB or PDF source has actually arrived. Opening a placeholder reader URL also no longer creates phantom reading history.
+- Comics now derive static thumbnails from their persisted cover pages, and artwork-less media containers roll up one to four child covers during background scans and metadata work. Grid API reads expose those stored variants as the entity's base artwork, leaving placeholders only when the entire hierarchy has no artwork.
+- Ogg Opus audio now streams with its container-accurate media type, allowing Apple players to start these tracks instead of remaining silent at 00:00.
+- First playback of a video that needs Direct Stream now prepares its complete seekable timeline before opening, so Apple players no longer freeze at the short temporary duration shown during the initial probe. If exact preparation is unavailable, playback safely falls back to transcoding.
+- Existing image-archive Books now transition into the serialized comic hierarchy without duplicate catalog entries or scan-order data loss, including libraries whose series identity is recorded as folder provenance. They retain stable identities, promote saved chapter progress to the adopted installment, and remove the entire obsolete chapter/page hierarchy when a source disappears.
+- Job Control now offers separate Book and Comic scans, so serialized comic archives and loose-page folders run through the comic scanner instead of the prose-book scanner.
+- Source-backed audio queues loaded from the database now advertise the same playable-audio capability as in-memory Entities. The shared player derives ordered-queue and variable-rate controls from that capability, with no book-specific playback branch.
+- A video's saved resume position can no longer be destroyed by a playback attempt that never gets going. Players that stall while opening report a position of zero, and the server previously treated that as "the viewer went back to the beginning" and erased the real resume point. Zero-position progress and stop reports now keep their watch-activity accounting but leave the resume position untouched; choosing Start Over when starting playback still clears it explicitly.
+- Safari no longer stutters, stalls, and restarts part-way through HEVC videos played as Direct Stream. Safari now plays these streams with its own built-in player, which correctly handles the segment structure that most HEVC files use; the previous player could not, and got stuck re-requesting the same few seconds forever. Chrome and Firefox are unaffected.
+- Stream descriptions now measure every segment boundary against the video that is actually there, instead of assuming each segment starts exactly on its keyframe, and no longer advertise segments as independently decodable when they are not. Affected videos re-measure themselves once on their next play.
+- Stalled video playback no longer becomes unrecoverable. A player that is buffering or retrying a segment keeps its playback session alive even though its position is not advancing, and cached stream output is now protected from cleanup while a client is still fetching it, so a brief stall can no longer escalate into missing segments and a failed stream.
+- Manual audiobook upgrades now replace the owned multi-file rendition as one crash-safe folder operation while preserving any co-located ebook files and artwork.
+- A failed import whose completed download is still intact now offers Retry import instead of forcing another search and download.
+- Explicitly selected release replacements no longer depend on the prior download client remaining healthy: Prismedia detaches the exact old client item into durable cleanup, queues the new release through its own protocol client, and removes the old item when its original client recovers.
+- Direct Play video pages now pre-load only the source metadata needed for faster startup and cancel that request immediately when the player closes, while adaptive streams remain dormant until Play to avoid abandoned remux or transcode work.
+- Web video playback now honors negotiated HEVC support instead of unnecessarily switching compatible MP4 files to HLS, avoiding avoidable startup and seek delays. Playback status also reports Transcoding when adaptive HLS is re-encoding the video instead of labeling it Direct Stream.
+- Audiobook chapter mapping and playback now ignore aggregate track records that do not own playable source media.
+- Book chapter lists no longer infer alignment from chapter-like filename numbers, which could shift an entire audiobook when files begin with a prologue or other front matter. Unmapped files now fall back only to normalized title matches.
+- Interrupted acquisitions now offer their exact Retry import action from release review, and explicitly choosing another listed release confirms a destructive override that clears the partial import and prior download before queueing the new selection. Audiobooks imported onto an existing readable Book now fulfill that rendition before readiness validation instead of becoming stuck in a partial-import loop.
+- Library grids, shelves, and collections now read episode/season/page/track counts, taxonomy usage counts, and collection sizes from automatically maintained projections instead of recomputing them from every child row on every page, and no longer check the filesystem for each card's artwork. List pages that previously took seconds now answer in tens of milliseconds.
+- Per-user library boundaries are enforced through the same projections: chips and lists count exactly the entities each member may see, hidden libraries never leak into a visible container's badge, and the visibility check itself no longer embeds whole-table subqueries into every read.
+- Hover previews on cards now load on first hover instead of being computed for every row of every page; covers and grid thumbnails load in a single query per page.
+- The dashboard now reappears instantly with its last-known shelves while refreshing in the background, returning sessions skip a blocking settings round trip, and grid pages no longer fire their initial query twice.
+- A changed file now triggers only the scans whose media family can own it (a touched video no longer queues gallery, audio, and book scans of the same root), and deleting media reconciles through its exact removed paths instead of full library rescans.
+- Library-wide cleanup sweeps (entities outside configured roots, orphaned tags) moved from every scan to a new weekly deep-integrity scan cadence, configurable under Library Scans; untagging removes a now-unreferenced tag immediately. Recurring scans are also restart-proof: a scan is due by age rather than by hitting an interval boundary.
+- Full library scans are dramatically faster: sidecar metadata applies in batches that skip already-complete entries, file classification no longer rescans the entire root per file, and scan throughput stays flat across large libraries instead of degrading as the pass progresses.
+- The app now reports its real build version even when the image was built outside CI: images derive their version from the packaged manifest instead of falling back to a `1.0.0` placeholder.
+- Large scans now enqueue their follow-up probe, artwork, subtitle, and preview jobs in batches instead of one node at a time, and every job completion updates its parent workflow with a single aggregate query instead of re-reading every sibling node; downstream scheduling no longer dominates full-library scan time.
+- The Jobs page now loads its graphs, nodes, and warnings with a fixed handful of queries instead of one query per workflow, and finished workflows older than the job-history retention window are pruned along with their per-entity scheduling records instead of accumulating forever.
+- Cancelling a large running workflow now works reliably: cancellation is published first so no further nodes dispatch, active nodes are cancelled in bulk, and the previous failure modes (conflict errors and database deadlocks against the job claim loop) are gone.
+- API responses now carry `Server-Timing` headers and the server logs slow requests with their database command counts, making page-load latency directly observable.
+- Every API request no longer pays repeated database reads for session validation, app settings, and library-visibility scope; these are now cached in-process with immediate invalidation on sign-out, revocation, user edits, setting writes, and library changes.
+- OPDS reading clients no longer trigger a full password verification on every request (including each cover image); recently verified credentials are reused for a short window, keeping catalog browsing responsive.
+- Title search and scan file lookups are now index-backed: substring title search uses a trigram index instead of scanning every entity, and file-path resolution during scans no longer reads the whole file table.
+- The bundled container now starts the API and worker with their packaged configuration, restoring production logging thresholds that previously logged every database command.
+- Favorites and dashboard shelves now use compact, count-free reads in the native apps, and reader/player progress reports acknowledge persistence without rebuilding full Entity details. EPUB-to-audio continuation now honors the exact saved position within a chapter instead of restarting that chapter.
+- Dashboard shelves now use a compact, count-free Entity read path backed by persisted source and acquisition availability, avoiding live hierarchy walks and aggregate thumbnail calculations on every card.
+- Entity availability now updates automatically when files, acquisitions, upgrades, or hierarchy links change, with periodic background reconciliation to repair any projection drift without delaying ordinary list requests.
+- Import workflows whose graphs ended before publishing their terminal state now resume durable checkpoints automatically; attempts without a safe checkpoint fail visibly with recovery guidance instead of remaining in Importing forever.
+- Household member requests now resolve library grants and request-target visibility once per request while keeping physical library ownership in indexed PostgreSQL checks, avoiding both the thousands-of-identifiers permission preflight and repeated query plans that could stall member API responses.
+- Multiple episode, album, or other bundle imports that share one structural Entity now retain an acquisition-specific reconciliation and finalization step, preventing later downloads in the same job graph from remaining in Importing after their files are playable.
+- Download-client handoffs no longer misreport a terminal job graph as a client outage after the client has already accepted the release. Failed downloads and completed imports now remove their exact recorded client items, retain torrents only for explicit seed goals, and retry cleanup durably when a client is temporarily unavailable.
+- Manual TV mapping now combines structured season/episode tokens, absolute episode numbers, and provider titles as independent evidence; a unique provider-title match can correct contradictory scene numbering, duplicate claims stay held, and downloads for a different expected episode report an identifier mismatch instead of claiming the payload contains no video.
+- Concurrent qBittorrent handoffs now resolve one at a time per client category, preventing simultaneous acquisitions without known info hashes from attaching themselves to another download's torrent and files.
+- TV season searches now understand numeric and English ordinal season names such as `3rd Season` and `The Complete Third Season`, preventing a specific season pack from being mistaken for a complete-series download.
+- TV season imports now match tokenless filenames against provider titles, persisted absolute episode numbers, and numeric generic titles such as `Episode 1316`, so archive-style files such as `Show 1316 Season 11` can map automatically without weakening structured season/episode matching.
+- Single-episode torrent and Usenet searches now use provider titles and absolute episode numbers as fallback identities, allowing archive-style release names while rejecting conflicting structured season or episode markers.
+- Manual episode-mapping file menus now escape scrolling detail panes, stay above adjacent sections, and mark files that are already mapped without preventing reuse.
+- Grouped Downloads detail now separates an Entity's own transfers from its children, keeping a season-level review above its episode transfers instead of burying it at the bottom.
+- Downloads now completes crash-interrupted Entity-removal cleanup automatically, builds large grouped queues without a flat intermediate render, spaces polls after slow responses, and reuses qBittorrent's bulk telemetry instead of issuing one follow-up request per transfer.
+- Web music playback now reconnects an interrupted media request at the current playhead instead of waiting indefinitely for the browser's slow stream recovery, while preserving deliberate pause behavior.
+- Web music playback now persists lightweight track progress while listening instead of resending and rebuilding the entire saved queue every five seconds, preventing large queues from flooding the API during a stream.
+- Provider episodes carried by one physical video now appear as one combined episode card across web and native clients, while retaining each provider episode identity for metadata, deep links, and acquisition matching.
+- Acquisition detail panels no longer enter a reactive refresh loop that can flood the API and database with detail and history requests.
+- TV acquisition now distinguishes a complete season from a complete series, rejects poster-only season results, falls back from exact episode-number searches to provider episode titles, imports title-numbered season packs such as `Episode 0131`, ignores duplicate Internet Archive derivative videos when the original is present, and limits post-import media processing to the files that acquisition actually placed.
+- Monitored video upgrades now prefer subtitle-labelled releases at equal quality and may inspect speculative same-quality downloads. Prismedia probes the owned and downloaded files before replacement, carries embedded and adjacent subtitles, refuses measured resolution downgrades or mislabeled quality, and deletes, blocklists, and retries candidates that do not provide the expected subtitle upgrade.
+- Provider season matching now treats zero-padded folder numbers such as `Season 06` as the same season as `Season 6`, preventing monitored series from creating duplicate canonical seasons.
+- Web library grids now restore recent Back navigations without refetching, default to 100 cards per page, skip off-screen rendering and per-card artwork analysis, and migrate the previous 250-card default while preserving larger sizes as an explicit choice.
+- Book and series details now use compact contents, child-reference, acquisition-summary, and Identify-status reads. Book chapter lists no longer download the entire EPUB, and active acquisition polling no longer resends release candidates on every tick.
+- Web API and static text responses now use Brotli or gzip compression when clients support it, substantially reducing list and detail transfer sizes on remote connections.
+- Reviewed series requests now open the new series immediately after saving, persist the selected season and episode metadata before background acquisition begins, and keep known future episodes Waiting until their air date instead of searching indexers early. Partially aired seasons acquire released episodes individually instead of searching for an impossible season pack, historical seasons trust their own past air date when providers omit child dates, and Calendar episode entries include both series and season context.
+- Slow indexer queries no longer trigger backoff when the provider's health check still succeeds, Prowlarr aggregate searches get a five-minute response window, and backed-off indexers offer a manual Retry now override in Acquisition settings.
+- Edited Request reviews now commit the selected metadata instead of falsely reporting proposal drift when browser JSON normalizes provider decimal scores.
+- Turning on monitoring for a series or other provider-backed container now materializes the provider's missing child works immediately, shows them as independently controllable Wanted activity while deeper metadata enriches in the background, and keeps recurring people or studios from invalidating large episodic catalogs.
+- Collection thumbnails now use a square frame across web and native apps, and household users can add visible items to shared manual or hybrid collections without receiving a false not-found error.
+- Studio logos now keep their original artwork format and use one API-defined neutral plate across web detail pages, grids, and native apps, preserving scalable SVG quality and readable transparent marks.
+- The web image lightbox now shows original still images directly, falls back visibly when an original file is unavailable, and plays animated GIF, APNG, WebP, MP4, and WebM media instead of leaving an empty or frozen frame.
+- Request review now uses Identify's complete metadata controls across web and native, defaults every known child on with All/None controls, and saves the already-reviewed artwork, credits, tags, fields, and nested children without another provider lookup.
+- Request review now renders core metadata immediately while child and relationship identification continues in a retained background session across web and native, preventing slow providers or a disconnected mobile browser from ending in a blank failed page.
+- Job Control now hides current, recent, and lane history belonging to NSFW libraries whenever SFW mode is active, preventing hidden library names and activity from appearing in operational history.
+- Monitored release dates, missing items, container updates, and upgrades now drain one search at a time independently of scheduler windows, with durable retry/backoff intent instead of queue-wide bursts or arbitrary attempt caps. Acquisition searches compare and de-duplicate every query variant before selecting globally, prioritizing quality and revision before protocol preference and swarm health; deliberate re-searches also supersede the prior release-review wait without losing or blocking their next durable search.
+- Unchanged library snapshots now remain truly idle instead of re-enqueuing unfinished enrichment across the whole root. Crash-interrupted delete-files and unmonitor claims are resumed by one independent serial recovery worker, with blocked records isolated from the rest of the backlog.
+- Watched libraries now coalesce filesystem notifications into a durable path ledger and queue surgical reconciliation after writes settle, while scheduled scans remain an integrity fallback for missed or unsupported notifications. Video scans reconcile a same-path replacement as one exact source and reuse the signature snapshot as folder context, avoiding a second recursive discovery and whole-root upsert while retaining safe stale cleanup.
+- Background thumbnail, preview, trickplay, subtitle, and waveform ffmpeg work now starts only after measuring host headroom, stays within a small cross-process pool, and pauses new starts while playback is active. Video and audio playback remain unbounded by background admission so concurrent household streams are never queued behind a worker limit.
+- Scheduled and file-triggered scans now target only the affected library root and run through one durable scan lane, preventing unrelated large libraries and concurrent media-family cleanup from joining a single-file change. Replaced video bytes at the same path also retire stale probe data, hashes, subtitles, previews, trickplay, and playback cache before regeneration.
+- Delete files now authoritatively cancels and clears every Entity- and acquisition-rooted workflow before removing managed media, generated assets, monitors, acquisitions, fileless wanted Entities, and related job history—even when a download client is missing or offline, an acquisition teardown races or fails, or the request disconnects after file removal begins.
+- Album and TV bundle imports now keep only files that match the requested tracks, season, or episode, use provider track order to resolve duplicate soundtrack titles and filename accent differences within the matched disc, preserve that exact track match while cataloging the placed files, recognize soundtrack score-title decoration, discard the remaining transfer payload, immediately request any children still missing after import, and wrap long acquisition filenames on narrow screens. Completed downloads also recover onto a fresh import workflow when an older review graph can no longer accept the handoff, with a manual Retry import action available without deleting the payload.
+- Thumbnail metadata chips now stay clear of selection checkboxes in bulk-selection grids.
+- Consumption upgrades now preserve exact legacy progress and active-time history without presenting inferred opens as recorded facts; access sessions are deduplicated per Entity, and images and galleries accept viewing time without accepting playback-only position, completion, or skip changes.
+- Prepared folder downloads now become ready only after their ZIP footer has been fully written, preventing intermittent corrupt archives.
+- Acquisition queue failures now remain visible while the page refreshes the durable server state.
+- Acquisition detail pages now remain usable when their configured download client is offline, falling back from unavailable live transfer telemetry instead of failing the request.
+- Direct-playable upgrades now merge duplicate Movie descriptions, provider identities, artwork, dates, external IDs, statistics, URLs, relationships, and compatible job state deterministically when collapsing legacy playable children, while still stopping safely for genuinely different data.
+- Direct-playable upgrades now handle large job histories efficiently, including historical graphs whose root jobs have been removed, and tolerate temporarily unavailable media mounts while still stopping for conflicting or ambiguous source metadata.
+- Ratings, flags, playback, reading progress, and markers now update only their own Entity state, preserving linked people, files, identities, relationships, and metadata during concurrent use.
+- Video acquisition searches now derive work years from normalized series and movie release dates, preserving accurate title-and-year matching.
+- Automatic audio probing and generated previews now consistently honor library settings through each Entity kind's processing policy.
+- Collection membership now observes each viewer's library grants across add, count, list, and artwork selection, so restricted media cannot leak through shared collections.
+- Entity discovery, collections, artwork, and playback statistics now share each Entity kind's catalog visibility rules, keeping audiobook parts from appearing as standalone music and nested containers from duplicating kind indexes.
+- Concurrent Entity edits — flags, markers, ratings, playback, and reading updates — now merge safely, keeping the latest user state and recording each completed or reading activity event exactly once.
+- Progress cursors now follow definition-declared work and ordered-container topology, preventing unrelated or inaccessible entities from redirecting reading state while preserving book and episodic rollups.
+- Images and audio tracks now retain deterministic direct library ownership, including in nested or disabled library roots, so access rules do not depend on scan order or folder ancestry.
+- Rebuilding generated media now preserves custom artwork and subtitles while safely clearing stale video cache assets for movies, episodes, and standalone videos.
+- Auto Identify settings now use backend-defined media families, so movies and series correctly follow the Video selection instead of exposing an ineffective Movies-only toggle.
+- Updated the HTML parser used by metadata workflows to a patched release.
+- Web Book resume now converts native EPUB locators through the shared canonical cursor instead of opening Foliate at the first page.
+- Unified Book resume now carries forward a farther pre-migration audiobook position, preserves its within-chapter offset, and treats shared chapter boundaries as the start of the later chapter.
+- Entity thumbnails now inherit canonical owning artwork where appropriate and include their visible parent title as a consistent subtitle across clients.
+- Entity thumbnails now show batched, visibility-safe hierarchy and membership counts, while movies inherit technical metadata from their single playable file.
+- Video playback now preserves surround channels while keeping delayed audio tracks synchronized, and safely recovers when a replaced file's stored stream map is stale.
+- Direct-stream playback now preserves intentional per-track timing in fragmented MP4 without re-encoding supported surround audio.
+- Entity detail pages no longer report missing-resource errors while checking optional Identify, acquisition, and monitoring state.
+
+### What's New
+- Downloads are now a dedicated navigation destination with an Entity-grouped, viewport-filling manager: selectable series and season summaries above their individual transfers, a dense sortable live table, resizable and persistent table columns and list/detail panes, group-aware bulk cleanup, and selected-transfer controls, files, peers, and history.
+- Installed plugins now update automatically when the worker starts and every six hours. The default-on behavior can be disabled under Settings → Generation Pipeline.
+- Consumption tracking is now shared across watching, listening, reading, and viewing. Prismedia records opens, completions, skips, active time, and timestamped history; daily active-time buckets power richer statistics without repeatedly summing an unbounded event log.
+- Jobs now run as durable dependency graphs with one fair interactive lane per user-selected Entity, a separately configured background pool, shared CPU balancing, durable provider rate limits, restart-safe waits, graph-level progress and cancellation, and a dependency view in Jobs.
+- Prismedia now has real multi-user accounts. A first-run setup wizard creates your administrator, every household member gets their own username and password, and the same credentials sign in to the web app, native Apple apps, and OPDS readers — so reverse-proxy auth middleware is no longer needed in front of Prismedia.
+- Everything personal is now per user: watch progress, played state, favorites, ratings, Continue Watching, and NSFW visibility belong to the signed-in account, and administrators control which libraries each member can see.
+- Prismedia is now a complete self-hosted media library for videos, movies, shows, images, galleries, comics, ebooks, audio, people, studios, tags, collections, files, plugins, and background jobs.
+- The app now expresses the prism in Prismedia: a neutral dark shell separates into spectrum identities for each media family, detail pages draw atmosphere from their artwork, floating chrome uses restrained frost, navigation colors are customizable, and blocking states animate light through the Prismedia mark.
+- Prism color is now deliberately sparse across the web app: neutral material surfaces carry the layout while compact taxonomy markers, progress rails, selected states, and artwork-led details provide color. Browser, installed-app, and documentation icons now use the colored prism mark.
+- Playback is much more capable: videos remember progress, direct-play or stream-copy when possible, transcode more efficiently when needed, expose clearer quality/status controls, and report consistent watched state to first-party clients.
+- Audio is now first-class, with album and artist libraries, a persistent player, queues, shuffle/repeat, waveform scrubbing, media-session controls, artwork, play counts, and restore-on-refresh behavior.
+- Books and comics now include EPUB, PDF, CBZ, ZIP, and CBR reading plus first-class M4B, M4A, and MP3 audiobooks. One Book can be read, queued for listening, or opened in both formats with one shared progress position.
+- Identify has been rebuilt into a durable metadata workflow with provider search, review queues, cascade matching for related children, bulk accept, Auto Identify, and safer merge behavior that preserves existing metadata.
+- Request is available under Operate for finding and acquiring books, authors, movies, series, artists, and albums: Prismedia searches your indexers, downloads, monitors, and imports them itself — no external request app required.
+- Library scanning is faster and smarter, with incremental rescans, batched persistence, prioritized thumbnail/metadata work, better folder organization, generated thumbnails, and safer cleanup of removed or disabled libraries.
+- The native Apple apps now use the same generated Entity, capability, relationship, playback, and session contracts as the web app.
+- SFW/NSFW controls now apply across browsing, plugins, identify, requests, OPDS, native clients, thumbnails, queues, and metadata so visibility stays consistent across every first-party surface.
+- Release operations are now ready for channel publishing: the root package version is the source of truth, Docker builds validate the release metadata, pushes to `main` publish only the dev image, and alpha/beta/release images are published manually.
+
+### Changed
+- Web music playback now records browser buffer stalls, media errors, recovery time, buffer depth, and the owning source of every intentional pause in server logs, without adding noisy queue-state writes.
+- First-party clients now use the centralized `/api/consumption/statistics` and `/api/entities/{id}/consumption` contracts. Entity browsing uses canonical `last-active`, `date-added`, `sortDirection`, and `engaged` values instead of media-specific playback aliases.
+- Series, seasons, albums, books, and other structural works now roll up their leaf activity. Resume follows the most recently active episode, track, or chapter—even when returning to an earlier item—while the separate watched/read/listened percentage preserves overall coverage.
+- Movies and TV episodes now own their playable files directly. Upgrades preserve unambiguous legacy Movie and episode identities, references, folder provenance, subtitles, and custom artwork, while stopping safely for ambiguous or active data.
+- Entity detail reads now use one shared document contract across the web and Apple apps; credits, cover choices, and kind-specific metadata travel as typed capabilities instead of parallel per-kind response shapes.
+- Books now keep one last-active progress position across reading and listening. Chapter-scoped mappings translate that position between text, pages, and audiobook parts, preserving exact text positions when available and falling back to the readable cursor when an audio part cannot be matched.
+- Watching, reading, music, and audiobook heartbeats now contribute to active time in Consumption Stats, with viewing, reading, and listening totals plus a combined time-read-or-listened figure on Book details.
+- Subtitle preference terms now accept negative weights, allowing labels such as Forced or SDH to demote matching tracks while preferred languages still promote them.
+- Request and Plugins have been tightened to match the rest of the app. Plugins now state what each provider actually covers as compact per-family chips carrying that family's colour — real names like "Series" and "Audio Tracks" instead of internal codes — and the installed list uses two columns on a wide screen. Request opens on a proper content-kind chooser, sorted predictably and showing how many sources can search each kind before you pick one, and every queue row shares one artwork size, row height, and column position so titles, statuses, and actions line up down the list and across tabs. Waiting, queued, and searching rows now read as calm in-progress states instead of warnings, so a genuine failure stands out, waiting reasons wrap to a readable two lines instead of clipping mid-word, and on a phone the status and kind filters scroll in place rather than pushing the first row off screen.
+- Acquisition imports now reconcile the imported structural root once after every selected file is cataloged. Movie, TV, music, book, retry, merged, and upgrade imports avoid whole-library rescans, while albums and series perform one cascading Auto Identify pass instead of one pass per track or episode.
+- Identify review, metadata application, request fan-out, downloads, imports, readiness processing, and acquisition finalization remain in their originating lane; provider review and external transfers release workers while they wait and resume the same graph when signalled.
+- Consumption Stats uses the prism to separate activity by media family and now distinguishes opens, completions, skips, and active time. Viewing, listening, and reading totals, coverage, streaks, daily activity, weekly rhythm, recent history, and most-active Entities stay filterable by user, family, event, and timeframe.
+- Delete files now performs a complete removal: the selected media subtree, managed files, generated assets, monitors, acquisitions, and stuck lifecycle state are removed together instead of monitored content returning to Wanted.
+- Browse, Settings, navigation, ambient backgrounds, and missing artwork now share one restrained rainbow palette in deliberate spectrum order across the web and Apple apps.
+
+### Added
+- Acquisition profiles can now defer automatic searches until a provider-supplied release milestone (such as digital, streaming, or physical availability), with an optional delay; waiting requests stay monitored, show their release state, and appear with every known milestone on the new release calendar. Profiles search immediately by default, request and identify metadata apply release dates up front, and a missing milestone gets one uncached provider refresh before users can wait for metadata, search manually, or enter a named release date in the edit pane.
+- Metadata plugins can now provide typed semantic dates, including theatrical, digital, streaming, physical, broadcast, and publication milestones, while legacy date keys remain compatible and normalize at ingestion.
+- Collections now belong to their creator and stay private by default, with an edit-screen sharing control for household visibility. Shared collections remain owner-managed, and dynamic rules evaluate play and skip activity using the owner's personal history.
+- Acquisition file results now retain a privacy-safe per-file import record, including source-to-library mapping and clear imported, skipped, or failed outcomes, so completed and partial imports remain understandable after the job finishes.
+- Added first-class Soulseek support through slskd: Prismedia can search peer results as album folders or individual tracks, show their remote folder context with a dedicated Soulseek chip in release review, queue them as atomic slskd batches, monitor and import their files, and configure Soulseek alongside torrent and Usenet clients. Album requests now materialize their track list and automatically fall back to artist/album/track-qualified searches for anything still missing after a failed or partial album acquisition, while searches allow a full peer-response window instead of ending after only a few milliseconds.
+- Acquisition review now supports deliberate replacement and local content: on-disk books, movies, episodes, and albums can run an ephemeral replacement search that never auto-selects a release, every release picker accepts an exact custom search term, and manual file or multi-file uploads show transfer progress before joining the same import or in-place upgrade workflow as a completed download. Album replacements stage the complete multi-file release before swapping it into the existing library folder. ZIP uploads are inspected and safely expanded when they wrap media, while comic archives remain intact.
+- Blocklisted acquisition releases are now manageable at scale: Request History can allow a blocklisted release again directly from its event, while Settings groups releases by their associated work, searches across work, release, indexer, hash, and reason, and incrementally reveals large result sets.
+- Blocklisted acquisition releases can now be cleared in bulk for one library item or across all items, with recent-time ranges for quickly recovering from a temporary download-client outage.
+- Series and seasons now track their own episode progress: partially watched episodes resume in place, completed episodes offer the next one as Continue, and starting in a later season advances the series without marking earlier seasons watched. Both detail pages use the shared progress card with independent watched and start-over controls.
+- Files can now be downloaded directly from the file browser. Downloading a folder prepares a ZIP in the background, shows live file-count and compression progress, and starts the browser download automatically when the archive is ready.
+- Books with both readable and audio editions now have one combined progress card for continuing either rendition or opening both together. All three actions resume the same last-active position, estimate the matching page or timestamp within its chapter, and start audio five seconds early for easier manual alignment.
+- Book detail pages now turn EPUB contents and multipart audiobooks into one chapter list with artwork-colored reading and listening markers, per-chapter Read and Listen actions, and a combined mode that opens the matching text and audio together.
+- Added first-class OpenSubtitles acquisition: configure and test an account in Settings, find explainable hash/identity-ranked matches from a video's Transcript tab, import a selected subtitle into app-owned playback assets, or automatically fill missing configured languages using a strict confidence threshold.
+- Acquisition searches now label Usenet and torrent releases, prefer the configured download type before falling back, filter results to enabled download-client capabilities, and let Identify, Request, and release review reveal more than ten matches.
+- Entity library queries can now request several kinds at once, allowing native clients to load one server-filtered movie and TV activity feed without duplicate movie file rows.
+- Video libraries now discover subtitle files beside their videos automatically. Same-name SRT, VTT, ASS, and SSA files — including language or descriptive filename tags — are normalized into app-owned playback assets, and rescans reconcile additions, edits, renames, and removals.
+- Added a first-run setup wizard: a fresh install (or an upgraded one, on its next visit) walks through creating the administrator account, and an upgraded install also reviews any member accounts already stored in the Prismedia database with an inline option to set a known password.
+- Added a login page and signed-in sessions for the web app: sign in once per browser and stay signed in (sessions slide forward for 90 days of use), with a user chip at the bottom of the navigation for Account, Manage users, and Sign out.
+- Added user management under Settings → Users: create, edit, disable, and delete accounts, reset passwords, grant or revoke NSFW visibility, allow specific members to create their own libraries, and pick exactly which libraries each member can see (admins always see everything). The last enabled administrator is protected from demotion, disabling, and deletion.
+- Added per-library access: new libraries are visible only to their creator until shared, admins can grant access per member from the library list, and members holding the create-libraries permission manage the libraries they created from the same Settings surface.
+- Added per-user watch state: progress, played state, play counts, favorites, ratings, and reading positions are tracked per account across the web app, native Apple apps, and OPDS.
+- Added an Account page for every user: update your display name, change your password, choose your content visibility (when permitted), and review or sign out connected devices and sessions.
+- Added a host-level recovery escape hatch: set the `PRISMEDIA_RECOVERY_PASSWORD` (and optionally `PRISMEDIA_RECOVERY_USERNAME`) environment variables to reset or create an enabled administrator on boot, then unset them.
+- Added a durable acquisition history: every grab, import, import failure, download failure, blocklisting, upgrade, and removal is recorded in a permanent activity log that outlives the acquisition it describes — deleting or cancelling a request no longer erases the record of what happened. A wanted item's page shows its own history inline, and Request gains a global History tab listing all activity newest-first with per-event and per-kind badges, the release, indexer, and download client involved.
+- Added custom formats — named, scored release classifiers in the Sonarr style: define a format from conditions over a release's title (regex), release group (regex), language, or quality, then give it a score in each profile. Matching formats add their score to a release's ranking (100 points equals one preferred term, and negatives act as a soft ban), a "minimum format score" rejects anything below the floor with a visible reason, and a "cutoff format score" keeps a monitored movie or episode upgrading toward a better-scoring release even at the same quality. The classic case — a format matching English/dual-audio scoring +500 to flip which release wins — now works across books, movies, TV, and music.
+- Releases now understand PROPER/REPACK revisions: a proper or repack outranks the plain release at the same quality, and — under the new "Download propers and repacks" setting (prefer and upgrade / do not upgrade / do not prefer) — a same-quality higher revision of an owned movie or episode counts as an upgrade and is swapped in automatically. Anime-style v2/v3 version tokens are understood too, and release groups are now extracted from titles as groundwork for custom format scoring.
+- Movie, TV, and music profiles now speak a real quality ladder: video releases place on a combined source × resolution ladder (SDTV up through Remux 2160p) and music on a codec ladder (lossy up through hi-res lossless). A profile can allow exactly the qualities you want — pinning tiers or capping the ladder, the "never chase 4K" setup — and carries an upgrade-cutoff quality for the upgrade loop. Release ranking uses the ladder position instead of loose token heuristics, and disallowed qualities are rejected with a visible reason.
+- Added an opt-in recycle bin for upgraded-away files: set a recycle-bin folder in Settings and a file replaced by a quality upgrade moves there (in dated subfolders) instead of lingering beside the new one as a .prismedia-bak sidecar; a daily cleanup purges entries older than the configurable window. Leave the folder blank to keep the previous sidecar behavior.
+- Torrents now respect seed goals instead of being deleted the moment they import: set a seed-ratio and/or seed-time goal per indexer (with per-client defaults for grabs whose indexer sets none), and a hardlink- or copy-imported torrent keeps seeding until either goal is met — then Prismedia removes it and its download-dir data automatically, leaving the library file untouched. Goal-less torrents are left to the client's own rules, and private-tracker ratios stop being collateral damage of an import.
+- Added hardlink imports: a new "Hardlink (instant, keeps seeding)" import mode places the library file as a hard link to the still-seeding download — instant, no extra disk space, and the torrent keeps its ratio — falling back to a copy across filesystems. Movie, TV, and music imports now also honor the profile's import mode (previously always move) and leave the torrent seeding for hardlink/copy imports.
+- Added remote path mappings for split-host and containerized download clients: map a client's path prefix (its own filesystem view, e.g. /downloads) to where those files are visible to Prismedia, per client, under Settings → Acquisition. Longest matching prefix wins, Windows-style client paths translate, and deployments on one filesystem need no mappings at all.
+- Downloads carrying an executable or dangerous file (.exe, .scr, .bat, .lnk, and friends — the classic fake-release payload) are now held for review instead of imported: the acquisition shows a clear warning naming the file, nothing touches the library, and the release picker reopens so you can block the release and grab a different one. Releases whose title already names such a file are now also rejected before they are ever downloaded, closing the obvious abuse loop up front.
+- Request discovery now starts with a content kind and metadata source, then shows the exact search fields that plugin supports — such as series title and year or book title and author — while preserving the plugin's own result ranking.
+- Indexers are now reliability-managed: a failing indexer backs off on an escalating ladder (1 minute up to 24 hours) instead of polluting every search with the same error, recovers gradually as searches succeed, and shows its back-off state in Settings. Indexer priority now genuinely matters — equal-quality releases prefer the lower-priority-number indexer — and each indexer can carry an hourly query budget that searches respect.
+- Prismedia now talks to indexers directly — no Prowlarr required: add any Torznab (torrent) or Newznab (usenet) indexer by URL and API key, including Jackett's per-indexer endpoints and native tracker APIs. Prismedia reads each indexer's capabilities (advertised categories and page-size limits, cached for a week) and trims searches to what the indexer actually supports. Prowlarr remains fully supported as an aggregator alongside direct indexers.
+- Added Transmission as a second torrent client, and download clients now route intelligently: each release goes to an enabled client that speaks its protocol, clients carry a priority (lower wins) so you control which is preferred, and when the preferred client refuses an add Prismedia falls back to the next one instead of failing the grab. Acquisition profiles gain a per-kind download category so movies, music, TV, and books can stay segregated inside the client (blank keeps the client's own category).
+- Added usenet support: configure SABnzbd as a download client and Prismedia acquires NZB releases end to end — usenet releases from your indexers are accepted and ranked alongside torrents, sent to SABnzbd under your category, tracked through download and unpack, and imported on completion. Each release is routed to a client that speaks its protocol automatically, and a download SABnzbd reports as failed (incomplete, unpack error, encrypted) goes straight to failed-download recovery instead of waiting out the stall window.
+- Requesting now creates the item in your library immediately: committing a request builds the book — or the author with each selected book — as a real library entity marked Wanted, populated with the provider's metadata and artwork before anything downloads. The download that fulfils it attaches to that same entity, so nothing appears twice. Re-requesting something you already own or already have in flight is recognized and skipped transparently.
+- A wanted book is managed from its own page in the library: the book's detail page now carries the full acquisition surface inline — release picking, live download progress, Search again, Monitor, and Cancel — so wanted items and real items live and are managed in the same place. Cancelling from there removes the placeholder and returns you to the library.
+- Wanted items can be removed in bulk: select placeholders in any grid and "Remove wanted" deletes them (tearing down any in-flight download) and keeps them out of future discovery — a followed author/artist won't re-add a work you removed. Requesting that exact item again later brings it back and clears the block.
+- Release searches now drill down with context: each search phrase is built from the item's lineage (an album leads with its artist, a movie with its year, a book with its author) and falls back to broader phrasings only when nothing acceptable is found — the same top-down rule TV will use (whole series, then season packs, then single episodes).
+- The release picker gains a "Show only relevant" toggle (on by default) that hides rejected releases — wrong season/episode, below minimum seeders, and the like — so the acceptable grabs stand alone; turn it off to review every candidate the search returned.
+- Monitored items can be checked on demand: a "Check monitored items" job in the Jobs switchboard runs the whole sweep now, and a followed author/artist page gains "Check for new works" to re-sync just that one immediately.
+- Request gains Wanted lists in the Sonarr style: a "Missing" tab lists everything monitored but not yet acquired, and a "Cutoff unmet" tab lists items you own that are still below their quality cutoff (showing owned → cutoff quality). Both are paged and filterable by kind, show each item's last-searched time, next-search ETA, and stuck-search count, link to the item's library page, and let you select rows to Search now or Unmonitor in bulk.
+- Requesting is now hands-off: a requested item automatically searches, picks, and downloads the best acceptable release — the release picker only appears when nothing acceptable was found — and stays monitored on a daily schedule until it's acquired or you turn monitoring off.
+- Authors and artists can be followed for new works — requested ones are followed automatically, and any on-disk author/artist can be monitored from its own page once Identify has given it a provider identity. The daily sweep sends newly discovered books and albums through the same monitored child-acquisition path as a direct toggle: each appears as a fully described Wanted Entity and searches or downloads according to its profile. Turning an individual child off remains authoritative even while its parent is followed, so the next sweep cannot silently recreate it.
+- Discover/Request now covers movies and music alongside books: search TMDB for a movie or MusicBrainz for an artist, browse an artist's discography, and request — a wanted Movie or Album entity appears in your library with full metadata, cast, and artwork, and its release search grades movie releases by resolution/source and music by codec quality (lossless first), querying your indexers under the right categories per kind. A wanted movie's page shows the same inline acquisition surface books have, and movie/music imports complete through the same monitored download-to-library loop.
+- TV series complete the request lineup: search a series, pick the seasons to get, and each becomes its own season-pack acquisition searched top-down with series context ("Show S01", "Season 1", complete-series packs) while every episode of a picked season appears as a clearly-badged Wanted placeholder under its season. A finished download imports as `Series/Season NN/Series - SxxEyy.ext` — the exact layout scanning expects — and immediately binds the files to the series, season, and episodes the request created, matching episodes by position with no duplicates. Episodes the pack didn't include stay Wanted; open one and press "Search for release" to fetch it individually (its search is built from the series and episode numbers it carries). Series pages gain the same Follow/Check-for-new-works monitoring authors and artists have, wrong-season or single-episode releases are rejected when a pack is wanted, and a new TV quality profile kind governs it all.
+- Requesting a series, author, or artist now offers the same medium-neutral monitor policies: All current and future, Missing now, Future only, or Manual selection. The shared child picker handles seasons, books, albums, and future Entity hierarchies without a TV-only Season Pass model. All and Future send newly discovered direct children through the normal monitored acquisition path, while turning a child off records an explicit suppression so its parent cannot add it back.
+- Parent Entity pages now use one shared child-monitoring surface: series manage seasons, seasons manage episodes, authors manage books, and artists manage albums through the same per-child controls and bulk Monitor all / Unmonitor all actions.
+- Search results only come from providers that can also open their details, so a result can no longer dead-end on "Request detail was not found" (and the YouTube plugin learned to resolve albums and artists by id, fixing exactly that for YouTube Music results).
+- Movie and music downloads now import themselves, completing the hands-off loop for those kinds: a finished movie download places its main video as `Title (Year)/Title (Year).ext` in your first video-enabled library (skipping sample files, and stopping for manual review when a release holds more than one full-size video), and a finished album places its tracks — keeping disc folders, carrying cover art — under `Artist/Album/`. Import immediately binds those files to the exact wanted Movie, Album, and Artist Entities the request created, so the content is ready without waiting for a scan, nothing appears twice, the torrent is cleaned up after the move, and the item's monitor marks itself fulfilled.
+- Added an Authors library: books organized as `Author/Title` are grouped under a browsable author, mirroring how artists group albums — selecting an author shows their books.
+- Added OPDS 1.2 catalog support for external ebook and comic readers, including authenticated feeds, search, covers, downloads, profile visibility rules, and reverse-proxy-aware links.
+- Added playback history and a Stats page for plays, skips, top items, recent activity, and timeframe-based summaries across video, books, and audio.
+- Added first-party book acquisition: request a book and Prismedia searches your indexers through Prowlarr, scores releases, downloads the chosen one with qBittorrent, and imports it into your library where it is auto-identified. Book and author search come from the OpenLibrary plugin in the same Request view, with configurable indexer/download-client/profile settings, live transfer progress with a piece map, an imported-files view, and — for releases an indexer only links to a web page — automatic magnet resolution from that page plus a manual .torrent upload fallback.
+- Added failed-download recovery for book acquisition: when a healthy download client reports a download failed, or it stalls with no usable peers for an extended period, Prismedia blocklists that release so it is never grabbed again, and — when the new per-profile "auto-redownload" option is enabled (off by default) — automatically grabs the next-best acceptable release with no manual step. A brief stall is tolerated, so only a sustained one is treated as a dead release. Acquisition settings now expose the auto-grab and auto-redownload toggles and a blocklist panel for reviewing and removing blocklisted releases, and you can block an unwanted release directly from a request's release list.
+- Added rich request-time metadata for book requests: the cover, description, and dates are captured and held the moment you request a book — so the request page shows real artwork and a synopsis instead of a blank placeholder — and are used to pre-fill the imported book. When the quick search result is missing a cover or description, Prismedia enriches it in the background from the provider by work id. The authoritative metadata pass (and any children) still runs at import via identify; the held data only fills gaps and never overwrites it.
+- Added a "Search again" action on a book request so you can re-run its release search on demand (the manual counterpart to monitoring), without creating a duplicate request.
+- Request review now uses the same proposal-review building blocks as Identify for every supported medium: choose seasons, books, volumes, or albums directly from the provider's real structural proposal, while standalone movies, episodes, books, and albums request their reviewed root item.
+- Added release-selection rules to book acquisition profiles: preferred, required, and ignored terms are now editable, and preferred terms (e.g. "retail", "epub") rank a matching release above others so the best acceptable copy is chosen automatically rather than just the most-seeded one.
+- Requesting now asks instead of assuming: every request page carries one request card holding the quality profile, the library to import into, and the Request button together. The profile leads — switching it re-targets the library to that profile's default, which you can still override — and the options are filtered to the media kind and the current SFW/NSFW view. The choices ride the whole pipeline: the release search uses the chosen profile's rules and the import lands in the chosen library, a followed author/artist remembers them so newly discovered works inherit the same choices, and a stale choice (deleted profile, disabled library) degrades safely to the defaults instead of failing.
+- Request candidates stay attributed to the selected plugin and open a canonical proposal review instead of impersonating library Entities before they exist.
+- Request review shows the canonical metadata, artwork, structural children, and related records that Identify would apply, and commits are bound to that exact plugin and proposal revision so a changed result must be reviewed again before anything downloads.
+- Acquisition profiles are now per media kind: create separate Books, Movies, and Music profiles — each with its own default, target library, seeders/size/term/language rules, and weighted terms — and the right one governs each kind's searches and imports automatically. Book-only settings (path template, format cutoffs, upgrade-until-cutoff) stay book-scoped; movie and album placement is fixed to match library scanning (`Title (Year)/Title (Year).ext`, `Artist/Album/`).
+- Added custom weighted terms and preferred languages to release selection, applied across every media kind: weighted terms ("remux: 150", "upscale: -200") add or subtract their weight from a matching release's ranking so you can tune exactly what wins, and an ordered preferred-language list (defaulting to English) skips releases tagged only with other languages — recognizing common title tags like FRENCH, GERMAN, ITA, and MULTi — while ranking earlier-listed languages higher. Untagged releases count as your first language, and multi-language releases always qualify.
+- Added monitoring for book requests so a wanted book is no longer one-and-done: mark it monitored and Prismedia keeps re-running its release search on a schedule until an acceptable release appears (and, with auto-grab on, downloads it). Monitors reconcile themselves — fulfilled once the book is acquired, paused if you cancel or remove it — and the re-search cadence is configurable in settings.
+- Added "upgrade until cutoff" to book acquisition profiles: once a monitored book is imported, Prismedia keeps watching for a higher-quality release (ranked by source — retail over web — and format) and, when one that beats your copy without downgrading it appears, downloads and swaps it in automatically, stopping once the configured cutoff quality is reached. The swap is conservative and safe: the upgrade downloads alongside your library without touching the owned file until the new copy is in hand, the replacement is in-place with the previous file kept as a recoverable backup, a release can never downgrade your format, an untrusted "retail" tag alone never overwrites a file, and a format change (e.g. PDF→EPUB) is surfaced for manual replacement rather than applied automatically. If no better release ever appears it gives up after a bounded, backing-off number of tries. Requires auto-grab.
+- Added persistent audio playback with a global player bar, mini-player, queue drawer, artist queues, media-session integration, waveform rendering, track ratings, and saved local playback state.
+- Added first-class audiobook renditions to Books: book libraries scan single-file and multipart audiobooks, preserve ebook and audiobook editions together, resume listening across audio parts, and let Request acquire an audiobook onto a new or existing Book through audiobook-specific indexer categories.
+- Added EPUB and PDF scanning plus built-in readers with paged or continuous layouts, zoom, search, table of contents/outline support, links, downloads, and saved reading progress.
+- Added configurable sidebar and mobile navigation sections, with rename, reorder, hide, collapse, reset, pinned mobile destinations, and server-saved layout preferences.
+- Added dynamic and hybrid collections, including rule previews, media-specific filters, library-root filters, watched/progress filters, and collection cover modes.
+- Added audio-capable collections that can act like playlists when they include artists, albums, or tracks, including a reusable Audio tab shared by first-party clients.
+- Added track-level multi-select to audio track lists, including select-all, Add to Collection, and shared bulk action controls.
+- Added automatic hourly collection refresh, enabled by default, so dynamic collection rules stay current without a manual refresh.
+- Added durable Identify queues, bulk identify, provider seeking, auto identify settings, cascade child matching, live apply progress, and review screens for movies, shows, seasons, episodes, books, music, galleries, people, studios, and tags.
+- Added first-class editing for metadata, credits, roles, characters, studios, tags, links, dates, provider IDs, ratings, classification, poster/header artwork, and related entities across detail pages.
+- Added operational controls for background jobs, worker status, transcode cache limits, file uploads from the Files tab, reversible scan exclusions, and centralized app settings.
+- Movie, TV, and music profiles now carry a configurable naming template, the same way books do: choose how imported files are named — for example a movie as `{Title} [{Quality}]/{Title}.{ext}` or a TV episode as `{Series}/S{Season:00}/{Series} {Season:00}x{Episode:00}.{ext}` — using tokens like `{Title}`, `{Year}`, `{Series}`, `{Season:00}`, `{Episode:00}`, `{Artist}`, `{Album}`, and `{Quality}`. Each kind keeps a sensible default (leaving the field blank restores it), the folder structure stays constrained to what library scanning binds against, and an invalid template is refused at save with a clear message.
+- Downloads are now validated against their actual file lists: as soon as the torrent's metadata names its files, a grab whose contents contradict what was searched for (a different year's remake, the wrong season, or a payload missing the sought episode) is abandoned, blocklisted, and replaced with the next-best release automatically — and at import time the same check holds a wrong-looking payload for review instead of renaming it into the expected title's folder. Releases you pick or upload yourself are never second-guessed.
+- Media library items can now be deleted, files and all, from one shared Entity action across movies, series, seasons, videos, galleries, images, books, volumes, authors, albums, tracks, and artists. Deleting is monitor-aware — a directly monitored Entity goes back to Wanted and starts a clean replacement search, while an unmonitored Entity is removed from the library entirely. Turning off a child remains authoritative even when its parent is followed, and unsafe archive-member chapters/pages never expose file deletion.
+- Cancelling or removing a download is no longer a give-up: cancel stops that transfer and removing a download from the Downloads view cleans up the record, but in both cases the item stays Wanted and its monitor stays active — the loop searches again on its normal cadence (blocklist the release from the picker if it should never be grabbed again). The explicit give-up paths remain "Remove wanted" and unmonitoring.
+- Monitored series, seasons, and other containers now offer "Search missing content" on their Acquisition tab: one click sweeps the whole item at any depth — including episode gaps hiding inside partially-downloaded seasons — and starts a monitored search for every gap, reporting how many it covered. The existing "Search N missing" action remains when gaps are already visible.
+
+### Changed
+- Manual channel publishing now cascades through less-stable channels: release refreshes release, beta, and alpha images; beta refreshes beta and alpha; and alpha remains alpha-only.
+- Identify and Request can now start with a different preferred metadata provider for every Entity kind, while safely falling back to the first compatible enabled provider when a saved choice is unavailable.
+- Acquisition tabs now begin with a compact Monitor toggle and reveal search, activity, child monitoring, and other acquisition controls only while monitoring is enabled.
+- Automatic subtitle selection now uses a case-insensitive weighted term list: every matching language or label term contributes to a track's score, making preferences such as English + Forced additive while preserving compatibility with existing language lists.
+- Detail-page provider chips now show only the provider name, keeping long opaque IDs out of the layout while preserving the full linked identity as accessible context.
+- Identify and Request proposal reviews now use compact media-shaped thumbnails, make the full card useful, support Select all / Deselect all, and let container results drill into their held child details without repeating provider work.
+- Identify and Request reuse the reviewed proposal when accepting it, stage required artwork concurrently, and can progressively load up to 100 provider search results when the provider supports it.
+- Music navigation now separates Albums, Artists, and Tracks, with a library-wide track list that can play or shuffle every song while preserving each track's album artwork and artist context in Now Playing.
+- The web now-playing chrome now derives its outline, active transport controls, progress rail, and waveform accents from each current track's album artwork while keeping its ground surface opaque and neutral.
+- Popovers, menus, command search, confirmation prompts, and other transient controls now share a restrained neutral-glass treatment, with page color reserved for compact accents such as the sidebar section chevrons.
+- Rejected acquisition releases can now be selected manually when the rejection is an overridable match or profile rule; unsafe, blocklisted, and otherwise unqueueable releases remain protected.
+- Identify and Request now use the same provider search surface, so a fresh Identify search exposes every field declared by the selected plugin instead of falling back to a title-only query.
+- Desktop EntityGrids now default to a balanced mid-range thumbnail size, while preserving any saved per-grid preference.
+- Library grids now filter by shared Availability states instead of the ambiguous Has file toggle: On disk uses real source-media ownership, Wanted uses request state, and every acquisition stage from Pending through Imported, Failed, Cancelled, and Needs attention is available consistently on library and detail-page grids.
+- Stored external identity namespaces are normalized during upgrade and protected by database constraints and a provider/value lookup index, while intentionally allowing the same upstream item to represent more than one local copy.
+- Identify metadata application now resolves and persists all provider identities through the canonical Entity identity store, so multiple IDs are evaluated together and transient URL locators cannot leak into durable identity data.
+- Requests now resolve provider identities through the same canonical entity identity system as metadata imports; ambiguous duplicate identities stop with a clear conflict instead of silently binding to an arbitrary library item.
+- External identity lookup now returns every matching local Entity and reports ambiguity explicitly; identity writes use named add, update, or replace policies without silently committing another operation's transaction.
+- Plugin protocol compatibility is now enforced for both registry and installed manifests, and every plugin request uses one canonical protocol version instead of scattered literals.
+- Plugins can now declare the external identity namespaces and schema-driven search fields they support, while legacy manifests receive a compatible title search and plugin-id identity namespace automatically.
+- Entity details now show the authoritative metadata and monitoring plugin with its persistent provider ID; when that plugin declares a provider-page URL format, the shared chip opens the exact movie, series, season, episode, person, or studio in a new tab. On small screens the provider and other identity chips move to their own wrapping metadata row instead of clipping the hero actions.
+- Identify search forms now come from the selected plugin's declared field schema, so context such as year or series title is sent instead of being displayed and silently ignored.
+- Monitoring now targets the Entity's stable plugin identity rather than treating an acquisition row as the durable intent. Turning monitoring off removes pending, review, failed, and download state while preserving verified on-disk files; turning it back on reuses the same Entity target across books, albums, movies, seasons, episodes, and future media kinds.
+- Monitoring, request lookup, and metadata enrichment now route Entity identities through plugin-declared namespaces, so a plugin's installation ID no longer has to match the upstream ID namespace it handles.
+- External provider identities now use one validated, normalized namespace/value model across the Entity domain, laying the foundation for plugin-independent identify, discovery, and monitoring dispatch.
+- A download held for manual import is now actionable in place: an "Import anyway" button re-runs the import with your consent to replace the existing file even when the format differs (e.g. an mkv upgrading an mp4) — the previous file moves to the recycle bin when configured (or stays as a recoverable backup), quality gating still applies (a format change never lets a downgrade through), and the dangerous-file hold is never bypassed.
+- The acquisition card gains a "Search N missing" action wherever an entity still has unrequested wanted children — a season with absent episodes, a series with unrequested seasons — and "Search again" is now also offered while an item is held for manual import.
+- The acquisition card's imported file list now collapses by default (matching the History section) so a large season pack no longer fills the page; it stays expanded while a download is still in flight, and expanding or collapsing it by hand now sticks instead of being undone by the next live refresh.
+- Library grids now load dramatically faster: every entity with artwork gets small grid-sized cover variants (standard and high-DPI) generated automatically — including movies, series, books, albums, people, and studios whose posters come from metadata providers — and grids download those instead of the original full-resolution artwork. Existing libraries heal themselves via a background sweep on upgrade, and browsers now cache artwork properly instead of re-fetching every image on each visit.
+- Generated video thumbnails now follow the thumbnail-quality preset sensibly: each preset caps the image at a reasonable resolution (e.g. High = 1280px wide) instead of producing near-source-resolution, near-lossless files.
+- Settings now opens as a section directory, with each settings area on its own focused page and contextual links landing directly in the right section.
+- Upgrading preserves existing Prismedia accounts and library grants while the setup wizard lets an administrator review member access and establish known passwords.
+- NSFW visibility is now a per-user permission. The browser's SFW/NSFW toggle works only within what the signed-in account is allowed to see, and native and OPDS clients follow the same per-account rule — network position no longer plays a part.
+- Server administration (settings, files, jobs, identify, requests, acquisition, plugins, users, and system operations) now requires an administrator account; members browse, play, and manage their own profile, favorites, and ratings.
+- Request gains a global Downloads tab: every active download across books, movies, TV, and music in one place, with live progress, speed, ETA, size, and the download client carrying each transfer. Rows link to the item's own library page and support single or bulk Remove and re-search. It replaces the previous card-based Requests queue (finished and cancelled items live in History).
+- Redesigned the Request list tabs (Downloads, Missing, Cutoff unmet) as an engaging shared card list instead of a dense table. Each row shows the item's real cover art (in its natural shape) beside its title and creator, a clear status chip with a plain-language line ("Select a release to start the download.", "Waiting for a download slot"), and — while downloading — a progress bar with the download client, speed, size, and ETA. Every row carries a primary action matched to its state (Choose release / Search again / View), Remove, and an overflow menu, and the lists gain a text filter, status and kind chips, and a sort control. All three tabs share one design and restack cleanly on mobile, so the look stays consistent and improves everywhere at once.
+- Acquisition and monitoring now live in a dedicated Acquisition tab on the item's own page: the entity detail tabs gain an Acquisition tab — appearing only while the item actually has an acquisition story — combining "Search for release" (for wanted placeholders), the follow/monitor toggle with "Check for new works" (for authors, artists, and series), and the full download management surface (release picker, live transfer, files, cancel). The separate acquisition progress page under Request is gone — everything routes to the item's real library page, and requesting a single item lands you directly on it.
+- A series, season, author, or artist page now rolls up its children's acquisition status in its Acquisition tab: each wanted season/episode/book/album is listed with what it's doing (Failed, Searching, Review…), so per-child progress reads from the container without opening each one.
+- Following an author, artist, or series for new works is now offered only when an installed metadata plugin can actually track it — the entity must carry a provider identity (from a request or from Identify) that an enabled plugin can re-resolve by id. The card names which provider the watch rides on, and the server enforces the same rule.
+- Movies and single TV episodes now upgrade until their profile's cutoff quality, the same way books do: an imported movie or episode stays monitored and re-searches for a higher-quality release (graded on the video ladder), and when a strictly-better one is found it is atomically swapped in for the owned file — the original is kept as a recoverable backup (or sent to the recycle bin) — until the cutoff quality is reached. Turning the profile's upgrade-until-cutoff toggle off, or reaching the cutoff, fulfills on import. Season packs and albums capture their owned quality for display but fulfill on import (a multi-file pack isn't swapped in place). A format change (e.g. mkv → mp4) is left for manual replacement, exactly as with books.
+- First-party acquisition now replaces the older upstream Radarr/Sonarr/Lidarr request-service integration. Existing legacy request-service and request-history database tables are retained as unmanaged data during migration instead of being dropped.
+- Book and author discovery opens a detail review page before requesting: clicking a result no longer immediately queues it. You review the cover and synopsis, multi-select which books (or series volumes) to get, then explicitly Request — at which point Prismedia searches and downloads the selected book(s).
+- Reworked the dashboard around Continue, Recent, recently added media, and a resume-focused hero so active items appear immediately instead of being buried in per-type shelves.
+- Standardized detail pages and library grids on shared Prismedia building blocks, improving filters, sort, pagination, thumbnails, media-wall/feed views, responsive controls, and cross-page consistency.
+- Made desktop library grids and Identify review thumbnails open denser by default so large screens show more items without oversized cards.
+- Made scans incremental, batched, deduplicated per media kind, and priority-aware so large unchanged libraries finish quickly while new items surface with useful metadata and covers first.
+- Improved media organization rules for loose videos, movies, direct-child series, audio folders, ebook/PDF folders, galleries, single-image folders, comic archives, sidecars, and generated assets.
+- Reworked video playback negotiation around client capabilities, direct play, direct stream, stream-copy, hardware-aware transcoding, clearer manual quality selection, and lower CPU usage.
+- Rebuilt Identify around durable server jobs instead of fragile in-memory page state, with user-triggered searches taking priority over background auto-identify work.
+- Expanded canonical Entity responses with richer Prismedia metadata, artwork, media sources, playback progress, collections, people filmographies, home shelves, and profile-scoped libraries.
+- Tightened API and deployment behavior so every `/api/*` route requires a signed-in user, the web app carries its session cookie same-origin automatically, and native and third-party clients authenticate with the same bearer tokens the login endpoint issues.
+- Refreshed release workflows so validation, documentation publishing, and alpha/beta/release channel images are manual while `main` publishes only the dev image.
+- Updated documentation, README screenshots, branding assets, install metadata, and app copy to match the current Prismedia v1 surface.
+
+### Fixed
+- Jobs now separate dormant signal waits from active execution lanes, making it explicit that review and external-event waits preserve workflow state without consuming worker capacity.
+- Unknown embedded subtitle streams are now skipped, and subtitle extraction remains best-effort so unsupported tracks cannot fail an otherwise healthy library scan.
+- Interactive acquisition imports now resume immediately after download completion, including imports already queued before upgrading; graph continuations declare their entity gate automatically and startup repairs missing scheduler state.
+- Large scan graphs no longer fail media probes, subtitle extraction, or previews through graph-level PostgreSQL concurrency conflicts, and stale graphs whose nodes are already terminal repair their displayed status automatically.
+- Audio probes now persist complete media-source state, preventing unchanged tracks from being re-probed on every scheduled audio scan.
+- Jobs now distinguish completed and failed lanes from genuine waits, count all terminal nodes in progress, expose failed-node totals, and describe entity serialization as queued exclusive access instead of an unexplained change wait.
+- Streaming release gates now accept provider-supplied digital/VOD dates, remain visibly Waiting for release until the resolved date, and keep manual search as an action instead of a misleading lifecycle state. The date-entry prompt appears only after a completed provider lookup returns no compatible milestone.
+- Release calendar entries for seasons now include their series title and link to the season detail, while crowded dates collapse into an accessible full-day list instead of overflowing the month grid.
+- Durable provider gates now persist PostgreSQL leases and start intervals atomically, so concurrent workers cannot exceed MusicBrainz or other declared external-service limits; selected subtitle downloads also run in a foreground Entity lane instead of holding an API request open.
+- Newly imported videos now prioritize technical probing and subtitle reconciliation so they become playback-ready ahead of unrelated background work, and preview/trickplay jobs wait for probe metadata instead of surfacing false scan failures.
+- Wide 4K video masters such as 3840×1920 are no longer mislabeled as 1440p in library thumbnails and web metadata when playback correctly identifies them as 4K.
+- The launch-site navigation drawer now renders reliably above page content on
+  mobile Safari.
+- Launch-site section links no longer all appear selected at once in desktop and
+  mobile navigation.
+- Plugin metadata can no longer stamp one parent or locator identity onto several structural children: shared proposal identities are discarded before matching or persistence, and upgrading repairs affected AniList episodes, MangaDex volumes and chapters, Open Library series children, and repeated MusicBrainz track recordings already stored in the library.
+- Monitored container sync now keeps exact Entity bindings through nested provider hydration, preventing contextual parent aliases from aborting a season/episode merge after the Request flow has already matched or created the wanted children.
+- Applying new provider metadata to a monitored container now immediately checks that exact Entity for provider-only missing works, so a season with no files on disk becomes Wanted without waiting for the daily sweep. Targeted monitor checks also run independently from the global sweep and other Entity checks.
+- Video pages now show the saved resume position on the seek bar immediately, before the stream finishes loading.
+- On-demand monitored checks now queue immediately for only the selected Entity, continue updating its detail page while provider work runs, and cannot be blocked by a different monitored item's metadata failure. Season activity also rolls up searches and downloads from episodes underneath it, making continuously numbered provider seasons visible while they work.
+- Downloads now wait without blocklisting when their client is offline or unhealthy, recover cleanly when a client is removed from settings, and return to a fresh Wanted search when the client-side download is deleted.
+- Turning Monitor on now starts an immediate provider sweep with editable quality-profile and import-target choices, promotes provider-known missing works into visible Wanted items, and searches gaps throughout owned container trees. Provider matches also reuse oddly titled local season folders instead of creating a duplicate canonical season.
+- Entity acquisition history now retains import failures recorded during manual-review holds and import exceptions, so those events no longer disappear from the affected item’s history.
+- Video scans now keep unnumbered, custom-titled season folders inside an established parent series and order them by title after detected numbered seasons, instead of promoting each folder to a separate series.
+- Video remuxing now preserves a negotiated multichannel audio track instead of unnecessarily downmixing it to stereo AAC.
+- Downloads and entity detail pages now retire passive requests once their surviving entity is fully present, while preserving partial imports and deliberate upgrades; refreshes are serialized and source checks stay scoped to visible entities so large libraries no longer saturate PostgreSQL.
+- Long titles, release paths, and messages in Request History now wrap within their rows instead of overflowing the page.
+- Reconciled imports now retire older requests and monitors for the same provider identity, passive requests whose target was removed no longer render as broken Downloads cards, and acquisition cards restack before their status and action controls can overlap.
+- The Downloads view now refreshes attention-only requests and rechecks when the browser becomes visible, so a scan that reconciles an awaiting-selection item into the library removes its stale request card without a manual reload.
+- Partial music imports now keep provider tracks visible as missing and non-playable, expose per-track monitoring, immediately search for the remaining tracks, merge equivalent Soulseek filenames without duplicate library entries, and survive concurrent library scans without losing newly imported files.
+- A slow indexer's HTTP timeout now stays scoped to that indexer instead of cancelling and requeuing the entire acquisition search; usable results from Soulseek or another source proceed immediately without repeating broader queries against the failed source.
+- Soulseek music matching now understands artist/album/track path-shaped results and treats quotes, slashes, and other punctuation as token boundaries, so valid releases such as quoted soundtrack singles are no longer mislabeled as title mismatches.
+- Wanted audio-track placeholders remain visible in acquisition monitoring but are excluded from playable album, track, collection, restored-queue, and native browse surfaces; the audio source API also refuses to stream them until a real file fulfills the request.
+- Completed acquisitions now preempt remaining release searches, so a large artist request cannot leave finished Soulseek downloads waiting to import while its metadata and search fanout continues.
+- Manual replacement reviews can now be retried safely after a failed download-client handoff: Prismedia reuses the reviewed upgrade and candidates, repairs old transferless Preparing rows into an actionable state, and prevents same-request duplicate replacement children.
+- Imported singles now attach their downloaded audio file to the original metadata track—even when filenames include track numbers or bitrate decorations—preserving provider identity and Wanted fulfillment. Existing scanner-created duplicates heal on the next audio scan without losing probe data or fingerprints, and entity-bound waveforms regenerate against the retained track. Their probes run at import priority, while foreground search floods remain confined to reserved worker capacity so standard jobs keep advancing.
+- Legacy slskd enqueue errors now reconcile the exact peer files before Prismedia decides whether the handoff succeeded, failed cleanly, or remains ambiguous, preventing a rejected peer from leaving requests permanently stuck in Preparing or Stopping.
+- Failed Soulseek transfers now enter blocklist-and-retry recovery immediately instead of waiting behind a large artist's remaining searches.
+- Acquisition transfer polling now runs ahead of large request search fan-outs, so completed or failed Soulseek downloads keep advancing through import and recovery while the remaining artist albums and tracks are still being searched.
+- Soulseek album searches can now persist opaque multi-file release locators of any practical length instead of failing the entire acquisition when a peer folder encodes beyond the former URL limit.
+- Artist requests now record monitoring for every selected album before background metadata hydration begins, so the child-activity panel keeps all requested albums visibly monitored and labels the pre-search phase as Preparing metadata instead of making queued work look turned off.
+- Artist requests now retain the reviewed album artwork URLs in the initial library graph, so album cards reuse the thumbnails already shown during review while background hydration localizes the image files.
+- Soulseek searches now serialize through slskd's one-operation limit and wait for each asynchronous search to finish before reading peer responses, preventing HTTP 429 backoff and valid album or track results from being discarded in progress.
+- Soulseek downloads now fall back to slskd's legacy per-user queue API when the configured server predates batch downloads, while retaining grouped progress and import paths for albums and individual tracks.
+- Individual audio-track acquisitions now pass through the same crash-safe library placement checkpoint as album imports and bind the downloaded file to the existing wanted track, album, and artist graph instead of failing during or after placement.
+- Fixed large artist requests waiting on every album acquisition or cover download before returning: reviewed album entities, metadata, and provider routes are committed in one batch, while a durable background fan-out expands each album's track graph before publishing its acquisition search.
+- Album searches that find no acceptable complete release now start artist/album/track-qualified child searches immediately. Track hydration happens before the parent search, existing barren track acquisitions are requeued instead of counted as finished, and repeated album/track titles collapse to one search term, so individual-file sources such as Soulseek no longer wait for a later enrichment or monitoring pass or receive phrases like `Artist Title Title`.
+- TV imports now reconcile byte-identical episodes that already reached the library—whether or not a concurrent scan indexed them first—instead of creating duplicates, demanding manual import, or blocklisting a release that already satisfied the request. Imports waiting behind a library scan also show that state explicitly.
+- Monitored series, authors, and artists now bypass cached provider proposals whenever checking for new releases and preserve each discovered work's plugin-declared identity across hierarchy levels (such as TMDB series → season → episode), so newly published seasons and episodes appear on the next tracking pass instead of being discarded.
+- Collection grids no longer crash when separate members resolve to the same artwork, and member accounts no longer wait tens of seconds for library visibility to be recalculated throughout every browse query.
+- Collection grids no longer stall while resolving fallback member artwork in large libraries; visibility checks are now scoped to the collection's actual members.
+- Request searches and metadata enrichment now use the same foreground priority as manual Identify work, while completed downloads enter the import pipeline ahead of background scans.
+- Movie and TV imports now catalog only the files they placed instead of scheduling a full video-library scan after every completed download, preventing season-pack imports from clogging the queue.
+- Imported TV episodes now run Auto Identify and subtitle processing against only the episode that was placed, avoiding a series-wide metadata cascade after every download.
+- Stream-copy video playback now preserves delayed audio-track timestamps without re-encoding already-compatible AAC audio, keeping the source's original surround samples, bitrate, and channel layout intact while preventing lip-sync errors in web and native clients.
+- Playback Stats now show only the signed-in user's activity by default, so legacy household history and other members' plays no longer appear in personal totals, charts, top items, or recent events. Administrators can switch the page between any one account and an explicit All users view; members remain locked to their own activity.
+- Wanted entities now follow the library access of their request target, including legacy placeholders that fall back to the media kind's default profile, so household members cannot browse or open requests destined for libraries they cannot access.
+- Identify now matches child titles through filename-style separators, punctuation, apostrophes, and accents, so multi-disc albums and similarly structured seasons can map their local children even when per-disc or per-season positions repeat.
+- tvOS compatibility players can now request malformed HDR sources for local tone mapping and direct playback instead of forcing a server video transcode.
+- HDR video with contradictory sub-10-bit samples is now normalized through the SDR tone-mapping path instead of being copied with HDR signaling that makes standards-compliant TVs render it severely dim.
+- Acquisition imports now remain in the durable queue and enter the CPU/disk-intensive import pipeline one at a time, rather than claiming many completed episodes as simultaneously running while they wait for the same media-placement coordinator.
+- Season Acquisition tabs now open active episode work automatically and show each episode’s search/download state independently from its future-monitoring switch.
+- Download-client handoffs now recover automatically after a lost response or interrupted add instead of leaving acquisitions stuck on “Preparing download”; qBittorrent adds that conclusively create no identifiable torrent now release the failed attempt and immediately schedule monitored child fallback instead of waiting for the next daily retry.
+- Season acquisition pages now keep episode activity mounted during live refreshes, show searching/downloading/importing counts directly, and demote a failed season-pack attempt while episode fallback is active instead of flashing or presenting the stale parent failure as the current outcome.
+- Prowlarr aggregate release searches are limited independently from general worker concurrency, preventing large episode-fallback batches from timing out while leaving scan, probe, import, and other worker throughput unchanged.
+- Monitored season requests now fall back to exact per-episode searches when no acceptable season pack exists, every attempted pack download fails, or a downloaded pack cannot be imported; selectable and in-flight season packs still finish without duplicate episode work.
+- Acquisition imports now re-identify the source-backed entity after its real files and children are cataloged, so organized Wanted placeholders keep their stable provider identity while gaining episode titles, track names, and other child metadata.
+- Interrupted acquisition imports can now be explicitly started over: Prismedia removes their partial files and stale catalog state, restores recoverable pre-upgrade files, and creates a clean search. Removing a download uses the same graceful cleanup even when its download client or payload is already missing.
+- Flyouts, dropdowns, popovers, and dialog panels now use opaque neutral surfaces so underlying content no longer shows through their controls.
+- Audiobook playback now uses its compact progress timeline without generating an oversized, low-information waveform, and unusually long audio waveforms are bounded safely instead of overflowing the browser canvas.
+- Restored EntityGrid toolbar floating behavior so its search and controls remain fully visible beneath the sticky app header while scrolling.
+- Audiobook parts now stay scoped to their Books instead of appearing as music in track lists, global activity, smart or manual audio collections, native audio catalogs, and playback statistics.
+- Full book-library reconciliation now preserves audiobook chapters on the Book explicitly targeted by an acquisition, even when its readable edition lives elsewhere, instead of splitting the audio into a duplicate Book after import.
+- Audiobook listening progress now uses browser-learned chapter durations while audio probing is still pending, so multipart resume and completion save correctly from the first play.
+- Books now manage ebook and audiobook renditions independently: requesting the missing counterpart reuses the same Book, the Acquisition tab shows both states, and stopping one rendition leaves the other untouched. Open Library requests also no longer fail with a false "proposal changed" conflict.
+- Native clients now correctly hide NSFW libraries and file directories when their content-visibility setting is disabled.
+- Download profile settings now respect the viewer's library access and current SFW/NSFW mode; profiles targeting an NSFW library are hidden whenever NSFW content is hidden.
+- Library scans no longer remove wanted or actively monitored movies, seasons, and series while they are waiting for files.
+- Adding or updating a library with a folder that is already watched now returns a clear conflict instead of failing with an internal server error.
+- Video seek bars now span the same full player width as the playback controls, regardless of the media artwork or source aspect ratio.
+- File deletion now lives in the shared Acquisition tab for every file-backed Entity instead of crowding the detail hero, whose remaining actions wrap cleanly on smaller screens.
+- The video film strip now responds only to horizontal wheel or trackpad movement, so ordinary vertical page scrolling passes through instead of scrubbing playback.
+- Identify now operates only on Entities with real source media on disk: Wanted and fileless metadata placeholders no longer show Identify actions, cannot enter manual or automatic queues, and stale queue work is retired without duplicating matching Wanted children during a parent cascade.
+- Deleting the wrong files from a monitored item now replaces its completed acquisition with a clean retry and returns it directly to Searching, instead of leaving an Imported card backed by a deleted acquisition that failed with "Acquisition was not found."
+- Managed Entity deletion now requires deleting the source files too, preventing library-only removals that a scan would immediately rediscover; committed deletions also remain successful when immediate monitored recovery must wait for the scheduled sweep.
+- Remove wanted now uses the same durable monitor and download cleanup as Unmonitor; items stay visible and selected when remote cleanup fails or an import race retains them, so the UI never claims they were removed when they were not.
+- Book, movie, TV, and album imports now bind every placed file to its Entity graph before reporting Imported, so newly acquired content is readable or playable immediately instead of waiting for a later library scan; background scans remain reconciliation and cannot turn an already-ready import into a false failure when housekeeping is unavailable.
+- Book, movie, TV, and album imports now checkpoint their exact file placements before touching the download, then resume those same targets after a crash or interruption without losing move-mode payloads or creating duplicate copy/hardlink suffixes; cover art and other carried companions recover with their media.
+- Library scanning and import now follow the host filesystem's path-case rules, so case-distinct files and folders remain separate on Linux while Windows keeps its case-insensitive behavior.
+- Updated the OpenAPI runtime to a patched release that rejects the known circular-schema denial-of-service vulnerability.
+- The shared entity API now honors the Wanted filter, and the generated web client includes the current acquisition volume field and wrong-volume rejection code.
+- Entity descriptions now render through a closed Markdown renderer that blocks raw HTML and unsafe link schemes, preventing plugin or edited metadata from injecting executable content into detail pages.
+- Fixed the whole app intermittently failing with server errors (500) under background-job bursts: the bundled PostgreSQL allowed only 40 connections while the API and worker connection pools could together demand far more. The pools are now capped conservatively and the bundled database accepts 120 connections (existing installations are upgraded automatically on restart).
+- Fixed live download telemetry (speed, seeders, peers, size) never appearing anywhere in the app: three qBittorrent per-torrent calls (properties, file list, piece map) used the wrong query parameter and were silently rejected. This also un-breaks seed-goal tracking and the mid-download wrong-content check for torrents.
+- Fixed detail pages visibly flashing back to their loading skeleton when an acquisition action (search, cancel, delete-revert) refreshed them — they now update in place.
+- Deleting library items now also removes their generated assets (previews, trickplay, waveforms, and — on full removal — grid thumbnails and downloaded artwork) immediately instead of leaving orphaned cache files behind.
+- TV imports now align "as aired" multi-episode files by their episode TITLES: a pack whose file labeled E01 actually carries provider episodes 1 and 2 (and E02 carries 3 and 4) is placed at the right provider numbers, and the covered second episodes are bound to the same file so they play instead of staying wanted forever. Conflicting or unmatched titles fall back to the file's own numbering — never a guess.
+- Fixed initial library and collection views taking up to a minute to load: rows previously hydrated every member of every collection, but now use one grouped query for the page with proper child counts; paged browsing fetches only the requested window while single-item detail remains fully hydrated.
+- Fixed album and artist grids feeling slow: audio library scans now backfill the small grid-thumbnail variants for album/artist covers (and re-scans self-heal missing ones) exactly like video scans do, instead of serving full-size original artwork until the daily sweep reached them.
+- Comic and volume-scoped book searches now guard against wrong volumes: a Volume 1 request rejects releases naming a different volume ("Vol 3", "v03"), prefers releases naming the exact volume over unlabeled ones, and volume-less releases (omnibus editions) stay available. The same protection wrong seasons already had for TV.
+- Automatic release selection for music and books now verifies work identity like movies and TV: a music search only auto-grabs releases naming the exact artist and album (remaster/deluxe editions still pass — years are deliberately not a rejection axis for music), and a book search requires both the exact title and the author in the release name, so a same-title book by a different author can no longer win on quality or seeders. Rejected releases stay visible for manual picks.
+- Fixed single-episode searches rejecting multi-episode releases that contain the sought episode: a double-episode file like S01E41E42 now fulfils a search for either half (and dashed ranges like S01E01-E03 count for every episode they span).
+- Fixed automatic release selection grabbing the wrong same-name work: a movie or series search now verifies the release actually names the sought title and rejects releases whose title-adjacent year points at a different remake or reboot (the 2019 "Clifford the Big Red Dog" reboot no longer wins a search for the 2000 original just because it exists in higher quality), and releases naming a longer different title (sequels, spin-offs like "Dune: Part Two" against "Dune") are rejected instead of merely outranked. TV searches also now compare against the series' première year from your library rather than unreliable request-time metadata.
+- Fixed newly imported videos sometimes failing playback with an HLS playlist 404 before their background probe metadata was saved.
+- Fixed one problematic file freezing an entire library scan: a file that fails to save is now skipped and reported by name while every other file persists normally, the failing file alone is retried on the next scan (instead of the whole library rescanning or new imports never appearing), and in all-libraries scans one broken library no longer stops the remaining libraries from scanning.
+- Fixed the Jobs dashboard mislabeling acquisition, backup, thumbnail-sweep, and other newer job types as "Relocate video generated files / Library maintenance": every job type now has a proper name, description, and queue grouping (acquisition work gets its own Acquisition group), per-queue cancel and clear-failures now reach those jobs, and the SFW-mode privacy masking of real maintenance jobs uses an honest generic label instead of inventing a fake file-moving task.
+- Fixed a corrupt or truncated media file grinding the job queue forever: probing it now records the file as unreadable and fails once with a clear message naming the file, instead of silently succeeding while preview generation failed and re-queued itself on every scan. Scans stop scheduling repeated probe/preview/trickplay work for a file marked unreadable while still allowing adjacent subtitle files to reconcile, and repairing or replacing the video automatically gives it a fresh chance.
+- Fixed the hourly collection refresh failing on every run (and dynamic collections going stale) when a collection rule filtered on play count or skip count: the rule engine still queried the pre-multi-user playback table that the accounts upgrade removed. Those rules now read the per-user watch state and match when any household member's count qualifies.
+- Fixed release matching for indexer titles that use underscores, dots, or hyphens instead of spaces: acquisition scoring now recognizes those separators for quality, format, language/proper tokens, profile terms, title-only blocklists, and closer title matches so spin-offs or subtitles are less likely to beat the exact requested work.
+- Fixed detail pages showing a different cover than the library grids for the same item: when an item had both downloaded artwork and a cover extracted from its file (common for identified books), the detail poster skipped the downloaded artwork the grids show and fell back to the embedded one. All surfaces now agree on the same winning cover.
+- Fixed MangaDex request results showing the MangaDex "read at" placeholder instead of real cover art by applying the same no-referrer image loading behavior used by Identify to shared request thumbnails and detail artwork.
+- Fixed Safari showing placeholder icons instead of cover artwork across library grids and shelves: WebKit fires a spurious image error for lazy-loaded covers using the `sizes="auto"` responsive hint, so cards no longer emit it and Safari renders the same small grid variants as every other browser.
+- Fixed library scans crashing — and never completing again — once a library contained a multi-episode file (e.g. `S01E05-E06`) bound to both episodes it covers. Every scan failed with a duplicate-key error, which also blocked freshly imported episodes from ever appearing in the library until the offending scan succeeded.
+- Fixed series libraries taking 30+ seconds to open: list rows no longer load each series' full metadata graph one by one — a 50-series page went from ~9,800 database queries to a handful of batched ones, and the Continue Watching / Latest shelves shed a redundant double-load per item. Opening a single item is unchanged and stays fully detailed.
+- Fixed a half-downloaded season page not offering the missing-episode search: seasons now roll up their wanted episodes with the same "Search N missing" action the series page has.
+- Fixed the Jobs dashboard costing seconds per refresh on long-lived installs: queue counts are now aggregated in the database instead of loading the entire job-run history (hundreds of thousands of rows) into memory on every poll.
+- Fixed the Files page hanging up to a minute when opening details on a huge folder: the file-count/size walk is now time-boxed, and a tree too large to measure quickly simply omits those stats instead of stalling the page.
+- Fixed a monitored series going quiet with episodes still missing: when a season pack imports incomplete, Prismedia now searches for each missing episode individually (Sonarr-style) — every gap becomes its own monitored, auto-grabbing episode acquisition — instead of marking the season done with holes.
+- Fixed "Search for release" doing nothing on a wanted series page: requesting a series now requests each of its still-wanted seasons, skipping ones already in flight.
+- Fixed entity detail pages taking seconds to open: identify, monitor-eligibility, and request lookups no longer fetch the community plugin index from the internet on every page view (that index is only consulted by the plugin browser, and is now cached), provider metadata lookups are cached for a short window so re-opening the same series is instant, and a series page paints immediately instead of waiting for the provider's season list.
+- Fixed expanded acquisition history rows overflowing phones when release titles are long; the history now wraps inside the acquisition card instead of widening the page.
+- Fixed the acquisition settings and release picker not adapting to phones: indexer, download client, path mapping, custom format, profile, and blocklist rows now stack as readable cards on narrow screens instead of clipping off the edge, and the release picker shows its stacked cards whenever it actually lacks the room for the full sortable table — including on tablets and in narrow panels — rather than deciding by screen size alone.
+- Fixed one marker-less release winning multiple TV season searches: season and episode searches now rank unit precision above quality — a release naming the exact season (or episode) outranks a complete-series pack, which outranks a title with no season token at all — so the same generic DVD rip can no longer be auto-grabbed for four different seasons.
+- Fixed the misleading "torrent did not appear in the category" failure when qBittorrent silently ignored a duplicate add: the client now recognizes the already-present torrent by name and reuses it, or reports an honest duplicate error; the connection test also verifies the download category can actually be created, so real category problems surface at setup time.
+- Fixed automatic downloads giving up when the best release could not be queued: auto-pick now tries the next-best accepted releases before falling back to manual selection, and never leaves an acquisition failed while pickable releases remain.
+- Fixed NSFW libraries being granted to accounts that block NSFW content: the upgrade migration now skips NSFW libraries for previously-SFW profiles, every grant path enforces the same wall server-side (an NSFW-blocked user can never hold an NSFW library grant, and blocking a user's NSFW permission revokes any they had), and the access editors hide NSFW libraries for blocked accounts.
+- Fixed monitoring an existing on-disk series (or movie/album) duplicating it on the next import: an acquisition linked to an entity that already lives on disk now merges into its real folders — new episodes land in the existing season folders (a missing season gets a template-named folder inside the existing series folder), a strictly-better release replaces the owned file in place (with the previous file kept recoverable), and files that aren't upgrades are dropped. A release with nothing better than what you own fails with the release blocklisted so it is never grabbed again; an upgrade that would change the file format is held for manual import instead. Your existing folder layout is never renamed or reorganized.
+- Fixed acquisition-imported shows and albums arriving with no metadata: the import now stamps the provider identity (e.g. the TMDB id) onto the imported entities and kicks off identification for the affected series/artist/movie right after the scan — even when Auto Identify is switched off for the library, since a requested download is explicit intent.
+- Fixed a fresh install landing on the sign-in page instead of the setup wizard when the first status check failed: setup detection now retries through boot-time hiccups, never guesses "setup done" from a failure, and the sign-in page itself forwards to the wizard whenever setup is still pending.
+- Fixed book imports failing when no book acquisition profile exists: the import now uses the promised permissive defaults (the first book-enabled library, the default naming layout, a move import) exactly like movies, TV, and music already did.
+- Fixed Availability filtering counting request-time cover art as source media: a Wanted Entity can carry a downloaded cover while still correctly remaining fileless, and **On disk** now means verified source ownership only.
+- Fixed release searches that could sit "searching" forever after an interruption (e.g. a server restart mid-search): a stuck search is now detected within about a minute and marked failed with a clear retry message, and indexer requests carry explicit timeouts.
+- Fixed removing a download from the Downloads tab erasing the item's Wanted state: removing a (typically failed) download now only cleans up the transfer — the wanted item stays in your library, and cancelling from the item's own page remains the way to give up on it.
+- Fixed the Request page's tab bar overflowing the screen on phones: the tabs now scroll within their own row instead of widening the whole page.
+- Fixed the Books/eBooks library grid so books grouped under an author still appear in the main Books view while true nested book children stay on their parent detail page.
+- Fixed many playback reliability issues, including first-play failures, slow or inaccurate seeking, stalled transcodes, remux segment errors, HDR/Dolby Vision handling, subtitle rendering, audio-track selection, progress bars, cache cleanup, and high CPU spikes.
+- Fixed progress and history consistency so web and native clients agree on resume points, completion, play counts, skips, watched/read state, and Start Over behavior.
+- Fixed Identify so searches, provider retries, child cascades, metadata merges, artwork selection, NSFW propagation, duplicate provider data, music matching, and bulk accept behave reliably without losing existing metadata.
+- Fixed scan and worker resilience, including startup ordering, stale running jobs, cancellation races, recurring scan timing, deleted/disabled libraries, missing cache assets, failed-job recovery, and Docker build stability.
+- Fixed first-party client setup, login, browsing, shelves, collection roots, direct-child series, episode artwork, music sync, cast navigation, and playback metadata.
+- Fixed OPDS edge cases for long client identifiers, reverse-proxied HTTPS links, folder-backed comics, series containers, covers, and acquisition feeds.
+- Fixed mobile and touch interactions across navigation, library menus, thumbnail scrubbing, lightboxes, readers, detail heroes, forms, buttons, flyouts, and narrow-screen wrapping.
+- Fixed image, gallery, animated-image, feed, and lightbox behavior so inline clips, GIF/APNG files, portrait media, previews, preload, and aspect ratios render correctly.
+- Fixed sub-view grids so albums, galleries, series sections, linked content, and collection previews expose the same selection and Add to Collection controls as main library grids.
+- Fixed collection grid cards so they inherit member artwork on list pages, matching detail-page covers.
+- Fixed dynamic collection rules, previews, saved edits, smart collection queries, random sorting, page-level grids, tag/person/studio references, and orphan cleanup controls.
+
+### Removed
+- Removed the Jellyfin-compatible API, authentication headers, catalog projections, playback proxy routes, setup migration behavior, and third-party-client documentation. The web and Apple apps now use Prismedia's native Entity and playback contracts exclusively.
+- Removed the obsolete frontend scraper/package-manager, execution-result, and StashBox panels; the Plugins page now uses only the current generated provider catalog, install/update/remove, Stash community, and credential contracts.
+- Removed the unused TypeScript plugin SDK packages and the TypeScript/Python plugin authoring guides; plugins run on the .NET runtime, and Stash YAML scrapers remain fully supported through the built-in Stash-compat engine.
+- Removed the app-level API key and the API Access settings panel. All access — web, native apps, OPDS, and generated API clients — is per-user with usernames, passwords, and session tokens.
+- Removed LAN auto-login: browsers on the private network no longer receive an authentication cookie automatically, and the LAN visibility auto-enable setting is gone. Sign in once per browser instead.
+- Removed Stash-compatible perceptual hashing (pHash). Fingerprint workflows now rely on MD5 and OpenSubtitles hash support, and the old pHash setting and StashBox pHash documentation are gone.
+- Removed development-only route shells and redundant prerelease UI panels so the app surface and release notes focus on the production Prismedia experience.
+
+### Docs
+
+- Update the website and setup guides to use one App Store download for iPhone, iPad, and Apple TV.
+- Add a public security reporting page and researcher acknowledgments, linked from the website, support, and contribution guides.
+- Documented acquisition profile controls, verification stages, recovery behavior, and file-inventory limits.
+- Soften the documentation reading palette and fix tables that left unused space beside their columns, with clearer rows and contained scrolling on small screens.
+- Replace legacy documentation screenshots with current SFW product captures, add folder setup, request review, chapter alignment, native reader, and player examples, and make every screenshot expandable. Update guide labels and job-state explanations to match the current interface.
+- Add local documentation search with keyboard navigation and mobile results, keeping search queries in the browser.
+- Simplify the getting-started path, explain server and client requirements, expand troubleshooting, and correct backup and writable-media guidance. Refresh the README and add focused support and issue-report paths.
+- Public-site publishing now checks canonical URLs, unique page descriptions, icons, manifest destinations, and browser behavior before deployment.
+- Add practical guides for native app connection, reading and listening together, EPUB reader settings, and web/native music players; clarify request permissions and download-to-library path mapping.
+
+- Link the released Apple TV app from the README, describe TestFlight as early-build access, and remove the outdated launch-date notice from the homepage.
+
+- Explain media folder organization with Docker path examples, watched-root settings, and common scan corrections. Update book and comic grouping guidance and replace outdated external request-service instructions with Prismedia acquisition setup.
+- Prepared the native App Store listing, exact-size iPhone, iPad, and Apple TV
+  screenshot galleries, review notes, privacy answers, licensed
+  demonstration-media ledger, and an isolated Apple review deployment that
+  cannot mount the household library.
+- Added public support and privacy pages for the native app listing, including
+  self-hosted data boundaries, reviewer-server handling, and direct support paths.
+- Reworked the repository README around Prismedia's launch story, product film,
+  native app experiences, Product Hunt page, and campaign artwork.
+- Added wide, square, and vertical Product Hunt campaign artwork, strengthened the
+  maker profile around Prismedia’s privacy-first native product story, and added
+  reproducible checks for social-asset dimensions, copy clipping, and upload size.
+- Scheduled Prismedia’s Product Hunt launch for August 23, added the official launch badge to the public site, and documented a preparation, launch-day, and follow-up campaign.
+- Added a reproducible Product Hunt launch kit with final listing copy, a square prism thumbnail, and six visually reviewed 1270×760 gallery cards covering the media lifecycle, native playback, reader customization, purpose-built media experiences, and self-hosted architecture.
+- Prevented the web-platform proof frame from creating horizontal overflow on narrow launch-site viewports.
+- Reframed the public README around the connected media lifecycle, product film, TestFlight path, native reader customization, and full-fidelity Apple TV playback.
+- Added a dedicated social sharing card, richer product discovery metadata, and an explicit crawler entry point for the public launch site.
+- Refined the launch site with full-spectrum headline accents, clearer native-platform composition, an explicit film play control, transparent optical marks, and full-fidelity native playback messaging.
+- Extended the launch film's one-light-in, spectrum-out story across the product site with a labeled media map, centered optical paths, media-specific experience rails, platform accents, a self-hosting topology, and a responsive closing call to action.
+- Rebuilt the documentation landing page as a product-first launch site with real web, iPhone, and Apple TV captures, an embedded 72-second silent product film, explicit video, reading, audio, and image experience stories, and direct install and TestFlight paths while preserving task-oriented Docs routes.
+- Documented audiobook scanning and manual placement, including supported formats, Books-root configuration, folder grouping, ebook matching, multipart ordering, and rescan behavior.
+- Replaced the README, documentation-site theme, brand assets, and product screenshots with the restrained prism design language across current desktop and mobile surfaces.
+- Overhauled the README and documentation site around the current Prismedia app, including setup, browsing, scanning, playback, requests, identify, collections, settings, operations, plugins, and screenshots.
+- Added Library & Scanning references with supported folder layouts and file extensions for videos, movies, series, images, galleries, comics, ebooks, and audio.
+- Documented the native Entity, capability, playback, session, authentication, and generated-client flows used by Prismedia's web and Apple apps.
+- Added deployment and security docs for Docker, authentication, API keys, reverse proxies, release-channel images, and the .NET API serving the built Svelte app.
+- Added developer-facing architecture and flow docs with diagrams for app boundaries, generated clients, jobs, identify, playback, and release-readiness review.

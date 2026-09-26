@@ -1,0 +1,650 @@
+using System.Text.Json;
+using System.Collections.Concurrent;
+using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.Logging.Abstractions;
+using Prismedia.Application.Backups;
+using Prismedia.Application.Health;
+using Prismedia.Application.Jobs;
+using Prismedia.Application.Jobs.Handlers;
+using Prismedia.Application.Settings;
+using Prismedia.Contracts.Settings;
+using Prismedia.Domain.Entities;
+
+namespace Prismedia.Infrastructure.Tests;
+
+public sealed class QueueWorkerTests {
+    [Fact]
+    public async Task QueueWorkerRunsFourInteractiveLanesAlongsideTheBackgroundPoolOnEightCpus() {
+        var foreground = Enumerable.Range(0, 5)
+            .Select(_ => CreateJob(JobGraphOrigin.Interactive));
+        var queue = new RecordingJobQueueService(foreground.Append(CreateJob()));
+        var settings = new MutableSettingsPersistence { BackgroundConcurrency = 1 };
+        var handler = new BlockingJobHandler();
+
+        var services = new ServiceCollection();
+        services.AddSingleton<IJobQueueService>(queue);
+        services.AddSingleton<ISettingsPersistence>(settings);
+        services.AddScoped<SettingsService>();
+        services.AddSingleton<NoOpJobHandler>(handler);
+        await using var provider = services.BuildServiceProvider();
+
+        var worker = new QueueWorker(
+            provider.GetRequiredService<IServiceScopeFactory>(),
+            new WorkerRuntimeIdentity(),
+            NullLogger<QueueWorker>.Instance,
+            TimeSpan.FromMilliseconds(25),
+            logicalProcessorCount: 8);
+
+        using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(5));
+        await worker.StartAsync(CancellationToken.None);
+        try {
+            await handler.WaitForMaxActiveAsync(5, timeout.Token);
+
+            Assert.Equal(5, handler.MaxActive);
+            Assert.Equal(4, handler.StartedOrigins.Count(origin => origin == JobGraphOrigin.Interactive));
+            Assert.Equal(1, handler.StartedOrigins.Count(origin => origin == JobGraphOrigin.Background));
+        } finally {
+            handler.ReleaseAll();
+            await worker.StopAsync(CancellationToken.None);
+        }
+    }
+
+    [Fact]
+    public async Task QueueWorkerIncreasesParallelClaimsWhenConcurrencySettingChanges() {
+        var queue = new RecordingJobQueueService(Enumerable.Range(0, 4).Select(_ => CreateJob()).ToArray());
+        var settings = new MutableSettingsPersistence { BackgroundConcurrency = 1 };
+        var handler = new BlockingJobHandler();
+
+        var services = new ServiceCollection();
+        services.AddSingleton<IJobQueueService>(queue);
+        services.AddSingleton<ISettingsPersistence>(settings);
+        services.AddScoped<SettingsService>();
+        services.AddSingleton<NoOpJobHandler>(handler);
+        await using var provider = services.BuildServiceProvider();
+
+        var worker = new QueueWorker(
+            provider.GetRequiredService<IServiceScopeFactory>(),
+            new WorkerRuntimeIdentity(),
+            NullLogger<QueueWorker>.Instance,
+            TimeSpan.FromMilliseconds(25),
+            logicalProcessorCount: 2);
+
+        using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(5));
+        await worker.StartAsync(CancellationToken.None);
+        try {
+            await handler.WaitForMaxActiveAsync(1, timeout.Token);
+            await Task.Delay(100, timeout.Token);
+            Assert.Equal(1, handler.MaxActive);
+
+            settings.BackgroundConcurrency = 3;
+
+            await handler.WaitForMaxActiveAsync(3, timeout.Token);
+            Assert.True(queue.Claims >= 3);
+        } finally {
+            handler.ReleaseAll();
+            await worker.StopAsync(CancellationToken.None);
+        }
+    }
+
+    [Fact]
+    public async Task QueueWorkerClaimsInteractiveGraphWhileBackgroundPoolIsSaturated() {
+        var queue = new RecordingJobQueueService([CreateJob()]);
+        var settings = new MutableSettingsPersistence { BackgroundConcurrency = 1 };
+        var handler = new BlockingJobHandler();
+
+        var services = new ServiceCollection();
+        services.AddSingleton<IJobQueueService>(queue);
+        services.AddSingleton<ISettingsPersistence>(settings);
+        services.AddScoped<SettingsService>();
+        services.AddSingleton<NoOpJobHandler>(handler);
+        await using var provider = services.BuildServiceProvider();
+
+        var worker = new QueueWorker(
+            provider.GetRequiredService<IServiceScopeFactory>(),
+            new WorkerRuntimeIdentity(),
+            NullLogger<QueueWorker>.Instance,
+            TimeSpan.FromMilliseconds(25));
+
+        using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(5));
+        await worker.StartAsync(CancellationToken.None);
+        try {
+            // The lone background slot fills with a long-running job.
+            await handler.WaitForMaxActiveAsync(1, timeout.Token);
+
+            queue.Add(CreateJob());
+            await Task.Delay(150, timeout.Token);
+            Assert.Equal(1, handler.MaxActive);
+
+            queue.Add(CreateJob(JobGraphOrigin.Interactive));
+            await handler.WaitForMaxActiveAsync(2, timeout.Token);
+            Assert.Equal(2, handler.MaxActive);
+        } finally {
+            handler.ReleaseAll();
+            await worker.StopAsync(CancellationToken.None);
+        }
+    }
+
+    [Fact]
+    public async Task QueueWorkerAdvancesStandardJobDuringForegroundFlood() {
+        var foreground = Enumerable.Range(0, 10)
+            .Select(_ => CreateJob(JobGraphOrigin.Interactive));
+        var standard = CreateJob();
+        var queue = new RecordingJobQueueService(foreground.Append(standard));
+        var settings = new MutableSettingsPersistence { BackgroundConcurrency = 2 };
+        var handler = new BlockingJobHandler();
+
+        var services = new ServiceCollection();
+        services.AddSingleton<IJobQueueService>(queue);
+        services.AddSingleton<ISettingsPersistence>(settings);
+        services.AddScoped<SettingsService>();
+        services.AddSingleton<NoOpJobHandler>(handler);
+        await using var provider = services.BuildServiceProvider();
+
+        var worker = new QueueWorker(
+            provider.GetRequiredService<IServiceScopeFactory>(),
+            new WorkerRuntimeIdentity(),
+            NullLogger<QueueWorker>.Instance,
+            TimeSpan.FromMilliseconds(25),
+            logicalProcessorCount: 2);
+
+        using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(5));
+        await worker.StartAsync(CancellationToken.None);
+        try {
+            await handler.WaitForMaxActiveAsync(2, timeout.Token);
+            Assert.Contains(standard.Id, handler.StartedJobIds);
+            Assert.Equal(1, handler.StartedOrigins.Count(origin => origin == JobGraphOrigin.Interactive));
+        } finally {
+            handler.ReleaseAll();
+            await worker.StopAsync(CancellationToken.None);
+        }
+    }
+
+    [Fact]
+    public async Task QueueWorkerStopsRunningHandlerWhenJobRunIsCancelled() {
+        var job = CreateJob();
+        var queue = new RecordingJobQueueService([job]);
+        var settings = new MutableSettingsPersistence { BackgroundConcurrency = 1 };
+        var handler = new CancellableJobHandler();
+
+        var services = new ServiceCollection();
+        services.AddSingleton<IJobQueueService>(queue);
+        services.AddSingleton<ISettingsPersistence>(settings);
+        services.AddScoped<SettingsService>();
+        services.AddSingleton<NoOpJobHandler>(handler);
+        await using var provider = services.BuildServiceProvider();
+
+        var worker = new QueueWorker(
+            provider.GetRequiredService<IServiceScopeFactory>(),
+            new WorkerRuntimeIdentity(),
+            NullLogger<QueueWorker>.Instance,
+            TimeSpan.FromMilliseconds(25));
+
+        using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(5));
+        await worker.StartAsync(CancellationToken.None);
+        try {
+            await handler.WaitForStartedAsync(timeout.Token);
+            queue.Cancel(job.Id);
+
+            await handler.WaitForCancelledAsync(timeout.Token);
+
+            Assert.DoesNotContain(job.Id, queue.CompletedJobIds);
+        } finally {
+            await worker.StopAsync(CancellationToken.None);
+        }
+    }
+
+    [Fact]
+    public async Task QueueWorkerDoesNotClaimJobsWhileDatabaseRestoreIsPending() {
+        var queue = new RecordingJobQueueService([CreateJob()]);
+        var settings = new MutableSettingsPersistence { BackgroundConcurrency = 1 };
+        var handler = new BlockingJobHandler();
+        var backups = new MutableBackupService { PendingRestore = true };
+
+        var services = new ServiceCollection();
+        services.AddSingleton<IJobQueueService>(queue);
+        services.AddSingleton<ISettingsPersistence>(settings);
+        services.AddScoped<SettingsService>();
+        services.AddSingleton<NoOpJobHandler>(handler);
+        services.AddSingleton<IDatabaseBackupService>(backups);
+        await using var provider = services.BuildServiceProvider();
+
+        var worker = new QueueWorker(
+            provider.GetRequiredService<IServiceScopeFactory>(),
+            new WorkerRuntimeIdentity(),
+            NullLogger<QueueWorker>.Instance,
+            TimeSpan.FromMilliseconds(25),
+            TimeSpan.FromMilliseconds(25));
+
+        using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(5));
+        await worker.StartAsync(CancellationToken.None);
+        try {
+            await Task.Delay(150, timeout.Token);
+            Assert.Equal(0, queue.Claims);
+
+            backups.PendingRestore = false;
+            await handler.WaitForMaxActiveAsync(1, timeout.Token);
+            Assert.True(queue.Claims > 0);
+        } finally {
+            handler.ReleaseAll();
+            await worker.StopAsync(CancellationToken.None);
+        }
+    }
+
+    [Fact]
+    public async Task JobContextDoesNotEnqueueDownstreamWorkAfterCancellation() {
+        var job = CreateJob();
+        var queue = new RecordingJobQueueService([]);
+        var context = new JobContext(job, queue);
+        queue.Cancel(job.Id);
+
+        await Assert.ThrowsAsync<OperationCanceledException>(() =>
+            context.EnqueueAsync(new EnqueueJobRequest(JobType.Noop), CancellationToken.None));
+
+        Assert.Equal(0, queue.EnqueuedCount);
+    }
+
+    [Fact]
+    public async Task QueueWorkerFinalizesFailedJobWithFreshQueueScope() {
+        var state = new ScopedQueueState(CreateJob());
+        var settings = new MutableSettingsPersistence { BackgroundConcurrency = 1 };
+
+        var services = new ServiceCollection();
+        services.AddSingleton(state);
+        services.AddSingleton<ISettingsPersistence>(settings);
+        services.AddScoped<SettingsService>();
+        services.AddScoped<ScopedRecordingJobQueueService>();
+        services.AddScoped<IJobQueueService>(provider => provider.GetRequiredService<ScopedRecordingJobQueueService>());
+        services.AddScoped<NoOpJobHandler, ScopedThrowingJobHandler>();
+        await using var provider = services.BuildServiceProvider();
+
+        var worker = new QueueWorker(
+            provider.GetRequiredService<IServiceScopeFactory>(),
+            new WorkerRuntimeIdentity(),
+            NullLogger<QueueWorker>.Instance,
+            TimeSpan.FromMilliseconds(25));
+
+        using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(5));
+        await worker.StartAsync(CancellationToken.None);
+        try {
+            await state.WaitForFailureFinalizedAsync(timeout.Token);
+
+            Assert.NotNull(state.HandlerScopeId);
+            Assert.NotNull(state.FailScopeId);
+            Assert.NotEqual(state.HandlerScopeId, state.FailScopeId);
+        } finally {
+            await worker.StopAsync(CancellationToken.None);
+        }
+    }
+
+    private static JobRunSnapshot CreateJob(JobGraphOrigin origin = JobGraphOrigin.Background) =>
+        new(
+            Guid.NewGuid(),
+            JobType.Noop,
+            JobRunStatus.Running,
+            0,
+            null,
+            "{}",
+            null,
+            null,
+            "Worker test",
+            DateTimeOffset.UtcNow,
+            DateTimeOffset.UtcNow,
+            null,
+            GraphId: Guid.NewGuid(),
+            GraphOrigin: origin);
+
+    private sealed class BlockingJobHandler : NoOpJobHandler {
+        private readonly TaskCompletionSource _release = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        private readonly ConcurrentDictionary<Guid, JobGraphOrigin> _started = new();
+        private int _active;
+        private int _maxActive;
+
+        public int MaxActive => Volatile.Read(ref _maxActive);
+
+        public IReadOnlyCollection<Guid> StartedJobIds => _started.Keys.ToArray();
+
+        public IReadOnlyCollection<JobGraphOrigin> StartedOrigins => _started.Values.ToArray();
+
+        public override async Task HandleAsync(JobContext context, CancellationToken cancellationToken) {
+            _started[context.Job.Id] = context.Job.GraphOrigin ?? JobGraphOrigin.Background;
+            var active = Interlocked.Increment(ref _active);
+            var observedMax = _maxActive;
+            while (active > observedMax) {
+                var original = Interlocked.CompareExchange(ref _maxActive, active, observedMax);
+                if (original == observedMax) break;
+                observedMax = original;
+            }
+
+            try {
+                await _release.Task.WaitAsync(cancellationToken);
+            } finally {
+                Interlocked.Decrement(ref _active);
+            }
+        }
+
+        public void ReleaseAll() => _release.TrySetResult();
+
+        public async Task WaitForMaxActiveAsync(int expected, CancellationToken cancellationToken) {
+            while (MaxActive < expected) {
+                await Task.Delay(10, cancellationToken);
+            }
+        }
+    }
+
+    private sealed class CancellableJobHandler : NoOpJobHandler {
+        private readonly TaskCompletionSource _started = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        private readonly TaskCompletionSource _cancelled = new(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        public override async Task HandleAsync(JobContext context, CancellationToken cancellationToken) {
+            _started.TrySetResult();
+            try {
+                await Task.Delay(Timeout.InfiniteTimeSpan, cancellationToken);
+            } catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested) {
+                _cancelled.TrySetResult();
+                throw;
+            }
+        }
+
+        public Task WaitForStartedAsync(CancellationToken cancellationToken) =>
+            _started.Task.WaitAsync(cancellationToken);
+
+        public Task WaitForCancelledAsync(CancellationToken cancellationToken) =>
+            _cancelled.Task.WaitAsync(cancellationToken);
+    }
+
+    private sealed class MutableBackupService : IDatabaseBackupService {
+        public bool PendingRestore { get; set; }
+
+        public Task<DatabaseBackupListResponse> ListAsync(CancellationToken cancellationToken) =>
+            throw new NotSupportedException();
+
+        public Task<DatabaseBackupDto> CreateManualBackupAsync(CancellationToken cancellationToken) =>
+            throw new NotSupportedException();
+
+        public Task<DatabaseBackupDto> CreateAutomaticBackupAsync(CancellationToken cancellationToken) =>
+            throw new NotSupportedException();
+
+        public Task<bool> IsAutomaticBackupDueAsync(CancellationToken cancellationToken) =>
+            throw new NotSupportedException();
+
+        public Task<int> PruneExpiredAutomaticBackupsAsync(CancellationToken cancellationToken) =>
+            throw new NotSupportedException();
+
+        public Task<DatabaseRestoreScheduledResponse> ScheduleRestoreAsync(
+            Guid backupId,
+            string confirmationText,
+            CancellationToken cancellationToken) =>
+            throw new NotSupportedException();
+
+        public Task<bool> RunPendingRestoreAsync(CancellationToken cancellationToken) =>
+            throw new NotSupportedException();
+
+        public Task<DatabaseRestoreStatusResponse> GetRestoreStatusAsync(CancellationToken cancellationToken) =>
+            Task.FromResult(new DatabaseRestoreStatusResponse(PendingRestore, RestoreFailed: false, Error: null));
+
+        public Task<bool> HasPendingRestoreAsync(CancellationToken cancellationToken) =>
+            Task.FromResult(PendingRestore);
+    }
+
+    private sealed class MutableSettingsPersistence : ISettingsPersistence {
+        public int BackgroundConcurrency { get; set; } = 1;
+
+        public Task<IReadOnlyDictionary<string, string>> LoadSettingOverridesAsync(CancellationToken cancellationToken) {
+            IReadOnlyDictionary<string, string> overrides = new Dictionary<string, string> {
+                [AppSettings.Jobs.BackgroundConcurrency.Key] = JsonSerializer.Serialize(BackgroundConcurrency),
+            };
+
+            return Task.FromResult(overrides);
+        }
+
+        public Task SaveSettingOverrideAsync(string key, string valueJson, CancellationToken cancellationToken) =>
+            Task.CompletedTask;
+
+        public Task SaveSettingOverridesAsync(IReadOnlyDictionary<string, string> values, CancellationToken cancellationToken) =>
+            Task.CompletedTask;
+
+        public Task ReplaceSettingOverridesAsync(
+            IReadOnlyDictionary<string, string> upserts,
+            IReadOnlyCollection<string> deletes,
+            CancellationToken cancellationToken) =>
+            Task.CompletedTask;
+
+        public Task DeleteSettingOverrideAsync(string key, CancellationToken cancellationToken) =>
+            Task.CompletedTask;
+
+        public Task<IReadOnlyList<LibraryRoot>> ListLibraryRootsAsync(CancellationToken cancellationToken) =>
+            Task.FromResult<IReadOnlyList<LibraryRoot>>([]);
+
+        public Task<LibraryRoot?> GetLibraryRootAsync(Guid id, CancellationToken cancellationToken) =>
+            Task.FromResult<LibraryRoot?>(null);
+
+        public Task<LibraryRoot> AddLibraryRootAsync(LibraryRoot state, CancellationToken cancellationToken) =>
+            Task.FromResult(state);
+
+        public Task<LibraryRoot> SaveLibraryRootAsync(LibraryRoot state, CancellationToken cancellationToken) =>
+            Task.FromResult(state);
+
+        public Task<bool> DeleteLibraryRootAsync(Guid id, CancellationToken cancellationToken) =>
+            Task.FromResult(false);
+    }
+
+    private sealed class ScopedQueueState(JobRunSnapshot initialJob) {
+        private readonly object _lock = new();
+        private readonly Queue<JobRunSnapshot> _jobs = new([initialJob]);
+        private readonly TaskCompletionSource _failureFinalized = new(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        public Guid? HandlerScopeId { get; private set; }
+        public Guid? FailScopeId { get; private set; }
+
+        public JobRunSnapshot? Claim() {
+            lock (_lock) {
+                return _jobs.Count == 0 ? null : _jobs.Dequeue();
+            }
+        }
+
+        public void RecordHandlerScope(Guid scopeId) {
+            lock (_lock) {
+                HandlerScopeId = scopeId;
+            }
+        }
+
+        public void RecordFailScope(Guid scopeId) {
+            lock (_lock) {
+                FailScopeId = scopeId;
+            }
+
+            _failureFinalized.TrySetResult();
+        }
+
+        public Task WaitForFailureFinalizedAsync(CancellationToken cancellationToken) =>
+            _failureFinalized.Task.WaitAsync(cancellationToken);
+    }
+
+    private sealed class ScopedThrowingJobHandler(
+        ScopedQueueState state,
+        ScopedRecordingJobQueueService queue) : NoOpJobHandler {
+
+        public override Task HandleAsync(JobContext context, CancellationToken cancellationToken) {
+            state.RecordHandlerScope(queue.ScopeId);
+            throw new InvalidOperationException("handler left its scoped persistence context unusable");
+        }
+    }
+
+    private sealed class ScopedRecordingJobQueueService(ScopedQueueState state) : IJobQueueService {
+        public Guid ScopeId { get; } = Guid.NewGuid();
+
+        public Task<JobRunSnapshot?> ClaimNextGraphNodeAsync(
+            string workerId,
+            JobGraphOrigin origin,
+            CancellationToken cancellationToken,
+            IReadOnlyCollection<JobResourceClass>? allowedResourceClasses = null) =>
+            Task.FromResult(state.Claim());
+
+        public Task FailAsync(Guid id, string message, TimeSpan retryDelay, CancellationToken cancellationToken) {
+            state.RecordFailScope(ScopeId);
+            return Task.CompletedTask;
+        }
+
+        public Task<IReadOnlyList<JobRunSnapshot>> ListAsync(bool hideNsfw, CancellationToken cancellationToken) =>
+            Task.FromResult<IReadOnlyList<JobRunSnapshot>>([]);
+
+        public Task<JobRunSnapshot> EnqueueAsync(JobType type, CancellationToken cancellationToken) =>
+            EnqueueAsync(new EnqueueJobRequest(type), cancellationToken);
+
+        public Task<JobRunSnapshot> EnqueueAsync(EnqueueJobRequest request, CancellationToken cancellationToken) =>
+            Task.FromResult(CreateJob());
+
+        public Task<bool> HasPendingAsync(JobType type, string? targetEntityId, CancellationToken cancellationToken) =>
+            Task.FromResult(false);
+
+        public Task<int> EnqueueBatchAsync(IReadOnlyList<EnqueueJobRequest> requests, CancellationToken cancellationToken) =>
+            Task.FromResult(requests.Count);
+
+        public Task<int> CancelAsync(JobType? type, CancellationToken cancellationToken) =>
+            Task.FromResult(0);
+
+        public Task<bool> CancelRunAsync(Guid id, CancellationToken cancellationToken) =>
+            Task.FromResult(false);
+
+        public Task<bool> IsRunCancelledAsync(Guid id, CancellationToken cancellationToken) =>
+            Task.FromResult(false);
+
+        public Task<int> ClearFailuresAsync(JobType? type, CancellationToken cancellationToken) =>
+            Task.FromResult(0);
+
+        public Task UpdateProgressAsync(Guid id, int progress, string? message, CancellationToken cancellationToken) =>
+            Task.CompletedTask;
+
+        public Task CompleteAsync(Guid id, string? message, CancellationToken cancellationToken) =>
+            Task.CompletedTask;
+
+        public Task DeferAsync(Guid id, string message, TimeSpan retryDelay, CancellationToken cancellationToken) =>
+            Task.CompletedTask;
+
+        public Task<int> RecoverStaleRunningAsync(string currentWorkerId, TimeSpan staleAfter, CancellationToken cancellationToken) =>
+            Task.FromResult(0);
+
+        public Task<IReadOnlyList<JobQueueCount>> GetQueueCountsAsync(bool hideNsfw, CancellationToken cancellationToken) =>
+            Task.FromResult<IReadOnlyList<JobQueueCount>>([]);
+
+        public Task<int> PruneHistoryAsync(TimeSpan retention, CancellationToken cancellationToken) =>
+            Task.FromResult(0);
+    }
+
+    private sealed class RecordingJobQueueService : IJobQueueService {
+        private readonly object _lock = new();
+        private readonly List<JobRunSnapshot> _jobs;
+        private readonly HashSet<Guid> _cancelled = [];
+        private readonly List<Guid> _completedJobIds = [];
+        private int _claims;
+        private int _enqueuedCount;
+
+        public RecordingJobQueueService(IEnumerable<JobRunSnapshot> jobs) {
+            _jobs = jobs.ToList();
+        }
+
+        public int Claims => Volatile.Read(ref _claims);
+
+        public int EnqueuedCount => Volatile.Read(ref _enqueuedCount);
+
+        public IReadOnlyList<Guid> CompletedJobIds {
+            get {
+                lock (_lock) {
+                    return _completedJobIds.ToArray();
+                }
+            }
+        }
+
+        public void Add(JobRunSnapshot job) {
+            lock (_lock) {
+                _jobs.Add(job);
+            }
+        }
+
+        public void Cancel(Guid jobId) {
+            lock (_lock) {
+                _cancelled.Add(jobId);
+            }
+        }
+
+        public Task<JobRunSnapshot?> ClaimNextGraphNodeAsync(
+            string workerId,
+            JobGraphOrigin origin,
+            CancellationToken cancellationToken,
+            IReadOnlyCollection<JobResourceClass>? allowedResourceClasses = null) {
+            Interlocked.Increment(ref _claims);
+            lock (_lock) {
+                var bestIndex = _jobs.FindIndex(job =>
+                    (job.GraphOrigin ?? JobGraphOrigin.Background) == origin &&
+                    (allowedResourceClasses is null || allowedResourceClasses.Contains(job.ResourceClass)));
+
+                if (bestIndex < 0) {
+                    return Task.FromResult<JobRunSnapshot?>(null);
+                }
+
+                var job = _jobs[bestIndex];
+                _jobs.RemoveAt(bestIndex);
+                return Task.FromResult<JobRunSnapshot?>(job);
+            }
+        }
+
+        public Task CompleteAsync(Guid id, string? message, CancellationToken cancellationToken) {
+            lock (_lock) {
+                _completedJobIds.Add(id);
+            }
+
+            return Task.CompletedTask;
+        }
+
+        public Task<int> RecoverStaleRunningAsync(string currentWorkerId, TimeSpan staleAfter, CancellationToken cancellationToken) =>
+            Task.FromResult(0);
+
+        public Task<IReadOnlyList<JobRunSnapshot>> ListAsync(bool hideNsfw, CancellationToken cancellationToken) =>
+            Task.FromResult<IReadOnlyList<JobRunSnapshot>>([]);
+
+        public Task<JobRunSnapshot> EnqueueAsync(JobType type, CancellationToken cancellationToken) =>
+            EnqueueAsync(new EnqueueJobRequest(type), cancellationToken);
+
+        public Task<JobRunSnapshot> EnqueueAsync(EnqueueJobRequest request, CancellationToken cancellationToken) {
+            Interlocked.Increment(ref _enqueuedCount);
+            return Task.FromResult(CreateJob());
+        }
+
+        public Task<bool> HasPendingAsync(JobType type, string? targetEntityId, CancellationToken cancellationToken) =>
+            Task.FromResult(false);
+
+        public Task<int> EnqueueBatchAsync(IReadOnlyList<EnqueueJobRequest> requests, CancellationToken cancellationToken) {
+            Interlocked.Add(ref _enqueuedCount, requests.Count);
+            return Task.FromResult(requests.Count);
+        }
+
+        public Task<int> CancelAsync(JobType? type, CancellationToken cancellationToken) =>
+            Task.FromResult(0);
+
+        public Task<bool> CancelRunAsync(Guid id, CancellationToken cancellationToken) {
+            Cancel(id);
+            return Task.FromResult(true);
+        }
+
+        public Task<bool> IsRunCancelledAsync(Guid id, CancellationToken cancellationToken) {
+            lock (_lock) {
+                return Task.FromResult(_cancelled.Contains(id));
+            }
+        }
+
+        public Task<int> ClearFailuresAsync(JobType? type, CancellationToken cancellationToken) =>
+            Task.FromResult(0);
+
+        public Task UpdateProgressAsync(Guid id, int progress, string? message, CancellationToken cancellationToken) =>
+            Task.CompletedTask;
+
+        public Task FailAsync(Guid id, string message, TimeSpan retryDelay, CancellationToken cancellationToken) =>
+            Task.CompletedTask;
+
+        public Task<IReadOnlyList<JobQueueCount>> GetQueueCountsAsync(bool hideNsfw, CancellationToken cancellationToken) =>
+            Task.FromResult<IReadOnlyList<JobQueueCount>>([]);
+
+        public Task<int> PruneHistoryAsync(TimeSpan retention, CancellationToken cancellationToken) =>
+            Task.FromResult(0);
+    }
+}

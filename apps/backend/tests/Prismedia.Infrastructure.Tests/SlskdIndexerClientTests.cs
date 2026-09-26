@@ -1,0 +1,187 @@
+using System.Net;
+using System.Text;
+using System.Text.Json;
+using Prismedia.Application.Acquisition;
+using Prismedia.Domain.Entities;
+using Prismedia.Infrastructure.Acquisition;
+
+namespace Prismedia.Infrastructure.Tests;
+
+public sealed class SlskdIndexerClientTests {
+    private static IndexerConnection Connection() =>
+        new(Guid.NewGuid(), IndexerKind.Slskd, "http://slskd:5030", "secret", [3000]);
+
+    [Fact]
+    public async Task AlbumSearchGroupsAudioFilesByPeerDirectory() {
+        var handler = new Handler(request => request.RequestUri!.AbsolutePath.EndsWith("/responses", StringComparison.Ordinal)
+            ? """
+              [{"username":"peer","hasFreeUploadSlot":true,"queueLength":0,"uploadSpeed":9000,"files":[
+                {"filename":"Music\\Artist\\Album\\01 First.flac","size":100,"bitDepth":16,"sampleRate":44100},
+                {"filename":"Music\\Artist\\Album\\02 Second.flac","size":200,"bitDepth":16,"sampleRate":44100},
+                {"filename":"Music\\Artist\\Album\\cover.jpg","size":20}
+              ]}]
+              """
+            : """{"id":"11111111-1111-1111-1111-111111111111","state":"Completed"}""");
+        var client = new SlskdIndexerClient(new HttpClient(handler));
+
+        var releases = await client.SearchAsync(
+            Connection(),
+            new IndexerQuery("Artist Album", [3000], EntityKind.AudioLibrary),
+            CancellationToken.None);
+
+        var release = Assert.Single(releases);
+        Assert.Equal(DownloadProtocol.Soulseek, release.Protocol);
+        Assert.Equal(300, release.SizeBytes);
+        Assert.Equal(["Music\\Artist\\Album\\01 First.flac", "Music\\Artist\\Album\\02 Second.flac"], release.KnownFileNames);
+        Assert.Equal(release.KnownFileNames, new SoulseekReleaseInventory().ReadFileNames(release.DownloadUrl));
+        Assert.Contains("Artist / Album", release.Title, StringComparison.Ordinal);
+        Assert.StartsWith(SoulseekProtocol.LocatorPrefix, release.DownloadUrl, StringComparison.Ordinal);
+        Assert.All(handler.Requests, request => Assert.Equal("secret", request.Headers.GetValues(SoulseekProtocol.ApiKeyHeader).Single()));
+    }
+
+    [Fact]
+    public async Task TrackSearchPresentsEachMatchingAudioFileIndividually() {
+        var handler = new Handler(request => request.RequestUri!.AbsolutePath.EndsWith("/responses", StringComparison.Ordinal)
+            ? """[{"username":"peer","files":[{"filename":"Music\\Artist\\Album\\03 Wanted.flac","size":300},{"filename":"Music\\Artist\\Album\\04 Other.flac","size":400}]}]"""
+            : """{"id":"22222222-2222-2222-2222-222222222222","state":"Completed"}""");
+        var client = new SlskdIndexerClient(new HttpClient(handler));
+
+        var releases = await client.SearchAsync(
+            Connection(),
+            new IndexerQuery("Artist Album Wanted", [3000], EntityKind.AudioTrack),
+            CancellationToken.None);
+
+        var release = Assert.Single(releases);
+        Assert.Equal(300, release.SizeBytes);
+        Assert.Equal(["Music\\Artist\\Album\\03 Wanted.flac"], release.KnownFileNames);
+        Assert.Equal(release.KnownFileNames, new SoulseekReleaseInventory().ReadFileNames(release.DownloadUrl));
+        Assert.Contains("Artist / Album / 03 Wanted.flac", release.Title, StringComparison.OrdinalIgnoreCase);
+        Assert.False(release.Title.StartsWith("Artist Album Wanted", StringComparison.OrdinalIgnoreCase));
+    }
+
+    [Fact]
+    public async Task SearchWaitsForSlskdCompletionBeforeReadingResponses() {
+        var handler = new Handler(request => request.RequestUri!.AbsolutePath.EndsWith("/responses", StringComparison.Ordinal)
+            ? """[{"username":"peer","files":[{"filename":"Music\\Artist\\Album\\01 First.flac","size":100}]}]"""
+            : request.Method == HttpMethod.Post
+                ? """{"id":"33333333-3333-3333-3333-333333333333","state":"InProgress"}"""
+                : """{"id":"33333333-3333-3333-3333-333333333333","state":"Completed, TimedOut"}"""
+        );
+        var client = new SlskdIndexerClient(new HttpClient(handler));
+
+        var releases = await client.SearchAsync(
+            Connection(),
+            new IndexerQuery("Artist Album", [3000], EntityKind.AudioLibrary),
+            CancellationToken.None);
+
+        Assert.Single(releases);
+        Assert.Collection(
+            handler.Requests,
+            request => Assert.Equal(HttpMethod.Post, request.Method),
+            request => {
+                Assert.Equal(HttpMethod.Get, request.Method);
+                Assert.StartsWith("/api/v0/searches/", request.RequestUri!.AbsolutePath, StringComparison.Ordinal);
+                Assert.DoesNotContain("/responses", request.RequestUri.AbsolutePath, StringComparison.Ordinal);
+            },
+            request => Assert.EndsWith("/responses", request.RequestUri!.AbsolutePath, StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public async Task SearchAllowsSoulseekPeersTimeToRespond() {
+        var handler = new Handler(request => request.RequestUri!.AbsolutePath.EndsWith("/responses", StringComparison.Ordinal)
+            ? "[]"
+            : """{"state":"Completed"}""");
+        var client = new SlskdIndexerClient(new HttpClient(handler));
+
+        await client.SearchAsync(
+            Connection(),
+            new IndexerQuery("Artist Album", [3000], EntityKind.AudioLibrary),
+            CancellationToken.None);
+
+        using var payload = JsonDocument.Parse(Assert.Single(handler.RequestBodies));
+        Assert.Equal(10_000, payload.RootElement.GetProperty("searchTimeout").GetInt32());
+    }
+
+    [Fact]
+    public async Task ConcurrentSearchesShareOneSlskdOperationSlot() {
+        var handler = new BlockingSearchHandler();
+        var gate = new SlskdSearchConcurrencyGate();
+        var client = new SlskdIndexerClient(new HttpClient(handler), gate);
+
+        var first = client.SearchAsync(Connection(), new IndexerQuery("Artist First", [3000], EntityKind.AudioLibrary), CancellationToken.None);
+        await handler.FirstSearchStarted;
+        var second = client.SearchAsync(Connection(), new IndexerQuery("Artist Second", [3000], EntityKind.AudioLibrary), CancellationToken.None);
+        await Task.Delay(50);
+
+        Assert.Equal(1, handler.StartedSearches);
+        handler.ReleaseFirstSearch();
+        await Task.WhenAll(first, second);
+        Assert.Equal(2, handler.StartedSearches);
+    }
+
+    [Fact]
+    public async Task SoulseekSearchIsAudioOnly() {
+        var handler = new Handler(_ => throw new InvalidOperationException("HTTP should not be called"));
+        var client = new SlskdIndexerClient(new HttpClient(handler));
+
+        var releases = await client.SearchAsync(Connection(), new IndexerQuery("Movie", [], EntityKind.Movie), CancellationToken.None);
+
+        Assert.Empty(releases);
+        Assert.Empty(handler.Requests);
+    }
+
+    [Fact]
+    public async Task ConnectionTestRequiresALoggedInSoulseekSession() {
+        var handler = new Handler(_ => """{"state":"Disconnecting","isConnected":false,"isLoggedIn":false}""");
+        var client = new SlskdIndexerClient(new HttpClient(handler));
+
+        var result = await client.TestAsync(Connection(), CancellationToken.None);
+
+        Assert.False(result.Connected);
+        Assert.Contains("Disconnecting", result.Message, StringComparison.OrdinalIgnoreCase);
+    }
+
+    private sealed class Handler(Func<HttpRequestMessage, string> response) : HttpMessageHandler {
+        public List<HttpRequestMessage> Requests { get; } = [];
+        public List<string> RequestBodies { get; } = [];
+
+        protected override async Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken) {
+            Requests.Add(request);
+            if (request.Content is not null) {
+                RequestBodies.Add(await request.Content.ReadAsStringAsync(cancellationToken));
+            }
+
+            return new HttpResponseMessage(HttpStatusCode.OK) {
+                Content = new StringContent(response(request), Encoding.UTF8, "application/json")
+            };
+        }
+    }
+
+    private sealed class BlockingSearchHandler : HttpMessageHandler {
+        private readonly TaskCompletionSource _firstSearchStarted = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        private readonly TaskCompletionSource _releaseFirstSearch = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        private int _startedSearches;
+
+        public Task FirstSearchStarted => _firstSearchStarted.Task;
+        public int StartedSearches => Volatile.Read(ref _startedSearches);
+        public void ReleaseFirstSearch() => _releaseFirstSearch.TrySetResult();
+
+        protected override async Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken) {
+            string response;
+            if (request.Method == HttpMethod.Post) {
+                var started = Interlocked.Increment(ref _startedSearches);
+                if (started == 1) {
+                    _firstSearchStarted.TrySetResult();
+                    await _releaseFirstSearch.Task.WaitAsync(cancellationToken);
+                }
+                response = """{"state":"Completed"}""";
+            } else {
+                response = "[]";
+            }
+
+            return new HttpResponseMessage(HttpStatusCode.OK) {
+                Content = new StringContent(response, Encoding.UTF8, "application/json")
+            };
+        }
+    }
+}

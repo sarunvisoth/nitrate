@@ -1,0 +1,276 @@
+using Microsoft.Extensions.Logging;
+using Prismedia.Application.Acquisition;
+using Prismedia.Application.Files;
+using Prismedia.Application.Jobs.Handlers;
+using Prismedia.Application.Jobs.Ports;
+using Prismedia.Domain.Entities;
+
+namespace Prismedia.Application.Jobs.Handlers.Maintenance;
+
+/// <summary>
+/// Derives the processing graph for one exact entity tree from its current capabilities, source state, and
+/// server policy. The planner never enumerates a library root and is shared by imports and manual refreshes.
+/// </summary>
+public sealed class EntityProcessingGraphPlanner(
+    ILogger<EntityProcessingGraphPlanner> logger,
+    IEntityRefreshTreePersistence refreshTree,
+    ILibraryScanRootPersistence scanRoots,
+    IDownstreamNeedsPersistence downstreamNeeds,
+    IMaintenancePersistence maintenance,
+    ISubtitleSidecarDiscovery subtitleSidecars,
+    IVideoScanPersistence videos) {
+    private static readonly HashSet<string> SubtitleProcessingKindCodes = EntityKindRegistry.All
+        .Where(definition => definition.Processing.SubtitleExtractionJobType is not null)
+        .Select(definition => definition.Code)
+        .ToHashSet(StringComparer.OrdinalIgnoreCase);
+
+    /// <summary>
+    /// Appends required readiness work first, an optional acquisition finalizer behind every required node,
+    /// and best-effort asset/enrichment branches afterward.
+    /// </summary>
+    public async Task PlanAsync(
+        JobContext context,
+        AcquisitionFinalizeJobPayload? finalization,
+        CancellationToken cancellationToken) {
+        if (!Guid.TryParse(context.Job.TargetEntityId, out var entityId)) {
+            logger.LogWarning("Entity processing: missing or invalid TargetEntityId");
+            return;
+        }
+
+        var tree = await refreshTree.GetEntityTreeAsync(entityId, cancellationToken);
+        if (tree.Count == 0) {
+            throw new InvalidOperationException($"Entity '{entityId}' was not found for reconciliation.");
+        }
+
+        var processingTree = ScopeImportedEntities(tree, finalization);
+        await context.ReportProgressAsync(
+            10,
+            processingTree.Count == tree.Count
+                ? $"Found {tree.Count} entities to reconcile"
+                : $"Found {processingTree.Count} imported entities to reconcile in a {tree.Count}-entity tree",
+            cancellationToken);
+        await InvalidateChangedSubtitleSidecarsAsync(processingTree, cancellationToken);
+
+        var settings = await scanRoots.GetSettingsAsync(cancellationToken);
+        foreach (var entity in processingTree) {
+            if (EntityKindRegistry.TryGet(entity.KindCode, out var kind)) {
+                await maintenance.ClearGeneratedPreviewAssetsAsync(kind, entity.Id, cancellationToken);
+            }
+        }
+
+        var needs = await downstreamNeeds.CheckDownstreamNeedsBatchAsync(
+            processingTree.Select(entity => entity.Id).ToArray(),
+            cancellationToken);
+        var requiredReadiness = new List<Guid>();
+        var optional = new List<GraphJobNodeRequest>();
+
+        foreach (var entity in processingTree) {
+            if (!needs.TryGetValue(entity.Id, out var entityNeeds)
+                || !EntityKindRegistry.TryGet(entity.KindCode, out var kind)) {
+                continue;
+            }
+
+            var processing = EntityKindRegistry.Describe(kind).Processing;
+            // Atomic replacement changes bytes without changing the Source id, path, or necessarily
+            // size. Cached hashes and dimensions cannot establish readiness for the new file. The graph
+            // reuses completed nodes on retry; do not erase their newly generated persistence results.
+            var upgradedVideo = finalization?.UpgradeParentAcquisitionId is not null && entity.Id == entityId
+                && !string.IsNullOrWhiteSpace(entity.SourcePath) && processing.ProbeJobType == JobType.ProbeVideo;
+            var currentNeeds = upgradedVideo ? entityNeeds with { MissingOshash = true, MissingMd5 = true } : entityNeeds;
+            var plan = processing.Plan(EntityProcessingInputAdapter.From(
+                settings, currentNeeds, !string.IsNullOrWhiteSpace(entity.SourcePath)));
+            if (upgradedVideo) {
+                plan = plan with { ProbeJobType = JobType.ProbeVideo };
+            }
+            var baseDependency = context.Job.Id;
+            if (plan.ProbeJobType is { } probeType) {
+                var probe = await AppendAsync(
+                    context,
+                    Request(probeType, entity),
+                    [context.Job.Id],
+                    JobNodeImportance.Required,
+                    cancellationToken);
+                baseDependency = probe.Id;
+                requiredReadiness.Add(probe.Id);
+            }
+
+            foreach (var request in BestEffortRequests(plan, entity)) {
+                optional.Add(Node(
+                    request,
+                    [baseDependency],
+                    JobDefinitionRegistry.Importance(request.Type)));
+            }
+        }
+
+        Guid? finalizationNodeId = null;
+        if (finalization is not null) {
+            var dependencies = requiredReadiness.Count > 0
+                ? requiredReadiness
+                : [context.Job.Id];
+            var finalizer = await context.AppendNodeAsync(
+                Node(
+                    new EnqueueJobRequest(
+                        JobType.AcquisitionFinalize,
+                        PayloadJson: finalization.ToJson(),
+                        TargetEntityId: finalization.AcquisitionId.ToString(),
+                        TargetLabel: "Finalize acquisition",
+                        Importance: JobNodeImportance.Required,
+                        ResourceClass: JobResourceClass.Light),
+                    dependencies,
+                    JobNodeImportance.Required),
+                cancellationToken);
+            finalizationNodeId = finalizer.Id;
+        }
+
+        foreach (var node in optional) {
+            await context.AppendNodeAsync(node, cancellationToken);
+        }
+
+        var touchedAncestors = (finalization?.TouchedAncestorIds ?? [])
+            .Where(id => processingTree.All(entity => entity.Id != id))
+            .Distinct()
+            .ToArray();
+        foreach (var ancestorId in touchedAncestors) {
+            await context.AppendNodeAsync(
+                Node(
+                    new EnqueueJobRequest(
+                        JobType.GenerateGridThumbnail,
+                        TargetEntityKind: JobTargetKinds.Entity,
+                        TargetEntityId: ancestorId.ToString(),
+                        TargetLabel: "Refresh ancestor projection"),
+                    [finalizationNodeId ?? context.Job.Id],
+                    JobNodeImportance.BestEffort),
+                cancellationToken);
+        }
+
+        if (context.Job.Type == JobType.ReconcileEntity
+            && settings.AutoIdentifyEnabled
+            && EntityKindRegistry.TryDescribe(tree[0].KindCode, out var rootDefinition)
+            && rootDefinition.Identification.AutoIdentifySelector is not null) {
+            var payload = rootDefinition.Identification.AllowsDirectReconcileChildTarget
+                ? new AutoIdentifyJobPayload(AllowChildTarget: true, IgnoreOrganizedGate: true).ToJson()
+                : null;
+            await context.AppendNodeAsync(
+                Node(
+                    EnqueueJobRequest.ForEntity(
+                        JobType.AutoIdentify,
+                        rootDefinition.Kind,
+                        tree[0].Id.ToString(),
+                        tree[0].Title,
+                        payloadJson: payload),
+                    [finalizationNodeId ?? context.Job.Id],
+                    JobNodeImportance.BestEffort),
+                cancellationToken);
+        }
+
+        logger.LogInformation(
+            "Entity processing: planned {Required} required and {BestEffort} best-effort nodes for {Label}",
+            requiredReadiness.Count,
+            optional.Count,
+            tree[0].Title);
+        await context.ReportProgressAsync(
+            100,
+            $"Planned {requiredReadiness.Count + optional.Count + touchedAncestors.Length + (finalization is null ? 0 : 1)} jobs",
+            cancellationToken);
+    }
+
+    private static IReadOnlyList<EntityRefreshTarget> ScopeImportedEntities(
+        IReadOnlyList<EntityRefreshTarget> tree,
+        AcquisitionFinalizeJobPayload? finalization) {
+        if (finalization?.ImportedEntityIds is not { Count: > 0 } importedEntityIds) {
+            return tree;
+        }
+
+        var imported = importedEntityIds.ToHashSet();
+        var scoped = tree.Where(entity => imported.Contains(entity.Id)).ToArray();
+        if (scoped.Length != imported.Count) {
+            var missing = imported.Count - scoped.Length;
+            throw new InvalidOperationException(
+                $"Entity reconciliation tree is missing {missing} imported entit{(missing == 1 ? "y" : "ies")}.");
+        }
+
+        return scoped;
+    }
+
+    private static IEnumerable<EnqueueJobRequest> BestEffortRequests(
+        EntityProcessingPlan plan,
+        EntityRefreshTarget entity) {
+        if (plan.FingerprintJobType is { } fingerprint) {
+            yield return Request(fingerprint, entity);
+        }
+
+        if (plan.SubtitleExtractionJobType is { } subtitles) {
+            yield return Request(subtitles, entity);
+        }
+
+        if (plan.PreviewJobType is { } preview) {
+            yield return Request(preview, entity);
+        }
+
+        if (plan.TrickplayJobType is { } trickplay) {
+            yield return Request(trickplay, entity);
+        }
+
+        if (plan.GridThumbnailJobType is { } gridThumbnail) {
+            yield return Request(gridThumbnail, entity);
+        }
+    }
+
+    private static EnqueueJobRequest Request(JobType type, EntityRefreshTarget entity) =>
+        new(
+            type,
+            TargetEntityKind: entity.KindCode,
+            TargetEntityId: entity.Id.ToString(),
+            TargetLabel: entity.Title);
+
+    private static GraphJobNodeRequest Node(
+        EnqueueJobRequest request,
+        IReadOnlyCollection<Guid> dependencies,
+        JobNodeImportance importance) =>
+        new(
+            request.NodeKey ?? $"{request.Type.ToCode()}:{request.TargetEntityId}",
+            request,
+            DependsOn: dependencies,
+            Importance: importance,
+            ResourceClass: request.ResourceClass ?? JobDefinitionRegistry.ResourceClass(request.Type),
+            ResourceKey: request.ResourceKey ?? (
+                request.TargetEntityKind is not null && request.TargetEntityId is not null
+                    ? JobResourceKeys.Entity(request.TargetEntityId)
+                    : null));
+
+    private static Task<JobRunSnapshot> AppendAsync(
+        JobContext context,
+        EnqueueJobRequest request,
+        IReadOnlyCollection<Guid> dependencies,
+        JobNodeImportance importance,
+        CancellationToken cancellationToken) =>
+        context.AppendNodeAsync(Node(request, dependencies, importance), cancellationToken);
+
+    private async Task InvalidateChangedSubtitleSidecarsAsync(
+        IReadOnlyList<EntityRefreshTarget> tree,
+        CancellationToken cancellationToken) {
+        var targets = tree
+            .Where(entity =>
+                SubtitleProcessingKindCodes.Contains(entity.KindCode)
+                && !string.IsNullOrWhiteSpace(entity.SourcePath))
+            .ToArray();
+        if (targets.Length == 0) return;
+
+        var sourcePaths = targets
+            .Select(target => target.SourcePath!)
+            .Distinct(FileSystemPathComparison.Comparer)
+            .ToArray();
+        var discoveries = await subtitleSidecars.DiscoverAsync(sourcePaths, cancellationToken);
+        var discoveryByPath = discoveries
+            .GroupBy(discovery => discovery.VideoPath, FileSystemPathComparison.Comparer)
+            .ToDictionary(group => group.Key, group => group.Last(), FileSystemPathComparison.Comparer);
+        var states = new List<VideoSubtitleSidecarState>(targets.Length);
+        foreach (var target in targets) {
+            if (!discoveryByPath.TryGetValue(target.SourcePath!, out var discovery) || !discovery.IsComplete) {
+                throw new IOException("Adjacent subtitle discovery was incomplete; entity processing was not started.");
+            }
+            states.Add(new VideoSubtitleSidecarState(target.Id, discovery.Signature));
+        }
+        await videos.InvalidateSubtitleStateAsync(states, cancellationToken);
+    }
+}

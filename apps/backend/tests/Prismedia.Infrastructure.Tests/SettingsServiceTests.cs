@@ -1,0 +1,546 @@
+using System.Text.Json;
+using Microsoft.EntityFrameworkCore;
+using Prismedia.Application.Jobs;
+using Prismedia.Application.Settings;
+using Prismedia.Contracts.Settings;
+using Prismedia.Domain.Entities;
+using Prismedia.Infrastructure.Persistence;
+using Prismedia.Infrastructure.Persistence.Entities;
+using Prismedia.Infrastructure.Settings;
+
+namespace Prismedia.Infrastructure.Tests;
+
+public sealed class SettingsServiceTests {
+    [Theory]
+    [InlineData("23505", "IX_library_roots_path", true)]
+    [InlineData("23505", "IX_something_else", false)]
+    [InlineData("23503", "IX_library_roots_path", false)]
+    [InlineData(null, null, false)]
+    public void LibraryRootPathConflictMatchesOnlyItsPostgresUniqueIndex(
+        string? sqlState,
+        string? constraintName,
+        bool expected) =>
+        Assert.Equal(
+            expected,
+            EfSettingsPersistence.IsLibraryRootPathConstraintViolation(sqlState, constraintName));
+
+    [Fact]
+    public async Task CreateLibraryRootQueuesScanForEachEnabledKind() {
+        await using var db = CreateContext();
+        var queue = new RecordingJobQueue();
+        var service = new SettingsService(new EfSettingsPersistence(db), queue);
+
+        await service.CreateLibraryRootAsync(
+            new LibraryRootCreateRequest(
+                Path: "/media/comics",
+                Label: "Comics",
+                Enabled: true,
+                Recursive: true,
+                ScanVideos: false,
+                ScanImages: false,
+                ScanAudio: false,
+                ScanBooks: true,
+                IsNsfw: false),
+            CancellationToken.None);
+
+        // The user-facing book family fans out to independent prose and serialized-comic scans.
+        Assert.Equal(
+            [JobType.ScanBook, JobType.ScanComic],
+            queue.Enqueued.Select(request => request.Type));
+    }
+
+    [Theory]
+    [MemberData(nameof(CreateLibraryRootScanKindCases))]
+    public async Task CreateLibraryRootQueuesOnlySelectedScanKinds(
+        bool scanVideos,
+        bool scanImages,
+        bool scanAudio,
+        bool scanBooks,
+        JobType[] expectedTypes) {
+        await using var db = CreateContext();
+        var queue = new RecordingJobQueue();
+        var service = new SettingsService(new EfSettingsPersistence(db), queue);
+
+        await service.CreateLibraryRootAsync(
+            new LibraryRootCreateRequest(
+                Path: "/media/selected",
+                Label: "Selected",
+                Enabled: true,
+                Recursive: true,
+                ScanVideos: scanVideos,
+                ScanImages: scanImages,
+                ScanAudio: scanAudio,
+                ScanBooks: scanBooks,
+                IsNsfw: false),
+            CancellationToken.None);
+
+        Assert.Equal(expectedTypes, queue.Enqueued.Select(request => request.Type));
+    }
+
+    [Fact]
+    public async Task CreateLibraryRootQueuesAllDefaultKinds() {
+        await using var db = CreateContext();
+        var queue = new RecordingJobQueue();
+        var service = new SettingsService(new EfSettingsPersistence(db), queue);
+
+        // Omitting the scan flags uses the defaults (videos, images, audio on; books off).
+        await service.CreateLibraryRootAsync(
+            new LibraryRootCreateRequest(
+                Path: "/media/library",
+                Label: null,
+                Enabled: null,
+                Recursive: null,
+                ScanVideos: null,
+                ScanImages: null,
+                ScanAudio: null,
+                ScanBooks: null,
+                IsNsfw: null),
+            CancellationToken.None);
+
+        Assert.Equal(
+            [JobType.ScanLibrary, JobType.ScanGallery, JobType.ScanAudio],
+            queue.Enqueued.Select(request => request.Type));
+    }
+
+    [Fact]
+    public async Task CreateDisabledLibraryRootQueuesNoScans() {
+        await using var db = CreateContext();
+        var queue = new RecordingJobQueue();
+        var service = new SettingsService(new EfSettingsPersistence(db), queue);
+
+        await service.CreateLibraryRootAsync(
+            new LibraryRootCreateRequest(
+                Path: "/media/library",
+                Label: null,
+                Enabled: false,
+                Recursive: null,
+                ScanVideos: null,
+                ScanImages: null,
+                ScanAudio: null,
+                ScanBooks: null,
+                IsNsfw: null),
+            CancellationToken.None);
+
+        Assert.Empty(queue.Enqueued);
+    }
+
+    [Fact]
+    public async Task DeleteLibraryRootRemovesRootEntitiesBeforeDeletingRoot() {
+        await using var db = CreateContext();
+        var rootId = Guid.NewGuid();
+        var ownedEntityId = Guid.NewGuid();
+        var unrelatedEntityId = Guid.NewGuid();
+        var now = DateTimeOffset.UtcNow;
+        db.LibraryRoots.Add(new LibraryRootRow {
+            Id = rootId,
+            Path = "/media/removed",
+            Label = "Removed",
+            Enabled = true,
+            Recursive = true,
+            ScanVideos = true,
+            ScanImages = true,
+            ScanAudio = true,
+            ScanBooks = false,
+            IsNsfw = false,
+            AutoIdentify = true,
+            CreatedAt = now,
+            UpdatedAt = now,
+        });
+        db.Entities.AddRange(
+            new EntityRow {
+                Id = ownedEntityId,
+                KindCode = EntityKind.Video.ToCode(),
+                Title = "stale video",
+                CreatedAt = now,
+                UpdatedAt = now,
+            },
+            new EntityRow {
+                Id = unrelatedEntityId,
+                KindCode = EntityKind.Video.ToCode(),
+                Title = "other video",
+                CreatedAt = now,
+                UpdatedAt = now,
+            });
+        db.EntityLibraryRoots.Add(new EntityLibraryRootRow { EntityId = ownedEntityId, LibraryRootId = rootId  });
+        db.EntityFiles.AddRange(
+            new EntityFileRow {
+                Id = Guid.NewGuid(),
+                EntityId = ownedEntityId,
+                Role = EntityFileRole.Source,
+                Path = "/media/removed/stale.mp4",
+                CreatedAt = now,
+                UpdatedAt = now,
+            },
+            new EntityFileRow {
+                Id = Guid.NewGuid(),
+                EntityId = unrelatedEntityId,
+                Role = EntityFileRole.Source,
+                Path = "/media/kept/other.mp4",
+                CreatedAt = now,
+                UpdatedAt = now,
+            });
+        await db.SaveChangesAsync();
+        var service = new SettingsService(new EfSettingsPersistence(db));
+
+        var deleted = await service.DeleteLibraryRootAsync(rootId, CancellationToken.None);
+
+        Assert.True(deleted);
+        Assert.False(await db.Entities.AnyAsync(entity => entity.Id == ownedEntityId));
+        Assert.True(await db.Entities.AnyAsync(entity => entity.Id == unrelatedEntityId));
+        Assert.False(await db.LibraryRoots.AnyAsync(root => root.Id == rootId));
+    }
+
+    [Fact]
+    public async Task DeleteLibraryRootUsesFolderProvenanceAndRemovesTheWholeEntitySubtree() {
+        await using var db = CreateContext();
+        var rootId = Guid.NewGuid();
+        var authorId = Guid.NewGuid();
+        var bookId = Guid.NewGuid();
+        var chapterId = Guid.NewGuid();
+        var now = DateTimeOffset.UtcNow;
+        db.LibraryRoots.Add(new LibraryRootRow {
+            Id = rootId,
+            Path = "/media/books",
+            Label = "Books",
+            Enabled = true,
+            Recursive = true,
+            ScanVideos = false,
+            ScanImages = false,
+            ScanAudio = false,
+            ScanBooks = true,
+            IsNsfw = false,
+            AutoIdentify = true,
+            CreatedAt = now,
+            UpdatedAt = now,
+        });
+        db.Entities.AddRange(
+            new EntityRow {
+                Id = authorId,
+                KindCode = EntityKind.BookAuthor.ToCode(),
+                Title = "Author",
+                CreatedAt = now,
+                UpdatedAt = now,
+            },
+            new EntityRow {
+                Id = bookId,
+                KindCode = EntityKind.Book.ToCode(),
+                Title = "Book",
+                ParentEntityId = authorId,
+                CreatedAt = now,
+                UpdatedAt = now,
+            },
+            new EntityRow {
+                Id = chapterId,
+                KindCode = EntityKind.BookChapter.ToCode(),
+                Title = "Chapter",
+                ParentEntityId = bookId,
+                CreatedAt = now,
+                UpdatedAt = now,
+            });
+        db.EntitySources.Add(new EntitySourceRow {
+            EntityId = authorId,
+            Code = EntitySourceCode.Folder.ToCode(),
+            Value = "/media/books/Author",
+            UpdatedAt = now,
+        });
+        await db.SaveChangesAsync();
+
+        var deleted = await new SettingsService(new EfSettingsPersistence(db))
+            .DeleteLibraryRootAsync(rootId, CancellationToken.None);
+
+        Assert.True(deleted);
+        Assert.Empty(await db.Entities.Where(entity =>
+            entity.Id == authorId || entity.Id == bookId || entity.Id == chapterId).ToArrayAsync());
+        Assert.False(await db.LibraryRoots.AnyAsync(root => root.Id == rootId));
+    }
+
+    [Fact]
+    public async Task DeleteLibraryRootPreservesWantedAndMonitoredEmptyContainers() {
+        await using var db = CreateContext();
+        var rootId = Guid.NewGuid();
+        var ownedEntityId = Guid.NewGuid();
+        var wantedMovieId = Guid.NewGuid();
+        var monitoredSeriesId = Guid.NewGuid();
+        var now = DateTimeOffset.UtcNow;
+        db.LibraryRoots.Add(new LibraryRootRow {
+            Id = rootId,
+            Path = "/media/removed",
+            Label = "Removed",
+            Enabled = true,
+            Recursive = true,
+            ScanVideos = true,
+            ScanImages = false,
+            ScanAudio = false,
+            ScanBooks = false,
+            IsNsfw = false,
+            AutoIdentify = true,
+            CreatedAt = now,
+            UpdatedAt = now,
+        });
+        db.Entities.AddRange(
+            new EntityRow {
+                Id = ownedEntityId,
+                KindCode = EntityKind.Video.ToCode(),
+                Title = "Removed video",
+                CreatedAt = now,
+                UpdatedAt = now,
+            },
+            new EntityRow {
+                Id = wantedMovieId,
+                KindCode = EntityKind.Movie.ToCode(),
+                Title = "Wanted movie",
+                IsWanted = true,
+                CreatedAt = now,
+                UpdatedAt = now,
+            },
+            new EntityRow {
+                Id = monitoredSeriesId,
+                KindCode = EntityKind.VideoSeries.ToCode(),
+                Title = "Monitored series",
+                CreatedAt = now,
+                UpdatedAt = now,
+            });
+        db.EntityLibraryRoots.Add(new EntityLibraryRootRow { EntityId = ownedEntityId, LibraryRootId = rootId  });
+        db.Monitors.Add(new MonitorRow {
+            Id = Guid.NewGuid(),
+            EntityId = monitoredSeriesId,
+            Kind = EntityKind.VideoSeries,
+            Status = MonitorStatus.Active,
+            Title = "Monitored series",
+            CreatedAt = now,
+            UpdatedAt = now,
+        });
+        await db.SaveChangesAsync();
+        var service = new SettingsService(new EfSettingsPersistence(db));
+
+        var deleted = await service.DeleteLibraryRootAsync(rootId, CancellationToken.None);
+
+        Assert.True(deleted);
+        Assert.True(await db.Entities.AnyAsync(entity => entity.Id == wantedMovieId));
+        Assert.True(await db.Entities.AnyAsync(entity => entity.Id == monitoredSeriesId));
+    }
+
+    [Fact]
+    public async Task CatalogUsesRegistryDefaultsWithoutCreatingRows() {
+        await using var db = CreateContext();
+        var service = new SettingsService(new EfSettingsPersistence(db));
+
+        var catalog = await service.GetCatalogAsync(CancellationToken.None);
+        var castControls = catalog.Groups
+            .SelectMany(group => group.Settings)
+            .Single(setting => setting.Key == AppSettings.Playback.ShowCastControls.Key);
+        var hlsTranscoder = catalog.Groups
+            .SelectMany(group => group.Settings)
+            .Single(setting => setting.Key == AppSettings.Hls.TranscoderProfile.Key);
+
+        Assert.True(castControls.Value.GetBoolean());
+        Assert.True(castControls.IsDefault);
+        Assert.Equal("Auto", hlsTranscoder.Value.GetString());
+        Assert.True(hlsTranscoder.IsDefault);
+        Assert.Empty(await db.AppSettings.ToArrayAsync());
+    }
+
+    [Fact]
+    public async Task UpdatePersistsOnlyNonDefaultOverrides() {
+        await using var db = CreateContext();
+        var service = new SettingsService(new EfSettingsPersistence(db));
+
+        await service.UpdateSettingAsync(
+            AppSettings.Hls.TranscoderProfile.Key,
+            JsonSerializer.SerializeToElement("VideoToolbox"),
+            CancellationToken.None);
+
+        var row = await db.AppSettings.SingleAsync();
+        Assert.Equal(AppSettings.Hls.TranscoderProfile.Key, row.Key);
+        Assert.Equal("\"VideoToolbox\"", row.ValueJson);
+    }
+
+    [Fact]
+    public async Task BatchUpdatePersistsStringListAndPaths() {
+        await using var db = CreateContext();
+        var service = new SettingsService(new EfSettingsPersistence(db));
+
+        await service.UpdateSettingsAsync(
+            new Dictionary<string, JsonElement> {
+                [AppSettings.Playback.AudioPreferredLanguages.Key] =
+                    JsonSerializer.SerializeToElement(new[] { "ja", "jpn" }),
+                [AppSettings.Hls.FfmpegPath.Key] =
+                    JsonSerializer.SerializeToElement("/opt/homebrew/bin/ffmpeg"),
+            },
+            CancellationToken.None);
+
+        var playback = await service.GetPlaybackSettingsAsync(CancellationToken.None);
+        var hls = await service.GetHlsSettingsAsync(CancellationToken.None);
+
+        Assert.Equal(["ja", "jpn"], playback.AudioPreferredLanguages);
+        Assert.Equal("/opt/homebrew/bin/ffmpeg", hls.FfmpegPath);
+        Assert.Equal(2, await db.AppSettings.CountAsync());
+    }
+
+    [Fact]
+    public async Task BatchUpdateSavesOverridesAndDeletesDefaultsTogether() {
+        await using var db = CreateContext();
+        var service = new SettingsService(new EfSettingsPersistence(db));
+
+        await service.UpdateSettingAsync(
+            AppSettings.Playback.DefaultMode.Key,
+            JsonSerializer.SerializeToElement("hls"),
+            CancellationToken.None);
+        await service.UpdateSettingAsync(
+            AppSettings.Hls.FfmpegPath.Key,
+            JsonSerializer.SerializeToElement("/usr/bin/ffmpeg"),
+            CancellationToken.None);
+
+        await service.UpdateSettingsAsync(
+            new Dictionary<string, JsonElement> {
+                [AppSettings.Playback.DefaultMode.Key] = JsonSerializer.SerializeToElement("direct"),
+                [AppSettings.Hls.FfmpegPath.Key] = JsonSerializer.SerializeToElement("/opt/homebrew/bin/ffmpeg"),
+            },
+            CancellationToken.None);
+
+        var row = await db.AppSettings.SingleAsync();
+        Assert.Equal(AppSettings.Hls.FfmpegPath.Key, row.Key);
+        Assert.Equal("\"/opt/homebrew/bin/ffmpeg\"", row.ValueJson);
+    }
+
+    [Fact]
+    public async Task AutoIdentifySettingsDefaultOffWithFullKindCoverage() {
+        await using var db = CreateContext();
+        var service = new SettingsService(new EfSettingsPersistence(db));
+
+        var settings = await service.GetAutoIdentifySettingsAsync(CancellationToken.None);
+
+        Assert.False(settings.Enabled);
+        Assert.Empty(settings.Providers);
+        Assert.Equal(
+            Enum.GetValues<AutoIdentifySelectorKind>().Select(kind => kind.ToCode()),
+            settings.EntityKinds);
+        // Stored as a 0–100 percentage (default 90), surfaced to backend consumers as a 0–1 fraction.
+        Assert.Equal(0.9d, settings.ConfidenceThreshold, 3);
+        Assert.True(settings.UnorganizedOnly);
+        Assert.Empty(await db.AppSettings.ToArrayAsync());
+    }
+
+    [Fact]
+    public async Task AutoIdentifySettingsConvertThresholdAndPreserveProviderOrder() {
+        await using var db = CreateContext();
+        var service = new SettingsService(new EfSettingsPersistence(db));
+
+        await service.UpdateSettingsAsync(
+            new Dictionary<string, JsonElement> {
+                [AppSettings.AutoIdentify.Enabled.Key] = JsonSerializer.SerializeToElement(true),
+                [AppSettings.AutoIdentify.ConfidenceThreshold.Key] = JsonSerializer.SerializeToElement(75m),
+                [AppSettings.AutoIdentify.Providers.Key] =
+                    JsonSerializer.SerializeToElement(new[] { "tmdb", "stash-erome" }),
+                [AppSettings.AutoIdentify.EntityKinds.Key] =
+                    JsonSerializer.SerializeToElement(new[] { "video" }),
+                [AppSettings.AutoIdentify.UnorganizedOnly.Key] = JsonSerializer.SerializeToElement(false),
+            },
+            CancellationToken.None);
+
+        var settings = await service.GetAutoIdentifySettingsAsync(CancellationToken.None);
+
+        Assert.True(settings.Enabled);
+        Assert.Equal(0.75d, settings.ConfidenceThreshold, 3);
+        Assert.Equal(["tmdb", "stash-erome"], settings.Providers);
+        Assert.Equal(["video"], settings.EntityKinds);
+        Assert.False(settings.UnorganizedOnly);
+    }
+
+    [Fact]
+    public async Task SavingDecimalDefaultRemovesOverride() {
+        await using var db = CreateContext();
+        var service = new SettingsService(new EfSettingsPersistence(db));
+
+        await service.UpdateSettingAsync(
+            AppSettings.Subtitles.Opacity.Key,
+            JsonSerializer.SerializeToElement(0.8m),
+            CancellationToken.None);
+        var reset = await service.UpdateSettingAsync(
+            AppSettings.Subtitles.Opacity.Key,
+            JsonSerializer.SerializeToElement(1.0m),
+            CancellationToken.None);
+
+        Assert.True(reset.IsDefault);
+        Assert.Empty(await db.AppSettings.ToArrayAsync());
+    }
+
+    private static PrismediaDbContext CreateContext() {
+        var options = new DbContextOptionsBuilder<PrismediaDbContext>()
+            .UseInMemoryDatabase($"settings-{Guid.NewGuid():N}")
+            .Options;
+
+        return new PrismediaDbContext(options);
+    }
+
+    public static TheoryData<bool, bool, bool, bool, JobType[]> CreateLibraryRootScanKindCases() =>
+        new() {
+            { false, true, false, false, [JobType.ScanGallery] },
+            { false, false, true, false, [JobType.ScanAudio] },
+            { false, true, true, true, [JobType.ScanGallery, JobType.ScanAudio, JobType.ScanBook, JobType.ScanComic] },
+        };
+
+    /// <summary>
+    /// Minimal <see cref="IJobQueueService"/> test double that records enqueued requests and
+    /// reports no pending work so scan deduplication never suppresses an enqueue.
+    /// </summary>
+    private sealed class RecordingJobQueue : IJobQueueService {
+        public List<EnqueueJobRequest> Enqueued { get; } = [];
+
+        public Task<JobRunSnapshot> EnqueueAsync(EnqueueJobRequest request, CancellationToken cancellationToken) {
+            Enqueued.Add(request);
+            return Task.FromResult(new JobRunSnapshot(
+                Guid.NewGuid(),
+                request.Type,
+                JobRunStatus.Queued,
+                0,
+                null,
+                request.PayloadJson ?? "{}",
+                request.TargetEntityKind,
+                request.TargetEntityId,
+                request.TargetLabel,
+                DateTimeOffset.UtcNow,
+                null,
+                null));
+        }
+
+        public Task<JobRunSnapshot> EnqueueAsync(JobType type, CancellationToken cancellationToken) =>
+            EnqueueAsync(new EnqueueJobRequest(type), cancellationToken);
+
+        public Task<bool> HasPendingAsync(JobType type, string? targetEntityId, CancellationToken cancellationToken) =>
+            Task.FromResult(false);
+
+        public Task<IReadOnlyList<JobRunSnapshot>> ListAsync(bool hideNsfw, CancellationToken cancellationToken) =>
+            Task.FromResult<IReadOnlyList<JobRunSnapshot>>([]);
+
+        public Task<int> EnqueueBatchAsync(IReadOnlyList<EnqueueJobRequest> requests, CancellationToken cancellationToken) {
+            Enqueued.AddRange(requests);
+            return Task.FromResult(requests.Count);
+        }
+
+        public Task<int> CancelAsync(JobType? type, CancellationToken cancellationToken) => Task.FromResult(0);
+
+        public Task<bool> CancelRunAsync(Guid id, CancellationToken cancellationToken) => Task.FromResult(false);
+
+        public Task<int> ClearFailuresAsync(JobType? type, CancellationToken cancellationToken) => Task.FromResult(0);
+
+        public Task<JobRunSnapshot?> ClaimNextAsync(string workerId, CancellationToken cancellationToken) =>
+            Task.FromResult<JobRunSnapshot?>(null);
+
+        public Task<int> RecoverStaleRunningAsync(string currentWorkerId, TimeSpan staleAfter, CancellationToken cancellationToken) =>
+            Task.FromResult(0);
+
+        public Task UpdateProgressAsync(Guid id, int progress, string? message, CancellationToken cancellationToken) =>
+            Task.CompletedTask;
+
+        public Task CompleteAsync(Guid id, string? message, CancellationToken cancellationToken) => Task.CompletedTask;
+
+        public Task FailAsync(Guid id, string message, TimeSpan retryDelay, CancellationToken cancellationToken) =>
+            Task.CompletedTask;
+
+        public Task<IReadOnlyList<JobQueueCount>> GetQueueCountsAsync(bool hideNsfw, CancellationToken cancellationToken) =>
+            Task.FromResult<IReadOnlyList<JobQueueCount>>([]);
+
+        public Task<int> PruneHistoryAsync(TimeSpan retention, CancellationToken cancellationToken) => Task.FromResult(0);
+    }
+}

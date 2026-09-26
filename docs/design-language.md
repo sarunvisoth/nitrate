@@ -1,0 +1,269 @@
+# Prismedia Design Language
+
+## The idea
+
+Prismedia is the place where a collection comes together. Its visual metaphor is white light entering a prism and separating into a spectrum: one library in, many kinds of media out.
+
+The interface remains permanently dark so artwork stays dominant. Neutral silver identifies Prismedia itself. Spectrum color identifies content families in small, deliberate moments; it does not tint every surface that belongs to them. Color is semantic rather than decorative.
+
+## Principles
+
+- **One source, many colors.** The neutral Prismedia shell is the white-light source; entity families inherit stable spectrum pairs.
+- **Black is the canvas.** The root and structural surfaces are neutral. Spectrum atmosphere belongs to artwork-reactive detail contexts and literal prism moments, not the global shell.
+- **Artwork leads on detail pages.** When real entity artwork is available, derive background, primary, and secondary colors from it. Otherwise use the entity-family pair.
+- **Glass belongs to persistent chrome.** Navigation, sticky toolbars, and controls floating directly over media can be frosted. Menus, flyouts, sheets, dialogs, search palettes, cards, lists, grids, and content panels remain opaque.
+- **Shared components own the language.** Change tokens and shared building blocks before writing route-specific styling.
+- **Motion explains state.** Movement can reinforce focus, selection, loading, and hierarchy, but every state also has a non-color cue and a reduced-motion treatment. Persistent controls do not glow.
+- **Mobile first, desktop first-class.** Touch interactions come first; desktop expands density and navigation without becoming a different product.
+
+## Brand marks
+
+Use the colored prism mark for app identity in the sidebar, mobile shell, sign-in surfaces, favicons, and product documentation. Use the neutral prism only inside the loading animation. The full light-in/light-out logo is reserved for marketing and icon contexts; it is not a routine chrome mark. The red-tinted prism is reserved for the NSFW visibility control and its active state; it is never the default brand mark or a general error icon.
+
+Do not recolor, crop, or place the prism in a generic badge. Preserve its aspect ratio and transparent padding.
+
+## Color system
+
+### Neutral foundation
+
+| Role | Value | Use |
+| --- | --- | --- |
+| Canvas | `#000000` | App root and dominant atmosphere |
+| Surface 1 | `#111214` | Recessed wells and quiet panels |
+| Surface 2 | `#191a1e` | Cards and structural content |
+| Surface 3 | `#24262b` | Raised content surfaces |
+| Surface 4 | `#303238` | Menus and contextual layers |
+| Neutral accent | `#c7c9cc` | App-level focus and identity |
+| High contrast | `#ebebeb` | Strong neutral emphasis |
+
+### Prism spectrum
+
+| Name | Value |
+| --- | --- |
+| Red | `#ff141f` |
+| Orange | `#ff570a` |
+| Yellow | `#ffc71f` |
+| Green | `#1fc247` |
+| Cyan | `#0ab3e6` |
+| Blue | `#0d47ff` |
+| Violet | `#7a14f5` |
+| Magenta | `#d60de0` |
+
+The spectrum values are exact brand tokens for the logo, prism beam, and other literal emitted-light moments. Persistent entity chrome uses the paired `materialSpectrum` tokens: the same hues with controlled lightness and chroma so they read as flat paint. Use opacity and `color-mix()` to create borders and material fills; broad colored glow is not part of the default UI language.
+
+| Material token | Value |
+| --- | --- |
+| Red | `#b3484d` |
+| Orange | `#b76337` |
+| Yellow | `#9e873b` |
+| Green | `#4d925d` |
+| Cyan | `#3b869c` |
+| Blue | `#536fb0` |
+| Violet | `#775ca5` |
+| Magenta | `#9a4f9d` |
+
+### Color budget
+
+The everyday product surface should read as roughly 90–95% neutral. Use entity color only where it adds information:
+
+- a short taxonomy marker beside a section or page heading;
+- a thin progress or active-state rail;
+- a selected control that also has a border, shape, or position cue;
+- artwork-derived atmosphere inside an entity detail experience;
+- the colored brand mark and literal prism/loading sequence;
+- a chart, where colour is the data rather than decoration.
+
+Every page must include one accent moment that communicates its identity without tinting the whole page. A library page can spend that moment on the top edge of its grid toolbar; Settings uses muted section icons; an entity detail page uses artwork atmosphere and its active-tab rail. Prefer one clear location over several competing accents.
+
+Do not repeat the same entity color across a section label, icon, card border, button fill, background gradient, and shadow. Neutral typography, surfaces, and borders establish hierarchy first.
+
+### Entity identity
+
+| Family | Primary → secondary |
+| --- | --- |
+| Video | Red → orange |
+| Movie | Orange → yellow |
+| Series, season, episode | Yellow → green |
+| Gallery | Green → cyan |
+| Book, author, volume, chapter, page | Cyan → blue |
+| Image | Blue → violet |
+| Audio, artist, album, track | Violet → magenta |
+| Collection | Magenta → red |
+| People | Red → violet |
+| Studios | Orange → magenta |
+| Tags | Green → yellow |
+
+Use these pairs for small heading markers, selected rails, progress, and navigation-section defaults. Keep adjacent heading text, icons, cards, and buttons neutral. A user may override a navigation section color, but that does not redefine the entity family.
+
+## Data visualization
+
+Charts are the one place where colour carries the data instead of decorating it, so the neutral colour budget does not apply inside a plot. It still applies to everything around the plot: panel chrome, headings, axis labels, and legends stay neutral.
+
+The spectrum is used two different ways, and a chart must not mix them:
+
+- **Identity.** Colour names an entity family. Use the family pairs above, in `PRISM_SPECTRUM_ORDER`, so a set of families reads as one dispersed spectrum rather than an arbitrary palette. Persistent chrome takes the `materialSpectrum` pair; a literal light moment takes the brand pair.
+- **Magnitude.** Colour encodes how much. Use the shared cool-to-warm heat scale: cyan, green, yellow, orange, red. Cool reads quiet and warm reads busy, and every chart on a page must ramp in the same direction or the hues stop meaning anything. The scale deliberately starts at cyan — the spectrum's violet and blue are too dark to hold their own on a true-black canvas, and they stay reserved for identity.
+
+Rules:
+
+- A magnitude scale needs a visible key, or its hues are decoration.
+- When one series is coloured, its companion series is neutral. Two coloured series on one axis read as two points on the same scale.
+- Never encode a value in hue alone. Position, height, or length carries the value; hue reinforces it.
+- Reduce granularity to fit the available width. A year of per-day columns aliases into noise on a phone, so group into weeks and say so in the legend.
+- Round an axis maximum up to a readable gridline, but never report that rounded value as the observed peak.
+
+## Artwork-reactive detail surfaces
+
+Entity detail pages publish three semantic values: `background`, `primary`, and `secondary`.
+
+1. Sample only real, already-loaded artwork. Never issue a duplicate image request for palette extraction.
+2. Downsample before analysis and fail safely when the browser blocks canvas access.
+3. Keep the background near black and use primary/secondary as restrained radial atmosphere and sparse interaction accents.
+4. Maintain readable text contrast. Primary body text remains neutral.
+5. Animate a palette change quickly, around 180ms, and remove that transition for reduced motion.
+6. Only an explicit API backdrop becomes a hero image. Poster or cover art may drive the atmosphere without being enlarged into a synthetic hero.
+7. If artwork is absent or extraction fails, fall back to the entity-family colors.
+
+## Surfaces
+
+### Content material
+
+Cards, media, rows, grids, chips, and repeated panels use opaque neutral surfaces, a subtle neutral border, and restrained shadow. They may inherit an entity accent for state, but they do not use backdrop blur.
+
+```css
+background: var(--color-surface-2);
+border: 1px solid var(--color-border-subtle);
+border-radius: var(--radius-md);
+box-shadow: var(--shadow-card);
+```
+
+### Frosted chrome
+
+Glass communicates persistent chrome above moving content. Use it for the sidebar, top bar, bottom navigation, sticky toolbars, and player controls. Transient menus, flyouts, sheets, dialogs, and search palettes use opaque neutral surfaces so content behind them cannot reduce readability.
+
+```css
+background: var(--color-overlay-glass);
+border: 1px solid var(--color-border-default);
+backdrop-filter: saturate(1.05) blur(var(--glass-blur-md));
+box-shadow: var(--shadow-panel);
+```
+
+Avoid glass-on-glass stacking. When chrome contains grouped controls, use one glass parent and clear or solid child controls.
+
+## Loading
+
+Full blocking states use the responsive prism loader:
+
+1. white light travels in from beyond the left edge;
+2. it strikes the neutral prism;
+3. the prism gains color at impact;
+4. seven spectrum bands expand beyond the right edge across the available height;
+5. the scene resets over a 2.8-second cycle.
+
+The component owns the full available width so beams naturally adapt to cards, panels, or the page. The transparent prism assets are layered exactly. Under `prefers-reduced-motion`, render a static colored prism with a partially visible expanded spectrum. Use compact progress indicators for pagination, playback buffering, thumbnail loading, or refreshes where content remains visible.
+
+## Geometry and type
+
+Use the shared radius scale: `4`, `6`, `10`, `14`, `18`, and `24px`. Controls must not become pills unless the shape has a genuine semantic reason. Use the existing web font voices—Cinzel for rare brand display, Geist for product headings, Inter for body, and JetBrains Mono for utility metadata—while keeping hierarchy close to native system typography.
+
+## Interaction and accessibility
+
+### Shared control scale
+
+Web control tokens are defined in `apps/web-svelte/src/app.css`. Components in
+`packages/ui-svelte` consume these tokens through their size variants. Use the
+variant instead of setting a different height, font size, or padding per page.
+The rem values respect the user's type scale.
+
+| Token | Size | Use |
+| --- | --- | --- |
+| `control-xs` | 1.75rem | Dense auxiliary controls |
+| `control-sm` | 2rem | Compact rows and secondary actions |
+| `control` | 2.25rem | Standard buttons, inputs, selects, and toggles |
+| `control-lg` | 2.75rem | Entity page actions |
+| `badge` | 1.5rem minimum | Static metadata, counts, and statuses |
+
+Use `text-control`, `text-label`, and `text-caption` for standard controls,
+compact labels, and metadata respectively. `control-gap` and `control-gap-sm`
+define spacing inside control groups. Keep semantic tokens registered in the
+shared class-merging utility so ordinary layout overrides replace them correctly.
+
+- Interactive tags use button styling. Static counts use Badge, with neutral
+  text and restrained colored icons. Thumbnail metadata stays smaller than the
+  title, keeps its identifying icons, and shows at most two chips on one row.
+  Use the compact caption and icon tokens on the narrowest cards, not arbitrary
+  text scaling or icon removal.
+- Related entities retain full normal thumbnails, even when a group has one item.
+- Thumbnail status, rating, and source markers use shared Badges. Grid markers
+  stay on the artwork; list markers join the caption so small images remain clear.
+  Selection controls keep an opaque neutral backing over artwork.
+- Acquisition status labels and icons come from the shared lifecycle presentation.
+  Keep pending, transfer, and import stages distinct. Attention labels name the
+  decision, such as Choose release or Review import, rather than a generic Action.
+- Entity headers summarize dates with one labeled release milestone or a meaningful
+  lifespan, broadcast, or career range. Additional dates belong in the shared
+  "More dates" popover with aligned labels and values, not a long inline inventory.
+  This is presentation only; stored dates and acquisition timing remain unchanged.
+- Metadata cards share each row's available width rather than reserving empty
+  columns. Short facts keep aligned labels and values; long paths and fingerprints
+  use the full card width below their labels and remain selectable.
+- Detail sections attach behind the header's lower corners, with square top
+  edges and rounded bottom edges. The shared header owns the overlap depth.
+- Artwork editing lives in a shared disclosure with labeled poster/header
+  actions, outside the artwork itself. It distinguishes immediate image changes
+  from the metadata draft and does not paint an empty upload area over the hero.
+- On mobile, Entity page actions form a labeled two-column grid below the
+  artwork and title. At narrow widths, ratings move to their own full-width row.
+- Acquisition work and monitoring settings align at the top on wide screens and
+  stack on narrow screens. File actions belong inside a card, not in the space
+  between cards. Child activity opens initially when it is the only work shown.
+- Downloads keeps its resizable queue and inspector on desktop. Phones show
+  one at a time, with an explicit return to the queue that preserves filtering
+  and selection. Transfer rows put status below Entity identity and label
+  available metrics; wide table columns must not push status off-screen.
+- Entity edit forms use a full-width shared grid: primary fields and dates in one
+  flow, links and source references in another. On narrow screens these flows
+  stack in reading order. Add-entry fields retain visible labels, and form
+  actions align with the panel's padded right edge. Do not cap the editor inside
+  a wider panel and leave its actions floating in the middle.
+- Tabbed and untabbed Entity pages use the same edit layout and section rules.
+  Hidden sections are excluded from editing and saving; read-only relationships
+  remain information rather than offering controls that cannot save.
+- Collapsible grid headings, toolbars, results, and pagination share one card
+  boundary. Keep the heading attached to the content it controls, with a visible
+  Show/Hide cue and an accessible named content region. Do not clip sticky
+  toolbars or menus with an overflow container.
+- Mixed-kind result filters are a wrapping row of separate controls, spaced
+  below the toolbar. Use canonical Entity icons and colors with neutral labels,
+  counts, and selected-state borders.
+- Use the shared `ChoiceGroup` for required single- or multiple-choice filters.
+  It composes the themed ToggleGroup and retains at least one selection. The
+  parent owns the value; selecting the current single choice must not reset
+  page state. Use ToggleGroup directly when deselecting every option is valid.
+- Search results retain the Entity thumbnail projection and use the library's
+  thumbnail mapper. Group headings identify the type; captions explain related
+  matches instead of repeating that type beneath every title. Full thumbnail
+  grids use the canonical artwork aspect ratio, not route-specific kind cases.
+- Availability belongs beside the item name, separate from its actions. Use
+  quiet text for ordinary missing/in-library information; reserve status badges
+  for active work or conditions that need attention. Supporting sections share
+  the same spacing whether supplied by a page or by the Entity base.
+
+### Behavior
+
+- Every primary action works without hover.
+- Focus is visible through shape, border, and motion as well as color.
+- Text and controls meet contrast requirements over both artwork and glass.
+- Motion respects `prefers-reduced-motion`.
+- Grid-to-detail artwork travel is a one-shot enhancement of an ordinary thumbnail link, not a global page transition. Use the shared artwork transition controller and motion tokens; animate only the image, not titles, metadata, or chrome. History, modified clicks, selection, and lightbox actions keep their existing behavior. Missing or slow destination artwork must fall back promptly rather than delay navigation. Reduced motion skips artwork travel entirely.
+- Blocking loaders expose one status announcement; decorative beams and prism layers are hidden from assistive technology.
+- Color pickers store validated six-digit hex values and retain visible labels.
+
+## Review checklist
+
+1. Is the surface neutral by default, with entity color limited to an informative marker or state?
+2. Is glass limited to a floating or chrome layer?
+3. Does a detail page use real artwork safely and preserve the explicit-hero policy?
+4. Does the loading state use the prism loader only when content is blocked?
+5. Are mobile touch targets, desktop density, focus, contrast, and reduced motion all verified?
+6. Was the shared component or token changed instead of duplicating the recipe in a route?

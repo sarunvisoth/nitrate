@@ -1,0 +1,296 @@
+using Microsoft.EntityFrameworkCore;
+using Prismedia.Application.Acquisition;
+using Prismedia.Domain.Entities;
+using Prismedia.Infrastructure.Acquisition;
+using Prismedia.Infrastructure.Persistence;
+using Prismedia.Infrastructure.Persistence.Entities;
+
+namespace Prismedia.Infrastructure.Tests;
+
+public sealed class EfMonitorStoreLibraryBaselineTests {
+    [Fact]
+    public async Task ImportedInspectionHonorsBackoffButAChangedProfileCanReopenIt() {
+        await using var db = MemoryContext();
+        var root = Directory.CreateTempSubdirectory("prismedia-inspection-cadence-").FullName;
+        try {
+            var fixture = await SeedAsync(db, root, EntityKind.Movie);
+            var profile = await db.BookAcquisitionProfiles.SingleAsync();
+            profile.UpgradeUntilCutoff = true;
+            await db.SaveChangesAsync();
+            await fixture.Store.ListImmediateForMonitorAsync(fixture.MonitorId, default);
+            var monitor = await db.Monitors.SingleAsync();
+            monitor.LastSearchedAt = DateTimeOffset.UtcNow;
+            monitor.BarrenSearches = 4;
+            db.MediaSources.Remove(await db.MediaSources.SingleAsync());
+            await db.SaveChangesAsync();
+
+            Assert.Empty(await fixture.Store.ListDueMonitorsAsync(360, default));
+            profile.UpdatedAt = monitor.LastSearchedAt.Value.AddSeconds(1);
+            await db.SaveChangesAsync();
+
+            Assert.True(Assert.Single(await fixture.Store.ListDueMonitorsAsync(360, default)).OwnedInspectionRequired);
+            Assert.Single(await db.Acquisitions.ToArrayAsync());
+        } finally {
+            Directory.Delete(root, recursive: true);
+        }
+    }
+
+    [Theory]
+    [InlineData("missing probe", false, true, true)]
+    [InlineData("missing probe", true, true, true)]
+    [InlineData("stale probe", false, true, true)]
+    [InlineData("unknown subtitles", false, true, false)]
+    [InlineData("unknown subtitles", true, true, false)]
+    [InlineData("missing subtitle inventory", false, true, false)]
+    [InlineData("paused", false, false, false)]
+    [InlineData("manual profile", false, false, false)]
+    [InlineData("wrong receipt", false, false, false)]
+    [InlineData("active child", false, false, false)]
+    [InlineData("failed probe", false, false, false)]
+    public async Task ImportedBaselinesRecoverInspectionBeforeAnotherUpgradeSearch(string scenario, bool postgres, bool inspect, bool probeRequired) {
+        await using var database = postgres ? await PostgresTestDatabase.CreateAsync() : null;
+        await using var db = database?.CreateContext() ?? MemoryContext();
+        var root = Directory.CreateTempSubdirectory("prismedia-imported-inspection-").FullName;
+        try {
+            var fixture = await SeedAsync(db, root, EntityKind.Movie);
+            var profile = await db.BookAcquisitionProfiles.SingleAsync();
+            profile.UpgradeUntilCutoff = true;
+            await db.SaveChangesAsync();
+            await fixture.Store.ListImmediateForMonitorAsync(fixture.MonitorId, default);
+            var baseline = await db.Acquisitions.SingleAsync();
+            baseline.OwnedMediaQuality = VideoQuality.Remux2160p.ToCode();
+            if (scenario == "active child") {
+                var child = await fixture.Store.CreateUpgradeChildAsync(fixture.MonitorId, default);
+                (await db.Acquisitions.FindAsync(child))!.Status = AcquisitionStatus.Downloading;
+            }
+            var probe = await db.MediaSources.SingleAsync();
+            if (scenario == "stale probe") probe.SizeBytes++;
+            else if (scenario is "unknown subtitles" or "missing subtitle inventory") db.EntitySubtitleStates.Remove(await db.EntitySubtitleStates.SingleAsync());
+            else db.MediaSources.Remove(probe);
+            // Existing subtitle rows can be stale too: only this case lacks a completed inspection inventory.
+            if (scenario == "unknown subtitles") db.EntitySubtitles.RemoveRange(await db.EntitySubtitles.ToArrayAsync());
+            if (scenario == "paused") (await db.Monitors.SingleAsync()).Status = MonitorStatus.Paused;
+            if (scenario == "manual profile") profile.AutoPick = false;
+            if (scenario == "wrong receipt") baseline.FinalSourcePath += ".retired";
+            if (scenario == "failed probe") db.EntityTechnical.Add(new EntityTechnicalRow { EntityId = fixture.EntityId,
+                ProbeFailedAt = DateTimeOffset.UtcNow, UpdatedAt = DateTimeOffset.UtcNow });
+            await db.SaveChangesAsync();
+            var ids = await db.Acquisitions.Select(row => row.Id).OrderBy(id => id).ToArrayAsync();
+
+            var needs = await fixture.Store.GetOwnedVideoInspectionNeedsAsync(fixture.MonitorId, default);
+            var due = await fixture.Store.ListImmediateForMonitorAsync(fixture.MonitorId, default);
+
+            Assert.Equal(inspect ? new OwnedVideoInspectionNeeds(probeRequired, true) : null, needs);
+            Assert.Equal(inspect, due.Any(row => row.OwnedInspectionRequired));
+            Assert.DoesNotContain(due, row => row.IsUpgrade);
+            Assert.Equal(ids, await db.Acquisitions.Select(row => row.Id).OrderBy(id => id).ToArrayAsync());
+            Assert.Empty(await db.DownloadTransfers.ToArrayAsync());
+            Assert.Equal("owned video bytes", await File.ReadAllTextAsync(fixture.SourcePath));
+        } finally {
+            Directory.Delete(root, recursive: true);
+        }
+    }
+
+    [Theory]
+    [InlineData("current", false, true)]
+    [InlineData("current", true, true)]
+    [InlineData("at cutoff", false, false)]
+    [InlineData("at cutoff", true, false)]
+    [InlineData("stale size", false, false)]
+    [InlineData("stale path", false, false)]
+    [InlineData("failed probe", false, false)]
+    [InlineData("multiple sources", false, false)]
+    [InlineData("unknown dimensions", false, false)]
+    public async Task CurrentMeasuredResolutionCanDisproveARecordedCutoff(string scenario, bool postgres, bool upgradeDue) {
+        await using var database = postgres ? await PostgresTestDatabase.CreateAsync() : null;
+        await using var db = database?.CreateContext() ?? MemoryContext();
+        var root = Directory.CreateTempSubdirectory("prismedia-measured-cutoff-").FullName;
+        try {
+            var fixture = await SeedAsync(db, root, EntityKind.Movie);
+            (await db.BookAcquisitionProfiles.SingleAsync()).UpgradeUntilCutoff = true;
+            await db.SaveChangesAsync();
+            await fixture.Store.ListImmediateForMonitorAsync(fixture.MonitorId, default);
+            var baseline = await db.Acquisitions.SingleAsync();
+            baseline.OwnedMediaQuality = VideoQuality.Remux2160p.ToCode();
+            var probe = await db.MediaSources.SingleAsync();
+            switch (scenario) {
+                case "at cutoff": probe.Width = 1920; probe.Height = 800; break;
+                case "stale size": probe.SizeBytes++; break;
+                case "stale path": probe.Path += ".retired"; break;
+                case "failed probe": db.EntityTechnical.Add(new EntityTechnicalRow { EntityId = fixture.EntityId,
+                    ProbeFailedAt = DateTimeOffset.UtcNow, UpdatedAt = DateTimeOffset.UtcNow }); break;
+                case "multiple sources": db.EntityFiles.Add(new EntityFileRow { Id = Guid.NewGuid(), EntityId = fixture.EntityId,
+                    Role = EntityFileRole.Source, Path = fixture.SourcePath + ".other", Source = FileSourceKind.Scan.ToCode(),
+                    CreatedAt = DateTimeOffset.UtcNow, UpdatedAt = DateTimeOffset.UtcNow }); break;
+                case "unknown dimensions": probe.Width = null; probe.Height = null; break;
+            }
+            await db.SaveChangesAsync();
+
+            var wanted = await fixture.Store.ListCutoffUnmetAsync(1, 10, EntityKind.Movie, default);
+            var due = await fixture.Store.ListImmediateForMonitorAsync(fixture.MonitorId, default);
+
+            Assert.Equal(upgradeDue ? 1 : 0, wanted.Total);
+            Assert.Equal(upgradeDue, due.Any(row => row.IsUpgrade));
+            Assert.Equal(VideoQuality.Remux2160p.ToCode(), (await db.Acquisitions.SingleAsync()).OwnedMediaQuality);
+            Assert.Empty(await db.DownloadTransfers.ToArrayAsync());
+        } finally {
+            Directory.Delete(root, recursive: true);
+        }
+    }
+
+    [Theory]
+    [InlineData(EntityKind.Movie, false)]
+    [InlineData(EntityKind.VideoEpisode, false)]
+    [InlineData(EntityKind.VideoEpisode, true)]
+    public async Task AnUpgradeProfileCanMonitorAnExistingLibraryFileWithoutInventingADownload(EntityKind kind, bool postgres) {
+        await using var database = postgres ? await PostgresTestDatabase.CreateAsync() : null;
+        await using var db = database?.CreateContext() ?? MemoryContext();
+        var root = Directory.CreateTempSubdirectory("prismedia-owned-monitor-").FullName;
+        try {
+            var fixture = await SeedAsync(db, root, kind);
+            Assert.False(Assert.Single(await fixture.Store.ListImmediateForMonitorAsync(fixture.MonitorId, default)).IsUpgrade);
+            Assert.Empty(await db.Acquisitions.ToArrayAsync());
+            var profile = await db.BookAcquisitionProfiles.SingleAsync();
+            profile.UpgradeUntilCutoff = true;
+            profile.UpdatedAt = DateTimeOffset.UtcNow;
+            await db.SaveChangesAsync();
+
+            var due = Assert.Single(await fixture.Store.ListImmediateForMonitorAsync(fixture.MonitorId, default));
+
+            Assert.True(due.IsUpgrade);
+            var baseline = await db.Acquisitions.SingleAsync();
+            Assert.Equal(baseline.Id, due.AcquisitionId);
+            Assert.Equal(fixture.EntityId, baseline.EntityId);
+            Assert.Equal(fixture.SourcePath, baseline.FinalSourcePath);
+            Assert.Equal(AcquisitionStatus.Imported, baseline.Status);
+            Assert.Equal(VideoQuality.Unknown.ToCode(), baseline.OwnedMediaQuality);
+            Assert.True(baseline.UpgradeQualityCaptured);
+            Assert.Null(baseline.SelectedReleaseJson);
+            Assert.Empty(await db.DownloadTransfers.ToArrayAsync());
+            Assert.Empty(await db.AcquisitionHistory.ToArrayAsync());
+            Assert.Equal(fixture.SourceId, (await db.EntityFiles.SingleAsync()).Id);
+            Assert.Equal("owned video bytes", await File.ReadAllTextAsync(fixture.SourcePath));
+            var child = await fixture.Store.CreateUpgradeChildAsync(fixture.MonitorId, default);
+            var acquisitions = AcquisitionTestFactory.Store(db);
+            Assert.Equal(720, (await acquisitions.GetUpgradeOwnedQualityAsync(child!.Value, default))!.VideoResolutionTier);
+            var input = await acquisitions.GetSearchInputAsync(child.Value, default);
+            if (kind == EntityKind.VideoEpisode) {
+                Assert.Equal("Show", input!.Series);
+                Assert.Equal(2, input.SeasonNumber);
+                Assert.Equal(41, input.EpisodeNumber);
+            }
+            // Sharing discovered after a child was queued must reach the final replacement boundary too.
+            var otherOwner = Guid.NewGuid();
+            var now = DateTimeOffset.UtcNow;
+            db.Entities.Add(new EntityRow { Id = otherOwner, KindCode = kind.ToCode(), Title = "Other owner", CreatedAt = now, UpdatedAt = now });
+            await db.SaveChangesAsync();
+            db.EntityFiles.Add(new EntityFileRow { Id = Guid.NewGuid(), EntityId = otherOwner, Role = EntityFileRole.Source,
+                Path = fixture.SourcePath, Source = FileSourceKind.Scan.ToCode(), CreatedAt = now, UpdatedAt = now });
+            (await db.Acquisitions.FindAsync(child.Value))!.Status = AcquisitionStatus.Downloaded;
+            await db.SaveChangesAsync();
+            Assert.True((await acquisitions.GetUpgradeOwnedQualityAsync(child.Value, default))!.VideoSourceShared);
+            Assert.True((await acquisitions.GetUpgradeReplaceTargetAsync(child.Value, default))!.ParentVideoSourceShared);
+        } finally {
+            Directory.Delete(root, recursive: true);
+        }
+    }
+
+    [Theory]
+    [InlineData("manual selection")]
+    [InlineData("paused")]
+    [InlineData("missing file")]
+    [InlineData("changed file")]
+    [InlineData("shared source")]
+    [InlineData("multiple sources")]
+    [InlineData("stale probe")]
+    [InlineData("failed probe")]
+    [InlineData("unknown subtitles")]
+    [InlineData("existing attempt")]
+    public async Task UncertainOrInactiveOwnershipDoesNotCreateAnUpgradeBaseline(string scenario) {
+        await using var db = MemoryContext();
+        var root = Directory.CreateTempSubdirectory("prismedia-owned-monitor-guard-").FullName;
+        try {
+            var fixture = await SeedAsync(db, root, EntityKind.Movie);
+            var profile = await db.BookAcquisitionProfiles.SingleAsync();
+            profile.UpgradeUntilCutoff = true;
+            var now = DateTimeOffset.UtcNow;
+            switch (scenario) {
+                case "manual selection": profile.AutoPick = false; break;
+                case "paused": (await db.Monitors.SingleAsync()).Status = MonitorStatus.Paused; break;
+                case "missing file": File.Delete(fixture.SourcePath); break;
+                case "changed file": await File.AppendAllTextAsync(fixture.SourcePath, " changed"); break;
+                case "shared source":
+                case "multiple sources":
+                    db.EntityFiles.Add(new EntityFileRow { Id = Guid.NewGuid(),
+                        EntityId = scenario == "shared source" ? Guid.NewGuid() : fixture.EntityId,
+                        Role = EntityFileRole.Source, Path = fixture.SourcePath, Source = FileSourceKind.Scan.ToCode(),
+                        CreatedAt = now, UpdatedAt = now });
+                    break;
+                case "stale probe": (await db.MediaSources.SingleAsync()).SizeBytes++; break;
+                case "failed probe": db.EntityTechnical.Add(new EntityTechnicalRow { EntityId = fixture.EntityId, ProbeFailedAt = now, UpdatedAt = now }); break;
+                case "unknown subtitles": db.EntitySubtitleStates.Remove(await db.EntitySubtitleStates.SingleAsync()); break;
+                case "existing attempt": db.Acquisitions.Add(new AcquisitionRow { Id = Guid.NewGuid(), EntityId = fixture.EntityId,
+                    Kind = EntityKind.Movie, Status = AcquisitionStatus.AwaitingSelection, CreatedAt = now, UpdatedAt = now }); break;
+            }
+            await db.SaveChangesAsync();
+            var previousAttempts = await db.Acquisitions.Select(row => row.Id).ToArrayAsync();
+
+            var due = await fixture.Store.ListImmediateForMonitorAsync(fixture.MonitorId, default);
+
+            Assert.DoesNotContain(due, item => item.IsUpgrade);
+            Assert.Equal(previousAttempts, await db.Acquisitions.Select(row => row.Id).ToArrayAsync());
+            Assert.Null((await db.Monitors.SingleAsync()).AcquisitionId);
+            Assert.Empty(await db.DownloadTransfers.ToArrayAsync());
+            var needs = await ((IMonitorStore)fixture.Store).GetOwnedVideoInspectionNeedsAsync(fixture.MonitorId, default);
+            if (scenario == "stale probe") Assert.Equal(new OwnedVideoInspectionNeeds(true, true), needs);
+            else if (scenario == "unknown subtitles") Assert.Equal(new OwnedVideoInspectionNeeds(false, true), needs);
+            else Assert.Null(needs);
+        } finally {
+            Directory.Delete(root, recursive: true);
+        }
+    }
+
+    private static async Task<Fixture> SeedAsync(PrismediaDbContext db, string root, EntityKind kind) {
+        var now = DateTimeOffset.UtcNow;
+        var rootId = Guid.NewGuid(); var profileId = Guid.NewGuid(); var entityId = Guid.NewGuid();
+        var monitorId = Guid.NewGuid(); var sourceId = Guid.NewGuid();
+        db.LibraryRoots.Add(new LibraryRootRow { Id = rootId, Path = root, Label = "Validation", Enabled = true,
+            ScanVideos = true, CreatedAt = now, UpdatedAt = now });
+        await db.SaveChangesAsync();
+        Guid? parentId = null;
+        if (kind == EntityKind.VideoEpisode) {
+            var seriesId = Guid.NewGuid(); parentId = Guid.NewGuid();
+            db.Entities.Add(new EntityRow { Id = seriesId, KindCode = EntityKind.VideoSeries.ToCode(), Title = "Show", CreatedAt = now, UpdatedAt = now });
+            await db.SaveChangesAsync();
+            db.Entities.Add(new EntityRow { Id = parentId.Value, ParentEntityId = seriesId,
+                KindCode = EntityKind.VideoSeason.ToCode(), Title = "Season two", SortOrder = 3, CreatedAt = now, UpdatedAt = now });
+            db.EntityPositions.Add(new EntityPositionRow { EntityId = parentId.Value, Code = EntityPositionCodes.Season, Value = 2 });
+            await db.SaveChangesAsync();
+        }
+        db.Entities.Add(new EntityRow { Id = entityId, ParentEntityId = parentId, KindCode = kind.ToCode(), Title = "Canonical story",
+            SortOrder = kind == EntityKind.VideoEpisode ? 7 : null, CreatedAt = now, UpdatedAt = now });
+        await db.SaveChangesAsync();
+        if (kind == EntityKind.VideoEpisode) db.EntityPositions.Add(new EntityPositionRow { EntityId = entityId, Code = EntityPositionCodes.Episode, Value = 41 });
+        db.BookAcquisitionProfiles.Add(new BookAcquisitionProfileRow { Id = profileId, Kind = AcquisitionProfileKinds.For(kind),
+            DisplayName = "HD", TargetLibraryRootId = rootId, AutoPick = true, CutoffQuality = VideoQuality.Webdl1080p.ToCode(), CreatedAt = now, UpdatedAt = now });
+        var path = Path.Combine(root, "owned.mkv");
+        await File.WriteAllTextAsync(path, "owned video bytes");
+        var size = new FileInfo(path).Length;
+        db.EntityFiles.Add(new EntityFileRow { Id = sourceId, EntityId = entityId, Role = EntityFileRole.Source,
+            Path = path, SizeBytes = size, Source = FileSourceKind.Scan.ToCode(), CreatedAt = now, UpdatedAt = now });
+        await db.SaveChangesAsync();
+        db.MediaSources.Add(new MediaSourceRow { Id = Guid.NewGuid(), EntityId = entityId, EntityFileId = sourceId,
+            Path = path, SizeBytes = size, Width = 1280, Height = 720, DurationSeconds = 1200, CreatedAt = now, UpdatedAt = now });
+        db.EntitySubtitleStates.Add(new EntitySubtitleStateRow { EntityId = entityId, SubtitlesExtractedAt = now });
+        db.EntitySubtitles.Add(new EntitySubtitleRow { Id = Guid.NewGuid(), EntityId = entityId, Language = "eng", Format = "vtt",
+            Source = EntitySubtitleSource.Embedded, SourceKey = "stream:2", StoragePath = "/data/subtitles/2.vtt", SourceFormat = "subrip", CreatedAt = now });
+        db.Monitors.Add(new MonitorRow { Id = monitorId, EntityId = entityId, Kind = kind, Title = "Canonical story", Status = MonitorStatus.Active,
+            ProfileId = profileId, TargetLibraryRootId = rootId, CreatedAt = now, UpdatedAt = now });
+        await db.SaveChangesAsync();
+        return new(new EfMonitorStore(db), monitorId, entityId, sourceId, path);
+    }
+
+    private static PrismediaDbContext MemoryContext() => new(new DbContextOptionsBuilder<PrismediaDbContext>()
+        .UseInMemoryDatabase(Guid.NewGuid().ToString()).Options);
+    private sealed record Fixture(EfMonitorStore Store, Guid MonitorId, Guid EntityId, Guid SourceId, string SourcePath);
+}

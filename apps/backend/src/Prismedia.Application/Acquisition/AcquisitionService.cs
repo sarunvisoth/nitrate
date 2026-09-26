@@ -1,0 +1,1003 @@
+using Microsoft.Extensions.Logging;
+using Prismedia.Application.Entities;
+using Prismedia.Application.Jobs;
+using Prismedia.Application.Jobs.Handlers;
+using Prismedia.Application.Jobs.Scanning;
+using Prismedia.Contracts.Acquisition;
+using Prismedia.Contracts.System;
+using Prismedia.Domain.Entities;
+
+namespace Prismedia.Application.Acquisition;
+
+/// <summary>
+/// Cancels durable acquisition work by its exact target before the acquisition row is removed. This also
+/// terminalizes the owning graph so open review or external-event signals cannot outlive the lifecycle.
+/// </summary>
+public interface IAcquisitionJobCleanup {
+    /// <summary>
+    /// Cancels queued/running jobs whose target is exactly <paramref name="acquisitionId"/> and cancels
+    /// every still-active graph linked by the acquisition or one of its nodes.
+    /// </summary>
+    Task<int> CancelAsync(Guid acquisitionId, CancellationToken cancellationToken);
+}
+
+/// <summary>Graph-owned cancellation seam that also tears down any linked external transfer.</summary>
+public interface IAcquisitionGraphCancellation {
+    Task CancelFromGraphAsync(Guid acquisitionId, CancellationToken cancellationToken);
+}
+
+/// <summary>
+/// Completes a durable removal claim whose owning Entity has already disappeared. This narrow recovery
+/// seam is reserved for the lifecycle worker; ordinary acquisition removal still uses the user-facing
+/// teardown workflows.
+/// </summary>
+public interface IAcquisitionTeardownRecovery {
+    /// <summary>Best-effort removes any surviving transfer, then deletes the locally claimed acquisition.</summary>
+    Task<bool> CompleteOrphanedEntityRemovalAsync(Guid acquisitionId, CancellationToken cancellationToken);
+}
+
+/// <summary>
+/// Removes filesystem and catalog artifacts owned by an interrupted import checkpoint. This is the
+/// explicit destructive escape hatch used only when the user chooses to discard the attempt by starting
+/// over or manually selecting a replacement release.
+/// </summary>
+public interface IAcquisitionImportResetCleanup {
+    /// <summary>
+    /// Best-effort deletes newly placed payload files, restores a retained pre-upgrade file when possible,
+    /// and clears catalog rows that point at discarded paths. Missing artifacts are already clean.
+    /// </summary>
+    Task CleanupAsync(AcquisitionImportContext import, CancellationToken cancellationToken);
+}
+
+/// <summary>
+/// Application use case for the acquisition lifecycle from the API's perspective: create an acquisition
+/// from request metadata and kick off a background release search, then list and read acquisition state.
+/// </summary>
+public sealed partial class AcquisitionService(
+    IAcquisitionStore store,
+    IAcquisitionBlocklistStore blocklist,
+    IJobQueueService queue,
+    IDownloadClientConfigStore downloadClients,
+    IDownloadClientFactory clients,
+    IImportedFilesReader importedFiles,
+    IAcquisitionHistoryStore history,
+    ILogger<AcquisitionService> logger,
+    IMonitorStore monitors,
+    IAcquisitionJobCleanup acquisitionJobs,
+    IEntityLifecycleMutationLease entityLifecycle,
+    IAcquisitionImportResetCleanup importResetCleanup,
+    VideoScanConcurrencyGate? scanGate = null,
+    IAcquisitionUploadStorage? uploads = null,
+    IAcquisitionSearchResourcePolicy? searchResources = null,
+    IAcquisitionReleaseTimingService? releaseTiming = null,
+    IJobGraphService? graphs = null,
+    IDownloadPayloadReader? manualImportPayloads = null,
+    IImportTargetIndex? manualImportTargets = null,
+    DownloadClientCleanupService? downloadCleanup = null,
+    ITvEpisodeCatalogEvidenceSource? manualCatalogEvidence = null) : IAcquisitionRequestService, IAcquisitionGraphCancellation, IAcquisitionTeardownRecovery {
+    public Task<IReadOnlyList<AcquisitionSummary>> ListAsync(CancellationToken cancellationToken) =>
+        store.ListAsync(cancellationToken);
+
+    public Task<AcquisitionDetail?> GetAsync(Guid id, CancellationToken cancellationToken) =>
+        store.GetAsync(id, cancellationToken);
+
+    /// <summary>The latest acquisition backing a library entity (wanted or imported), or null when it has none.</summary>
+    public Task<AcquisitionDetail?> GetForEntityAsync(Guid entityId, CancellationToken cancellationToken) =>
+        store.GetLatestForEntityAsync(entityId, cancellationToken);
+
+    /// <summary>Every direct acquisition backing a library Entity, including parallel Book renditions.</summary>
+    public Task<IReadOnlyList<AcquisitionDetail>> ListForEntityAsync(
+        Guid entityId,
+        CancellationToken cancellationToken) =>
+        store.ListForEntityAsync(entityId, cancellationToken);
+
+    /// <summary>
+    /// Every direct acquisition backing a library Entity without scored release candidates, for
+    /// lightweight status polling by Entity detail surfaces.
+    /// </summary>
+    public Task<IReadOnlyList<AcquisitionSummary>> ListSummariesForEntityAsync(
+        Guid entityId,
+        CancellationToken cancellationToken) =>
+        store.ListSummariesForEntityAsync(entityId, cancellationToken);
+
+    /// <inheritdoc />
+    public async Task<AcquisitionRemovalEligibility> GetRemovalEligibilityAsync(
+        Guid id,
+        CancellationToken cancellationToken) {
+        var detail = await store.GetAsync(id, cancellationToken);
+        if (detail is null) {
+            return new AcquisitionRemovalEligibility(true);
+        }
+
+        if (detail.Summary.Status == AcquisitionStatus.Stopping) {
+            var claim = await store.GetTeardownClaimAsync(id, cancellationToken);
+            return claim?.Intent == AcquisitionTeardownIntent.Remove
+                ? new AcquisitionRemovalEligibility(true)
+                : new AcquisitionRemovalEligibility(
+                    false,
+                    "This acquisition is already stopping for a different cleanup operation.");
+        }
+
+        if (detail.Summary.Status == AcquisitionStatus.Importing) {
+            return new AcquisitionRemovalEligibility(false, ActiveImportConflict(detail.Summary.Status).Message);
+        }
+
+        if (detail.Summary.Status == AcquisitionStatus.Queued
+            && (await store.GetTransferInfoAsync(id, cancellationToken))?.ClientItemId is not { Length: > 0 }) {
+            return new AcquisitionRemovalEligibility(
+                false,
+                "This acquisition is still being handed to its download client. Wait for queueing to finish and retry.");
+        }
+
+        AcquisitionImportContext? import;
+        try {
+            import = await store.GetImportContextAsync(id, cancellationToken);
+        } catch (InvalidDataException) {
+            return new AcquisitionRemovalEligibility(false, ImportCheckpointLifecycle.CorruptCheckpointMessage);
+        }
+
+        if (import is not { HasImportRecoveryState: true }
+            || await ImportCheckpointLifecycle.CanAbandonAsync(import, cancellationToken, scanGate)) {
+            return new AcquisitionRemovalEligibility(true);
+        }
+
+        return new AcquisitionRemovalEligibility(false, ImportCheckpointLifecycle.CheckpointMustFinishMessage);
+    }
+
+    /// <inheritdoc />
+    public async Task<AcquisitionReacquireEligibility> GetReacquireEligibilityAsync(
+        Guid id,
+        CancellationToken cancellationToken) {
+        var detail = await store.GetAsync(id, cancellationToken);
+        return detail is null
+            ? new AcquisitionReacquireEligibility(false, "The acquisition no longer exists.")
+            : await EvaluateReacquireEligibilityAsync(detail, cancellationToken);
+    }
+
+    /// <summary>Live transfer telemetry (progress, speed, ETA, peers, per-piece state) for an in-flight acquisition, or null when there is no live transfer.</summary>
+    public async Task<AcquisitionTransferView?> GetTransferAsync(Guid id, CancellationToken cancellationToken) {
+        var info = await store.GetTransferInfoAsync(id, cancellationToken);
+        if (info?.ClientItemId is not { } clientItemId) {
+            return null;
+        }
+
+        var client = await ResolveClientAsync(info.DownloadClientConfigId, cancellationToken);
+        if (client is null) {
+            return null;
+        }
+
+        var connection = ConnectionFor(client);
+        var download = clients.Get(client.Kind);
+        // torrents/info (status) reports the live stage and progress even before metadata resolves;
+        // torrents/properties adds speed/seeds/eta once the transfer is underway. Surface whatever is
+        // available so early stages (e.g. fetching metadata) still show what's happening rather than a
+        // bare "waiting" placeholder. Only when the torrent is gone entirely do we report no transfer.
+        DownloadItemStatus? status;
+        try {
+            status = await download.GetItemAsync(connection, clientItemId, cancellationToken);
+        } catch (OperationCanceledException) {
+            throw;
+        } catch (Exception ex) {
+            // Live telemetry is read-only enrichment. An unavailable external client must not turn an
+            // otherwise usable acquisition detail page into an API failure.
+            logger.LogDebug(
+                ex,
+                "Download client {Client} unreachable while reading transfer {TransferId}.",
+                client.DisplayName,
+                clientItemId);
+            return null;
+        }
+
+        DownloadItemProperties? properties = null;
+        try {
+            properties = await download.GetPropertiesAsync(connection, clientItemId, cancellationToken);
+        } catch (OperationCanceledException) {
+            throw;
+        } catch (Exception ex) {
+            // Properties are optional enrichment; status alone is enough to render useful progress.
+            logger.LogDebug(
+                ex,
+                "Download client {Client} did not return properties for transfer {TransferId}.",
+                client.DisplayName,
+                clientItemId);
+        }
+        if (status is null && properties is null) {
+            return null;
+        }
+
+        byte[] pieces;
+        try {
+            pieces = await download.GetPieceStatesAsync(connection, clientItemId, cancellationToken);
+        } catch (OperationCanceledException) {
+            throw;
+        } catch (Exception ex) {
+            // Piece state is a torrent-only visualization and must never gate the transfer summary.
+            logger.LogDebug(
+                ex,
+                "Download client {Client} did not return piece state for transfer {TransferId}.",
+                client.DisplayName,
+                clientItemId);
+            pieces = [];
+        }
+        return new AcquisitionTransferView(
+            status?.Progress ?? 0,
+            status?.State,
+            properties?.TotalSizeBytes ?? 0,
+            properties?.DownloadSpeedBytesPerSecond ?? 0,
+            properties?.EtaSeconds ?? 0,
+            properties?.Seeds ?? 0,
+            properties?.Peers ?? 0,
+            properties?.SavePath ?? status?.SavePath,
+            Array.ConvertAll(pieces, piece => (int)piece));
+    }
+
+    /// <summary>
+    /// The global Downloads view: every active acquisition (not imported, not cancelled) with live
+    /// download-client telemetry where a transfer is in flight. Telemetry is collected with one item
+    /// listing per download client; adapters may carry telemetry in that listing, while older adapters fall
+    /// back to one properties read per transfer. An unreachable client degrades
+    /// its rows to the last persisted progress instead of failing the view.
+    /// </summary>
+    public async Task<IReadOnlyList<DownloadQueueItemView>> ListDownloadsAsync(CancellationToken cancellationToken) {
+        var summaries = await store.ListAsync(cancellationToken);
+        var active = summaries
+            .Where(summary => summary.Status is not (AcquisitionStatus.Imported or AcquisitionStatus.Cancelled))
+            .ToArray();
+        if (active.Length == 0) {
+            return [];
+        }
+
+        var telemetry = await CollectLiveTelemetryAsync(cancellationToken);
+        return active
+            .Select(summary => {
+                var live = telemetry.GetValueOrDefault(summary.Id);
+                return new DownloadQueueItemView(
+                    summary.Id,
+                    summary.Kind,
+                    summary.Title,
+                    summary.Status,
+                    summary.StatusMessage,
+                    live?.Progress ?? summary.Progress,
+                    summary.UpdatedAt,
+                    summary.EntityId,
+                    summary.PosterUrl,
+                    live?.State,
+                    live?.TotalSizeBytes,
+                    live?.DownloadSpeedBytesPerSecond,
+                    live?.EtaSeconds,
+                    live?.Seeds,
+                    live?.Peers,
+                    live?.ClientName,
+                    summary.Author,
+                    summary.Series,
+                    summary.Year,
+                    summary.BookRendition);
+            })
+            .ToArray();
+    }
+
+    /// <summary>Live telemetry per acquisition id, grouped so each download client is listed once.</summary>
+    private async Task<IReadOnlyDictionary<Guid, LiveTransferTelemetry>> CollectLiveTelemetryAsync(CancellationToken cancellationToken) {
+        var transfers = await store.ListActiveTransfersAsync(cancellationToken);
+        var telemetry = new Dictionary<Guid, LiveTransferTelemetry>();
+        foreach (var clientTransfers in transfers.GroupBy(transfer => transfer.DownloadClientConfigId)) {
+            var client = await ResolveClientAsync(clientTransfers.Key, cancellationToken);
+            if (client is null) {
+                continue;
+            }
+
+            var connection = ConnectionFor(client);
+            var download = clients.Get(client.Kind);
+            IReadOnlyDictionary<string, DownloadItemStatus> items;
+            try {
+                items = (await download.ListItemsAsync(connection, cancellationToken))
+                    .ToDictionary(item => item.ClientItemId, StringComparer.OrdinalIgnoreCase);
+            } catch (OperationCanceledException) {
+                throw;
+            } catch (Exception ex) {
+                // The client being down must not take the whole Downloads view with it.
+                logger.LogWarning(ex, "Download client {Client} unreachable while building the downloads view.", client.DisplayName);
+                continue;
+            }
+
+            foreach (var transfer in clientTransfers) {
+                if (!items.TryGetValue(transfer.ClientItemId, out var status)) {
+                    continue;
+                }
+
+                var properties = status.Properties;
+                if (properties is null) {
+                    try {
+                        properties = await download.GetPropertiesAsync(connection, transfer.ClientItemId, cancellationToken);
+                    } catch (OperationCanceledException) {
+                        throw;
+                    } catch (Exception) {
+                        // Properties are enrichment; the listing's progress/state still renders the row.
+                    }
+                }
+
+                telemetry[transfer.AcquisitionId] = new LiveTransferTelemetry(
+                    status.Progress,
+                    status.State,
+                    properties?.TotalSizeBytes,
+                    properties?.DownloadSpeedBytesPerSecond,
+                    properties?.EtaSeconds,
+                    properties?.Seeds,
+                    properties?.Peers,
+                    client.DisplayName);
+            }
+        }
+
+        return telemetry;
+    }
+
+    /// <summary>Live client telemetry for one acquisition's transfer, shaped for the Downloads view.</summary>
+    private sealed record LiveTransferTelemetry(
+        double Progress,
+        string? State,
+        long? TotalSizeBytes,
+        double? DownloadSpeedBytesPerSecond,
+        long? EtaSeconds,
+        int? Seeds,
+        int? Peers,
+        string ClientName);
+
+    private async Task<Contracts.Acquisition.DownloadClientDetail?> ResolveClientAsync(Guid? configId, CancellationToken cancellationToken) =>
+        configId is { } id
+            ? await downloadClients.GetAsync(id, cancellationToken)
+            : null;
+
+    private async Task<Contracts.Acquisition.DownloadClientDetail?> ResolveRemovalClientAsync(
+        AcquisitionTransferInfo transfer,
+        CancellationToken cancellationToken) =>
+        transfer.DownloadClientConfigId is { } id
+            ? await downloadClients.GetAsync(id, cancellationToken)
+            : await downloadClients.GetDefaultAsync(cancellationToken);
+
+    private static DownloadClientConnection ConnectionFor(Contracts.Acquisition.DownloadClientDetail client) =>
+        new(client.Id, client.Kind, client.BaseUrl, client.Username, client.Password, client.Category, client.ApiKey);
+
+    /// <summary>Cancels an acquisition: best-effort removes the download (and its data) from the owning client, then marks it cancelled.</summary>
+    public async Task<AcquisitionDetail?> CancelAsync(Guid id, CancellationToken cancellationToken) {
+        var detail = await store.GetAsync(id, cancellationToken);
+        if (detail is null) {
+            return null;
+        }
+
+        if (detail.Summary.Status is AcquisitionStatus.Importing or AcquisitionStatus.Imported) {
+            throw ActiveImportConflict(detail.Summary.Status);
+        }
+
+        await EnsureImportCheckpointCanBeSupersededAsync(detail, cancellationToken);
+        if (!await store.TryTransitionStatusAsync(
+                id,
+                [detail.Summary.Status],
+                AcquisitionStatus.Cancelled,
+                "Cancelled.",
+                cancellationToken)) {
+            throw LifecycleChangedConflict();
+        }
+
+        if (downloadCleanup is not null
+            && await store.GetImportContextAsync(id, cancellationToken) is { } cancelledTransfer) {
+            await downloadCleanup.RemoveNowOrScheduleRetryAsync(cancelledTransfer, cancellationToken);
+        } else {
+            await RemoveTransferDataAsync(id, cancellationToken);
+        }
+
+        await RecordRemovedAsync(detail.Summary, "Cancelled by user.", cancellationToken);
+
+        // Cancel stops THIS download only — the wanted placeholder and any monitor stay exactly as they
+        // are (monitoring is managed separately). An active monitor re-searches the cancelled acquisition
+        // on its normal cadence; the explicit give-up paths are the grid's "Remove wanted" and the
+        // entity's delete/unmonitor actions.
+        return await store.GetAsync(id, cancellationToken);
+    }
+
+    /// <inheritdoc />
+    public async Task CancelFromGraphAsync(Guid acquisitionId, CancellationToken cancellationToken) {
+        await CancelAsync(acquisitionId, cancellationToken);
+    }
+
+    /// <summary>
+    /// Removes an acquisition (the download pipeline record): best-effort deletes its download (and data)
+    /// from the owning client, then hard-deletes the record. The wanted placeholder entity is KEPT —
+    /// removing a download cleans up the transfer, it does not un-want the item; the grid's
+    /// "Remove wanted" and the entity's delete/unmonitor actions are the explicit give-up paths.
+    /// With <paramref name="preserveWantedLoop"/> (the user-facing Downloads remove), a monitor watching
+    /// the removed acquisition survives: the record is cloned into a fresh pending acquisition for the
+    /// same wanted entity and the monitor re-pointed at it, so the loop re-searches on its normal
+    /// cadence instead of orphan-pausing. Internal teardown paths (remove-wanted, entity deletion) leave
+    /// the flag off — they are dismantling the loop on purpose.
+    /// </summary>
+    public Task<bool> DeleteAsync(Guid id, CancellationToken cancellationToken, bool preserveWantedLoop = false) =>
+        DeleteCoreAsync(id, preserveWantedLoop, cancellationToken);
+
+    /// <inheritdoc />
+    public async Task<bool> DeleteForUnmonitorAsync(Guid id, CancellationToken cancellationToken) {
+        if (!await ClaimTeardownAsync(id, AcquisitionTeardownIntent.Remove, cancellationToken)) {
+            return false;
+        }
+
+        await ConfirmTransferRemovedAsync(id, cancellationToken);
+        return await CompleteTeardownAsync(id, AcquisitionTeardownIntent.Remove, cancellationToken);
+    }
+
+    /// <inheritdoc />
+    public async Task<bool> ClaimTeardownAsync(
+        Guid id,
+        AcquisitionTeardownIntent intent,
+        CancellationToken cancellationToken) {
+        var detail = await store.GetAsync(id, cancellationToken);
+        if (detail is null) {
+            return false;
+        }
+
+        if (detail.Summary.Status == AcquisitionStatus.Stopping) {
+            var existing = await store.GetTeardownClaimAsync(id, cancellationToken);
+            if (existing?.Intent != intent) {
+                throw new AcquisitionConfigurationException(
+                    ApiProblemCodes.AcquisitionInvalid,
+                    "This acquisition is already stopping for a different cleanup operation.");
+            }
+
+            await acquisitionJobs.CancelAsync(id, cancellationToken);
+            return true;
+        }
+
+        if (intent == AcquisitionTeardownIntent.Reacquire) {
+            var eligibility = await EvaluateReacquireEligibilityAsync(detail, cancellationToken);
+            if (!eligibility.CanReacquire) {
+                throw new AcquisitionConfigurationException(
+                    ApiProblemCodes.AcquisitionInvalid,
+                    eligibility.Message ?? "This acquisition cannot be reacquired right now.");
+            }
+        } else {
+            var eligibility = await GetRemovalEligibilityAsync(id, cancellationToken);
+            if (!eligibility.CanRemove) {
+                throw new AcquisitionConfigurationException(
+                    ApiProblemCodes.AcquisitionInvalid,
+                    eligibility.Message ?? "This acquisition cannot be removed right now.");
+            }
+        }
+
+        await EnsureImportCheckpointCanBeSupersededAsync(detail, cancellationToken);
+        if (!await store.TryClaimTeardownAsync(
+                id,
+                detail.Summary.Status,
+                intent,
+                intent == AcquisitionTeardownIntent.Reacquire
+                    ? "Removing files before reacquisition."
+                    : "Removing acquisition.",
+                cancellationToken)) {
+            throw LifecycleChangedConflict();
+        }
+
+        // Job cancellation is part of the durable local claim and precedes the first remote/filesystem
+        // effect. A failure leaves Stopping durable; retry repeats exact cancellation idempotently.
+        await acquisitionJobs.CancelAsync(id, cancellationToken);
+        return true;
+    }
+
+    /// <inheritdoc />
+    public async Task<bool> ClaimEntityRemovalTeardownAsync(
+        Guid id,
+        CancellationToken cancellationToken) {
+        var detail = await store.GetAsync(id, cancellationToken);
+        if (detail is null) {
+            return false;
+        }
+
+        if (!await store.TryClaimEntityRemovalTeardownAsync(
+                id,
+                "Removing acquisition with its Entity.",
+                cancellationToken)) {
+            throw LifecycleChangedConflict();
+        }
+
+        await acquisitionJobs.CancelAsync(id, cancellationToken);
+        await CleanupInterruptedImportAsync(id, cancellationToken);
+        return true;
+    }
+
+    /// <inheritdoc />
+    public Task ConfirmTransferRemovedAsync(Guid id, CancellationToken cancellationToken) =>
+        RemoveTransferDataStrictAsync(id, cancellationToken);
+
+    /// <inheritdoc />
+    public Task DiscardTransferForEntityDeletionAsync(Guid id, CancellationToken cancellationToken) =>
+        RemoveTransferDataAsync(id, cancellationToken);
+
+    /// <inheritdoc />
+    public async Task<bool> CompleteOrphanedEntityRemovalAsync(
+        Guid acquisitionId,
+        CancellationToken cancellationToken) {
+        await DiscardTransferForEntityDeletionAsync(acquisitionId, cancellationToken);
+        return await CompleteTeardownAsync(
+            acquisitionId,
+            AcquisitionTeardownIntent.Remove,
+            cancellationToken);
+    }
+
+    /// <inheritdoc />
+    public async Task<bool> CompleteTeardownAsync(
+        Guid id,
+        AcquisitionTeardownIntent intent,
+        CancellationToken cancellationToken) {
+        var detail = await store.GetAsync(id, cancellationToken);
+        if (detail is null) {
+            return false;
+        }
+
+        var claim = await store.GetTeardownClaimAsync(id, cancellationToken);
+        if (claim?.Intent != intent) {
+            throw new AcquisitionConfigurationException(
+                ApiProblemCodes.AcquisitionInvalid,
+                "The acquisition no longer carries the expected cleanup claim. Refresh and retry.");
+        }
+
+        await RecordRemovedAsync(detail.Summary, claim.SupersededHeldDownload
+            ? "Held download removed after its replacement finished importing." : "Removed by user.", cancellationToken);
+        return await store.DeleteAsync(id, cancellationToken);
+    }
+
+    private async Task<bool> DeleteCoreAsync(
+        Guid id,
+        bool preserveWantedLoop,
+        CancellationToken cancellationToken) {
+        var detail = await store.GetAsync(id, cancellationToken);
+        var summary = detail?.Summary;
+        if (detail is null) {
+            return false;
+        }
+
+        if (detail.Summary.Status == AcquisitionStatus.Stopping) {
+            var claim = await store.GetTeardownClaimAsync(id, cancellationToken);
+            var expectedIntent = preserveWantedLoop
+                ? AcquisitionTeardownIntent.Reacquire
+                : AcquisitionTeardownIntent.Remove;
+            if (claim?.Intent != expectedIntent) {
+                throw new AcquisitionConfigurationException(
+                    ApiProblemCodes.AcquisitionInvalid,
+                    "This acquisition is already stopping. Retry the operation that started its cleanup.");
+            }
+        } else if (preserveWantedLoop) {
+            if (detail.Summary.Status == AcquisitionStatus.Imported) {
+                throw new AcquisitionConfigurationException(
+                    ApiProblemCodes.AcquisitionInvalid,
+                    "This acquisition already owns library files. Use Delete files when you want to remove the Entity and its files.");
+            }
+            if (!await store.TryClaimTeardownAsync(
+                    id,
+                    detail.Summary.Status,
+                    AcquisitionTeardownIntent.Reacquire,
+                    "Removing download and restarting its wanted search.",
+                    cancellationToken)) {
+                throw LifecycleChangedConflict();
+            }
+        } else {
+            await ClaimTeardownAsync(id, AcquisitionTeardownIntent.Remove, cancellationToken);
+        }
+
+        if (preserveWantedLoop || detail.Summary.Status == AcquisitionStatus.Stopping) {
+            await acquisitionJobs.CancelAsync(id, cancellationToken);
+        }
+
+        if (preserveWantedLoop) {
+            await CleanupInterruptedImportAsync(id, cancellationToken);
+            // Downloads -> Remove is explicitly destructive and already warns that transfer data is being
+            // discarded. A missing client, missing item, or client outage must not strand local state in
+            // Stopping forever; remove remotely when possible, then finish the local reset regardless.
+            await RemoveTransferDataAsync(id, cancellationToken);
+        } else {
+            // Entity deletion and unmonitoring promise that no owned remote transfer is orphaned, so those
+            // stricter workflows still fail closed until absence is proven.
+            await RemoveTransferDataStrictAsync(id, cancellationToken);
+        }
+
+        if (preserveWantedLoop) {
+            // The replacement is durably elected and linked from the Stopping owner before retargeting.
+            // A crash anywhere after this point resumes the same clone instead of manufacturing duplicate
+            // Pending rows on each retry of Downloads → Remove.
+            var replacementId = await store.GetOrCreateTeardownReplacementAsync(id, cancellationToken);
+            if (replacementId is { } freshId) {
+                if (!await monitors.RetargetAsync(id, freshId, cancellationToken)) {
+                    // A recursive unmonitor claim won the race after the clone was created. The clone has
+                    // no job or transfer yet, so remove it immediately.
+                    await store.DeleteAsync(freshId, cancellationToken);
+                } else {
+                    var replacementStatus = await store.GetStatusAsync(freshId, cancellationToken);
+                    if (replacementStatus == AcquisitionStatus.Pending
+                        && await store.TryTransitionStatusAsync(
+                            freshId,
+                            [AcquisitionStatus.Pending],
+                            AcquisitionStatus.Searching,
+                            null,
+                            cancellationToken)) {
+                        replacementStatus = AcquisitionStatus.Searching;
+                    } else if (replacementStatus == AcquisitionStatus.Pending) {
+                        replacementStatus = await store.GetStatusAsync(freshId, cancellationToken);
+                    }
+
+                    if (replacementStatus == AcquisitionStatus.Searching
+                        && !await queue.HasPendingAsync(
+                            JobType.AcquisitionSearch,
+                            freshId.ToString(),
+                            cancellationToken)) {
+                        await queue.EnqueueAsync(
+                            new EnqueueJobRequest(
+                                JobType.AcquisitionSearch,
+                                PayloadJson: AcquisitionJobPayload.Serialize(freshId),
+                                TargetEntityId: freshId.ToString(),
+                                TargetLabel: detail.Summary.Title,
+                                Origin: JobGraphOrigin.Interactive,
+                                GraphRootEntityKind: detail.Summary.Kind.ToCode(),
+                                GraphRootEntityId: detail.Summary.EntityId?.ToString()),
+                            cancellationToken);
+                    }
+                }
+            }
+
+            if (summary is not null) {
+                await RecordRemovedAsync(summary, "Removed by user.", cancellationToken);
+            }
+        }
+
+        return preserveWantedLoop
+            ? await store.DeleteAsync(id, cancellationToken)
+            : await CompleteTeardownAsync(id, AcquisitionTeardownIntent.Remove, cancellationToken);
+    }
+
+    private async Task CleanupInterruptedImportAsync(Guid id, CancellationToken cancellationToken) {
+        AcquisitionImportContext? import;
+        try {
+            import = await store.GetImportContextAsync(id, cancellationToken);
+        } catch (InvalidDataException exception) {
+            // A corrupt checkpoint cannot be interpreted safely, but it also must not make the acquisition
+            // row undeletable. The exact download transfer is still removed best-effort below.
+            logger.LogWarning(
+                exception,
+                "Acquisition {Id} has a corrupt import checkpoint; clearing its lifecycle without guessing filesystem paths.",
+                id);
+            return;
+        }
+
+        if (import is not { HasImportRecoveryState: true }) {
+            return;
+        }
+
+        try {
+            await importResetCleanup.CleanupAsync(import, cancellationToken);
+        } catch (OperationCanceledException) {
+            throw;
+        } catch (Exception exception) {
+            // This action is the explicit force-clear escape hatch. Preserve diagnostics, but do not turn a
+            // missing/locked leftover into the same permanent 500 loop the user is trying to escape.
+            logger.LogWarning(
+                exception,
+                "Acquisition {Id} could not remove every partial import artifact while starting over.",
+                id);
+        }
+    }
+
+    /// <inheritdoc />
+    public async Task<Guid?> ReacquireAsync(Guid id, CancellationToken cancellationToken) {
+        var detail = await store.GetAsync(id, cancellationToken);
+        if (detail is null) {
+            return null;
+        }
+
+        await ClaimTeardownAsync(id, AcquisitionTeardownIntent.Reacquire, cancellationToken);
+        // A direct call claims before remote work; managed Entity deletion reaches this method with the same
+        // durable claim after disk succeeds. Confirming absence again is intentionally idempotent on retry.
+        await ConfirmTransferRemovedAsync(id, cancellationToken);
+
+        // The replacement and its pointer from the teardown owner are committed together. A retry therefore
+        // resumes this exact clean lifecycle instead of creating a second acquisition after a crash between
+        // monitor retargeting, search initialization, and removal of the old Imported row.
+        var replacementId = await store.GetOrCreateTeardownReplacementAsync(id, cancellationToken);
+        if (replacementId is not { } freshId) {
+            // The entity is already fileless + Wanted, so preserving an Imported acquisition here would be
+            // actively false and every action against it would target a dead lifecycle. Remove its helper
+            // monitor and row; the surviving container monitor (if any) can still rediscover the wanted gap.
+            if (await monitors.GetByAcquisitionAsync(id, cancellationToken) is { } staleMonitor) {
+                await monitors.DeleteAsync(staleMonitor.Id, cancellationToken);
+            }
+
+            await RecordRemovedAsync(
+                detail.Summary, "Files deleted; retry could not be initialized.", cancellationToken);
+            await store.DeleteAsync(id, cancellationToken);
+            return null;
+        }
+
+        if (!await monitors.RetargetAfterFileDeletionAsync(id, freshId, cancellationToken)
+            && !await monitors.RetargetAsync(id, freshId, cancellationToken)) {
+            // Claim-first race: never leave the pending clone outside the immutable unmonitor scope.
+            // Remote data was already confirmed absent before any local lifecycle transition.
+            await store.DeleteAsync(freshId, cancellationToken);
+            await RecordRemovedAsync(
+                detail.Summary, "Files deleted while monitoring was being stopped.", cancellationToken);
+            await store.DeleteAsync(id, cancellationToken);
+            return null;
+        }
+
+        var replacementStatus = await store.GetStatusAsync(freshId, cancellationToken);
+        if (replacementStatus == AcquisitionStatus.Pending) {
+            if (await store.TryTransitionStatusAsync(
+                    freshId,
+                    [AcquisitionStatus.Pending],
+                    AcquisitionStatus.Searching,
+                    null,
+                    cancellationToken)) {
+                replacementStatus = AcquisitionStatus.Searching;
+            } else {
+                replacementStatus = await store.GetStatusAsync(freshId, cancellationToken);
+            }
+        }
+
+        // Searching is the durable intent. A retry closes either side of the status/enqueue crash window,
+        // while the queue lookup prevents a second search job after retarget or history work is retried.
+        if (replacementStatus == AcquisitionStatus.Searching
+            && !await queue.HasPendingAsync(
+                JobType.AcquisitionSearch,
+                freshId.ToString(),
+                cancellationToken)) {
+            await queue.EnqueueAsync(
+                new EnqueueJobRequest(
+                    JobType.AcquisitionSearch,
+                    PayloadJson: AcquisitionJobPayload.Serialize(freshId),
+                    TargetEntityId: freshId.ToString(),
+                    TargetLabel: detail.Summary.Title,
+                    Origin: JobGraphOrigin.Interactive,
+                    GraphRootEntityKind: detail.Summary.Kind.ToCode(),
+                    GraphRootEntityId: detail.Summary.EntityId?.ToString()),
+                cancellationToken);
+        }
+
+        // Record while the old FK target still exists; the history row survives its deletion via SetNull.
+        await RecordRemovedAsync(detail.Summary, "Files deleted; searching again.", cancellationToken);
+        await store.DeleteAsync(id, cancellationToken);
+        return freshId;
+    }
+
+    private async Task<AcquisitionReacquireEligibility> EvaluateReacquireEligibilityAsync(
+        AcquisitionDetail detail,
+        CancellationToken cancellationToken) {
+        if (detail.Summary.Status == AcquisitionStatus.Stopping) {
+            var claim = await store.GetTeardownClaimAsync(detail.Summary.Id, cancellationToken);
+            return claim is {
+                Intent: AcquisitionTeardownIntent.Reacquire,
+                OriginalStatus: AcquisitionStatus.Imported
+            }
+                ? new AcquisitionReacquireEligibility(true)
+                : new AcquisitionReacquireEligibility(
+                    false,
+                    "This acquisition is already stopping for a different cleanup operation.");
+        }
+
+        if (detail.Summary.Status != AcquisitionStatus.Imported) {
+            return new AcquisitionReacquireEligibility(
+                false,
+                ActiveImportConflict(detail.Summary.Status).Message);
+        }
+
+        AcquisitionImportContext? import;
+        try {
+            import = await store.GetImportContextAsync(detail.Summary.Id, cancellationToken);
+        } catch (InvalidDataException) {
+            return new AcquisitionReacquireEligibility(false, ImportCheckpointLifecycle.CorruptCheckpointMessage);
+        }
+
+        if (import is not { HasImportRecoveryState: true }
+            || await ImportCheckpointLifecycle.CanAbandonAsync(
+                import,
+                cancellationToken,
+                scanGate)) {
+            return new AcquisitionReacquireEligibility(true);
+        }
+
+        return new AcquisitionReacquireEligibility(false, ImportCheckpointLifecycle.CheckpointMustFinishMessage);
+    }
+
+    /// <summary>
+    /// Best-effort removal of an acquisition's recorded download-client item and its data. A missing client
+    /// item is already the desired end state, while cancellation still propagates to the caller.
+    /// </summary>
+    private async Task RemoveTransferDataAsync(Guid id, CancellationToken cancellationToken) {
+        var transfer = await store.GetTransferInfoAsync(id, cancellationToken);
+        if (string.IsNullOrWhiteSpace(transfer?.ClientItemId)) {
+            return;
+        }
+        if (uploads?.Owns(transfer.ClientItemId) == true) { await uploads.DeleteAsync(transfer.ClientItemId, cancellationToken); return; }
+        var client = await ResolveRemovalClientAsync(transfer, cancellationToken);
+        if (client is null) {
+            return;
+        }
+
+        try {
+            await clients.Get(client.Kind).RemoveOwnedAsync(
+                ConnectionFor(client), id, transfer.ClientItemId, deleteData: true, cancellationToken);
+        } catch (OperationCanceledException) {
+            throw;
+        } catch (Exception) {
+            // The download may already be gone; local cancellation/removal/reacquisition must still finish.
+        }
+    }
+
+    /// <summary>
+    /// Strict counterpart used when unmonitoring promises no orphan download. A missing completed item is
+    /// already success; an unresolved pre-Add handoff or unavailable client fails closed with its pointer intact.
+    /// </summary>
+    private async Task RemoveTransferDataStrictAsync(Guid id, CancellationToken cancellationToken) {
+        var transfer = await store.GetTransferInfoAsync(id, cancellationToken);
+        if (string.IsNullOrWhiteSpace(transfer?.ClientItemId)) {
+            return;
+        }
+        if (uploads?.Owns(transfer.ClientItemId) == true) { await uploads.DeleteAsync(transfer.ClientItemId, cancellationToken); return; }
+        var client = await ResolveRemovalClientAsync(transfer, cancellationToken);
+        if (client is null) {
+            throw new AcquisitionConfigurationException(
+                ApiProblemCodes.AcquisitionInvalid,
+                "The recorded download client is unavailable, so its transfer could not be removed. Restore the client configuration and retry.");
+        }
+
+        try {
+            var download = clients.Get(client.Kind);
+            var connection = ConnectionFor(client) with {
+                Category = transfer.Category ?? client.Category
+            };
+            var clientItemId = transfer.ClientItemId;
+            var item = await download.GetItemAsync(connection, clientItemId, cancellationToken);
+            if (item is null && transfer.State == TransferOwnershipState.Adding.ToCode()) {
+                var matches = (await download.ListItemsAsync(connection, cancellationToken))
+                    .Where(candidate => DownloadAddCorrelation.MatchesName(clientItemId, candidate.Name))
+                    .GroupBy(candidate => candidate.ClientItemId, StringComparer.OrdinalIgnoreCase)
+                    .Select(group => group.First())
+                    .ToArray();
+                if (matches.Length > 1) {
+                    throw new AcquisitionConfigurationException(
+                        ApiProblemCodes.AcquisitionInvalid,
+                        "The unfinished download handoff matches multiple client items in its category. Prismedia will not guess which data to delete; remove the duplicate manually and retry cleanup.");
+                }
+
+                item = matches.SingleOrDefault();
+                if (item is null) {
+                    throw new AcquisitionConfigurationException(
+                        ApiProblemCodes.AcquisitionInvalid,
+                        "The unfinished download handoff could not be resolved in its recorded client category. Retry the same queue action or remove the client item manually; Prismedia will keep its ownership pointer until cleanup can be proven complete.");
+                }
+                clientItemId = item.ClientItemId;
+            } else if (item is null) {
+                return;
+            }
+
+            await download.RemoveOwnedAsync(connection, id, clientItemId, deleteData: true, cancellationToken);
+            if (await download.GetItemAsync(connection, clientItemId, cancellationToken) is not null) {
+                throw new IOException("The transfer is still present after the client acknowledged removal.");
+            }
+        } catch (OperationCanceledException) {
+            throw;
+        } catch (AcquisitionConfigurationException) {
+            throw;
+        } catch (Exception exception) {
+            throw new AcquisitionConfigurationException(
+                ApiProblemCodes.AcquisitionInvalid,
+                $"The download client could not remove the active transfer: {exception.Message}");
+        }
+    }
+
+    /// <summary>
+    /// Manually blocklists one of an acquisition's release candidates so it is never grabbed (here or on a
+    /// future search) and marks that candidate rejected so the picker reflects it immediately. Returns the
+    /// refreshed acquisition, or null when the candidate no longer exists.
+    /// </summary>
+    public async Task<AcquisitionDetail?> BlocklistCandidateAsync(Guid id, Guid candidateId, CancellationToken cancellationToken) {
+        var candidate = await store.GetQueueCandidateAsync(id, candidateId, cancellationToken);
+        if (candidate is null) {
+            return null;
+        }
+
+        var identity = ReleaseIdentity.For(candidate.InfoHash, candidate.IndexerName, candidate.Title);
+        await blocklist.AddAsync(
+            new BlocklistAddRequest(identity, BlocklistReason.Manual, candidate.Title, candidate.IndexerName, candidate.InfoHash, id, "Blocklisted from the release picker."),
+            cancellationToken);
+        await store.MarkCandidatesBlocklistedAsync(id, identity, cancellationToken);
+        return await store.GetAsync(id, cancellationToken);
+    }
+
+    private async Task EnsureImportCheckpointCanBeSupersededAsync(
+        AcquisitionDetail detail,
+        CancellationToken cancellationToken) {
+        if (detail.Summary.Status == AcquisitionStatus.Importing) {
+            throw ActiveImportConflict(detail.Summary.Status);
+        }
+
+        AcquisitionImportContext? import;
+        try {
+            import = await store.GetImportContextAsync(detail.Summary.Id, cancellationToken);
+        } catch (InvalidDataException) {
+            throw new AcquisitionConfigurationException(
+                ApiProblemCodes.AcquisitionInvalid,
+                ImportCheckpointLifecycle.CorruptCheckpointMessage);
+        }
+
+        if (import is { HasImportRecoveryState: true }
+            && !await ImportCheckpointLifecycle.TryAbandonAsync(
+                store,
+                import,
+                cancellationToken,
+                scanGate)) {
+            throw new AcquisitionConfigurationException(
+                ApiProblemCodes.AcquisitionInvalid,
+                ImportCheckpointLifecycle.CheckpointMustFinishMessage);
+        }
+    }
+
+    private static AcquisitionConfigurationException ActiveImportConflict(AcquisitionStatus status) =>
+        new(
+            ApiProblemCodes.AcquisitionInvalid,
+            $"This acquisition cannot be changed while it is {status.ToCode()}. Refresh after the current operation finishes.");
+
+    private static AcquisitionConfigurationException LifecycleChangedConflict() =>
+        new(
+            ApiProblemCodes.AcquisitionInvalid,
+            "The acquisition changed while this action was being prepared. Refresh and try again.");
+
+    /// <summary>
+    /// Re-runs an import for a completed download/manual-import hold, reuses an intact completed payload
+    /// after an initial import failure, or resumes an exact durable checkpoint from a passive review/failure
+    /// state. <paramref name="allowFormatChange"/> carries the
+    /// user's explicit consent for a genuine upgrade to replace the owned file across formats (e.g.
+    /// mkv → mp4, recycling the old file); without it the import re-runs under the ordinary rules. Any
+    /// other status returns the detail unchanged (nothing enqueued); null when the acquisition no longer
+    /// exists. The dangerous-file hold is enforced by the import job regardless of the flag.
+    /// </summary>
+    public async Task<AcquisitionDetail?> RetryImportAsync(Guid id, bool allowFormatChange, CancellationToken cancellationToken) {
+        var detail = await store.GetAsync(id, cancellationToken);
+        if (detail is null) {
+            return null;
+        }
+
+        var canResumeImport = detail.Summary.HasResumableImport
+            && detail.Summary.Status is (
+                AcquisitionStatus.AwaitingSelection
+                or AcquisitionStatus.Failed
+                or AcquisitionStatus.Cancelled);
+        if (detail.Summary.Status is not (AcquisitionStatus.Downloaded or AcquisitionStatus.ManualImportRequired)
+            && !canResumeImport) {
+            return detail;
+        }
+
+        AcquisitionImportContext? import = null;
+        try {
+            import = await store.GetImportContextAsync(id, cancellationToken);
+        } catch (InvalidDataException) {
+            // The normal import handler owns the existing corrupt-checkpoint review path.
+        }
+        var jobType = AcquisitionCompletionService.CompletionJobType(
+            import?.Kind ?? detail.Summary.Kind, import?.UpgradeOfAcquisitionId is not null,
+            import?.BookRendition ?? detail.Summary.BookRendition);
+        if (jobType == JobType.AcquisitionUpgradeReplace
+            && !await store.TryTransitionStatusAsync(id, [detail.Summary.Status], AcquisitionStatus.Downloaded,
+                "Retrying the downloaded upgrade with current ownership checks.", cancellationToken)) {
+            return await store.GetAsync(id, cancellationToken);
+        }
+
+        var importJob = await queue.EnqueueAsync(
+            new EnqueueJobRequest(
+                jobType,
+                PayloadJson: AcquisitionJobPayload.Serialize(id, allowFormatChange, manualRetry: true),
+                TargetEntityId: id.ToString(),
+                TargetLabel: detail.Summary.Title,
+                Origin: JobGraphOrigin.Interactive,
+                GraphRootEntityKind: detail.Summary.Kind.ToCode(),
+                GraphRootEntityId: detail.Summary.EntityId?.ToString()),
+            cancellationToken);
+        if (importJob.GraphId is { } graphId) {
+            await store.TryRelinkJobGraphIdAsync(detail.Summary.Id, detail.Summary.JobGraphId, graphId, cancellationToken);
+        }
+        return await store.GetAsync(id, cancellationToken);
+    }
+
+
+}

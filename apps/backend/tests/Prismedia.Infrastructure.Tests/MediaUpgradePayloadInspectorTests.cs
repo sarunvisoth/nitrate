@@ -1,0 +1,120 @@
+using Microsoft.Extensions.Logging.Abstractions;
+using Prismedia.Application.Jobs.Ports;
+using Prismedia.Domain.Entities;
+using Prismedia.Contracts.Media;
+using Prismedia.Infrastructure.Acquisition;
+using Prismedia.Infrastructure.Media.Sidecars;
+
+namespace Prismedia.Infrastructure.Tests;
+
+public sealed class MediaUpgradePayloadInspectorTests {
+    [Theory]
+    [InlineData(false, 0)]
+    [InlineData(true, 2)]
+    public async Task ReusesTheVideoProbesSubtitleInventoryAndFallsBackOnlyWhenItIsUnknown(bool legacy, int subtitleCalls) {
+        var root = Directory.CreateTempSubdirectory("prismedia-combined-probe-");
+        try {
+            var owned = Path.Combine(root.FullName, "owned.mkv");
+            var candidate = Path.Combine(root.FullName, "candidate.mkv");
+            await File.WriteAllBytesAsync(owned, [1]);
+            await File.WriteAllBytesAsync(candidate, [1]);
+            var probe = new FakeMediaProbe(new Dictionary<string, VideoProbeData> {
+                [owned] = Video(1280, 720) with { SubtitleStreams = legacy ? null : [] },
+                [candidate] = Video(1920, 1080) with { SubtitleStreams = legacy ? null : [new(2, MediaCodecs.SubRip, "eng", null)] }
+            }, new HashSet<string> { candidate });
+
+            var result = await new MediaUpgradePayloadInspector(probe, new SubtitleSidecarDiscovery(),
+                NullLogger<MediaUpgradePayloadInspector>.Instance).InspectAsync(owned, candidate, default);
+
+            Assert.NotNull(result);
+            Assert.False(result.OwnedHasSubtitles);
+            Assert.True(result.CandidateHasSubtitles);
+            Assert.Equal(subtitleCalls, probe.SubtitleCalls);
+        } finally {
+            root.Delete(recursive: true);
+        }
+    }
+
+    [Fact]
+    public async Task ReadsMeasuredResolutionAndAdjacentSubtitleFactsFromBothPayloads() {
+        var root = Directory.CreateTempSubdirectory("prismedia-upgrade-inspection-");
+        try {
+            var owned = Directory.CreateDirectory(Path.Combine(root.FullName, "owned"));
+            var candidate = Directory.CreateDirectory(Path.Combine(root.FullName, "candidate"));
+            var ownedFile = Path.Combine(owned.FullName, "movie.mkv");
+            var candidateFile = Path.Combine(candidate.FullName, "movie.mkv");
+            await File.WriteAllBytesAsync(ownedFile, [1]);
+            await File.WriteAllBytesAsync(candidateFile, [1]);
+            await File.WriteAllBytesAsync(Path.Combine(candidate.FullName, "movie.sample.mkv"), [1]);
+            await File.WriteAllTextAsync(Path.Combine(candidate.FullName, "movie.eng.srt"), "1\n00:00:00,000 --> 00:00:01,000\nHello");
+            var probe = new FakeMediaProbe(
+                new Dictionary<string, VideoProbeData> {
+                    [ownedFile] = Video(width: 3840, height: 1600) with { DurationSeconds = 7200 },
+                    [candidateFile] = Video(width: 1920, height: 800) with { DurationSeconds = 60, Streams = [
+                        new MediaStreamProbeData(1, StreamKind.Audio.ToCode(), null, "tur", null, null, null, null, null, null, null, true, false),
+                        new MediaStreamProbeData(2, StreamKind.Audio.ToCode(), null, "eng", null, null, null, null, null, null, null, false, false)
+                    ] }
+                },
+                subtitleFiles: new HashSet<string>());
+            var inspector = new MediaUpgradePayloadInspector(
+                probe,
+                new SubtitleSidecarDiscovery(),
+                NullLogger<MediaUpgradePayloadInspector>.Instance);
+
+            var result = await inspector.InspectAsync(owned.FullName, candidate.FullName, CancellationToken.None);
+
+            Assert.NotNull(result);
+            Assert.Equal(2160, result.OwnedResolutionTier);
+            Assert.Equal(1080, result.CandidateResolutionTier);
+            Assert.False(result.OwnedHasSubtitles);
+            Assert.True(result.CandidateHasSubtitles);
+            Assert.Equal(7200, result.OwnedDurationSeconds);
+            Assert.Equal(60, result.CandidateDurationSeconds);
+            Assert.Equal(["tur", "eng"], result.CandidateAudioLanguages);
+        } finally {
+            root.Delete(recursive: true);
+        }
+    }
+
+    [Fact]
+    public async Task AmbiguousCandidatePayloadCannotBeInspectedAsAnAtomicUpgrade() {
+        var root = Directory.CreateTempSubdirectory("prismedia-upgrade-inspection-");
+        try {
+            var owned = Directory.CreateDirectory(Path.Combine(root.FullName, "owned"));
+            var candidate = Directory.CreateDirectory(Path.Combine(root.FullName, "candidate"));
+            await File.WriteAllBytesAsync(Path.Combine(owned.FullName, "movie.mkv"), [1]);
+            await File.WriteAllBytesAsync(Path.Combine(candidate.FullName, "movie-a.mkv"), [1]);
+            await File.WriteAllBytesAsync(Path.Combine(candidate.FullName, "movie-b.mkv"), [1]);
+            var inspector = new MediaUpgradePayloadInspector(
+                new FakeMediaProbe(
+                    new Dictionary<string, VideoProbeData>(),
+                    new HashSet<string>()),
+                new SubtitleSidecarDiscovery(),
+                NullLogger<MediaUpgradePayloadInspector>.Instance);
+
+            Assert.Null(await inspector.InspectAsync(owned.FullName, candidate.FullName, CancellationToken.None));
+        } finally {
+            root.Delete(recursive: true);
+        }
+    }
+
+    private static VideoProbeData Video(int width, int height) =>
+        new(null, null, width, height, null, null, null, null, null, null, null);
+
+    private sealed class FakeMediaProbe(
+        IReadOnlyDictionary<string, VideoProbeData> videos,
+        IReadOnlySet<string> subtitleFiles) : IMediaProbe {
+        public Task<VideoProbeData?> ProbeVideoAsync(string filePath, CancellationToken cancellationToken) =>
+            Task.FromResult(videos.TryGetValue(filePath, out var video) ? video : null);
+
+        public int SubtitleCalls { get; private set; }
+        public Task<IReadOnlyList<SubtitleStreamData>> ProbeSubtitleStreamsAsync(string filePath, CancellationToken cancellationToken) {
+            SubtitleCalls++;
+            return Task.FromResult<IReadOnlyList<SubtitleStreamData>>(subtitleFiles.Contains(filePath)
+                ? [new SubtitleStreamData(2, "subrip", "eng", null)] : []);
+        }
+
+        public Task<AudioProbeData?> ProbeAudioAsync(string filePath, CancellationToken cancellationToken) => throw new NotSupportedException();
+        public Task<ImageProbeData?> ProbeImageAsync(string filePath, CancellationToken cancellationToken) => throw new NotSupportedException();
+    }
+}

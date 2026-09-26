@@ -1,0 +1,247 @@
+using Prismedia.Domain.Entities;
+
+namespace Prismedia.Application.Acquisition;
+
+/// <summary>
+/// One stable Entity-monitor intent recorded before its transient acquisition work is published.
+/// Container request fan-out batches these intents so every explicit child selection is durable and
+/// visible while structural metadata is still being hydrated.
+/// </summary>
+public sealed record EntityMonitorStart(
+    Guid EntityId,
+    EntityKind Kind,
+    string Title,
+    AcquisitionTargeting? Targeting,
+    MonitorPreset? Preset);
+
+/// <summary>
+/// Persistence port for monitors — stable Entity intents that may attach transient acquisitions. The due
+/// and reconciliation logic detaches completed work while keeping Entity-linked intent Active; legacy rows
+/// without EntityId retain terminal compatibility behavior.
+/// </summary>
+public interface IMonitorStore {
+    /// <summary>Returns missing inspection work for a single owned video governed by an automatic upgrade profile.</summary>
+    Task<OwnedVideoInspectionNeeds?> GetOwnedVideoInspectionNeedsAsync(Guid monitorId, CancellationToken cancellationToken) =>
+        Task.FromResult<OwnedVideoInspectionNeeds?>(null);
+
+    /// <summary>Starts acquisition work on its stable Entity monitor and reuses legacy acquisition intent.</summary>
+    Task<Contracts.Acquisition.MonitorView> StartAsync(
+        Guid acquisitionId,
+        EntityKind kind,
+        string title,
+        string? author,
+        CancellationToken cancellationToken);
+
+    /// <summary>
+    /// Starts or reactivates an Entity monitor. Explicit targeting and preset values replace stored choices;
+    /// null values preserve them so a provider sync never narrows user intent.
+    /// </summary>
+    Task<Contracts.Acquisition.MonitorView> StartForEntityAsync(
+        Guid entityId,
+        EntityKind kind,
+        string title,
+        AcquisitionTargeting? targeting,
+        MonitorPreset? preset,
+        CancellationToken cancellationToken);
+
+    /// <summary>
+    /// Starts multiple stable Entity monitors as one intent boundary. Production adapters should persist
+    /// the batch atomically; the default preserves compatibility for focused test adapters.
+    /// </summary>
+    async Task<IReadOnlyList<Contracts.Acquisition.MonitorView>> StartForEntitiesAsync(
+        IReadOnlyCollection<EntityMonitorStart> starts,
+        CancellationToken cancellationToken) {
+        var monitors = new List<Contracts.Acquisition.MonitorView>(starts.Count);
+        foreach (var start in starts.DistinctBy(candidate => candidate.EntityId)) {
+            monitors.Add(await StartForEntityAsync(
+                start.EntityId,
+                start.Kind,
+                start.Title,
+                start.Targeting,
+                start.Preset,
+                cancellationToken));
+        }
+        return monitors;
+    }
+
+    /// <summary>Returns the stable monitor targeting an Entity, including legacy acquisition-linked rows.</summary>
+    Task<Contracts.Acquisition.MonitorView?> GetByEntityAsync(Guid entityId, CancellationToken cancellationToken);
+
+    /// <summary>Every parallel monitor targeting an Entity; defaults to the legacy single-monitor read.</summary>
+    async Task<IReadOnlyList<Contracts.Acquisition.MonitorView>> ListForEntityAsync(
+        Guid entityId,
+        CancellationToken cancellationToken) =>
+        await GetByEntityAsync(entityId, cancellationToken) is { } monitor ? [monitor] : [];
+
+    /// <summary>Returns the stable monitor for one independently monitored Book rendition.</summary>
+    Task<Contracts.Acquisition.MonitorView?> GetByEntityAsync(
+        Guid entityId,
+        BookRendition? bookRendition,
+        CancellationToken cancellationToken) =>
+        GetByEntityAsync(entityId, cancellationToken);
+
+    /// <summary>Whether the exact monitor row is currently Active.</summary>
+    async Task<bool> IsActiveAsync(Guid monitorId, CancellationToken cancellationToken) =>
+        (await ListAsync(cancellationToken)).Any(monitor =>
+            monitor.Id == monitorId && monitor.Status == MonitorStatus.Active);
+
+    /// <summary>Runs Entity materialization only while holding the direct Active monitor's mutation lease.</summary>
+    async Task<bool> ExecuteIfActiveEntityMutationAsync(
+        Guid entityId,
+        Func<CancellationToken, Task> mutation,
+        CancellationToken cancellationToken) {
+        if (await GetByEntityAsync(entityId, cancellationToken) is not { Status: MonitorStatus.Active }) {
+            return false;
+        }
+        await mutation(cancellationToken);
+        return true;
+    }
+
+    /// <summary>Runs explicit user intent only when no destructive Entity lifecycle claim owns it.</summary>
+    async Task<bool> ExecuteIfEntityLifecycleMutableAsync(
+        Guid entityId,
+        Func<CancellationToken, Task> mutation,
+        CancellationToken cancellationToken) {
+        if (await GetByEntityAsync(entityId, cancellationToken) is {
+                Status: MonitorStatus.Stopping or MonitorStatus.DeletingFiles
+            }) {
+            return false;
+        }
+        await mutation(cancellationToken);
+        return true;
+    }
+
+    /// <summary>Direct or legacy monitor per requested Entity id, loaded as one bounded read.</summary>
+    async Task<IReadOnlyDictionary<Guid, Contracts.Acquisition.MonitorView>> ListByEntityIdsAsync(
+        IReadOnlyCollection<Guid> entityIds,
+        CancellationToken cancellationToken) {
+        var result = new Dictionary<Guid, Contracts.Acquisition.MonitorView>();
+        foreach (var entityId in entityIds.Distinct()) {
+            if (await GetByEntityAsync(entityId, cancellationToken) is { } monitor) {
+                result[entityId] = monitor;
+            }
+        }
+        return result;
+    }
+
+    /// <summary>The request-time library/profile choices stored on an Entity monitor, or null when absent.</summary>
+    Task<AcquisitionTargeting?> GetTargetingByEntityAsync(Guid entityId, CancellationToken cancellationToken);
+
+    /// <summary>The grouping preset stored on an Entity monitor, or null when the Entity is not monitored.</summary>
+    Task<MonitorPreset?> GetPresetByEntityAsync(Guid entityId, CancellationToken cancellationToken);
+
+    /// <summary>Low-level monitor removal for internal lifecycle maintenance.</summary>
+    Task<bool> DeleteAsync(Guid monitorId, CancellationToken cancellationToken);
+
+    /// <summary>Re-points a monitor at replacement acquisition work and reactivates it.</summary>
+    Task<bool> RetargetAsync(Guid fromAcquisitionId, Guid toAcquisitionId, CancellationToken cancellationToken);
+
+    /// <summary>Completes a managed file-deletion reacquisition with a compare-and-swap in production.</summary>
+    Task<bool> RetargetAfterFileDeletionAsync(
+        Guid fromAcquisitionId,
+        Guid toAcquisitionId,
+        CancellationToken cancellationToken) =>
+        RetargetAsync(fromAcquisitionId, toAcquisitionId, cancellationToken);
+
+    /// <summary>Sets a monitor's status. Returns false when it no longer exists.</summary>
+    Task<bool> SetStatusAsync(Guid monitorId, MonitorStatus status, CancellationToken cancellationToken);
+
+    /// <summary>Lists all monitors with each linked acquisition's status.</summary>
+    Task<IReadOnlyList<Contracts.Acquisition.MonitorView>> ListAsync(CancellationToken cancellationToken);
+
+    /// <summary>Returns one SQL-paged Wanted Missing surface.</summary>
+    Task<WantedPage> ListMissingAsync(
+        int page,
+        int pageSize,
+        EntityKind? kind,
+        CancellationToken cancellationToken);
+
+    /// <summary>Returns one Wanted Cutoff Unmet page after current-policy filtering, with an exact matching total.</summary>
+    Task<WantedPage> ListCutoffUnmetAsync(
+        int page,
+        int pageSize,
+        EntityKind? kind,
+        CancellationToken cancellationToken);
+
+    /// <summary>Returns the monitor linked to an acquisition, or null when it is not monitored.</summary>
+    Task<Contracts.Acquisition.MonitorView?> GetByAcquisitionAsync(
+        Guid acquisitionId,
+        CancellationToken cancellationToken);
+
+    /// <summary>Cheap scheduler gate for any active monitor with live acquisition work.</summary>
+    Task<bool> HasActiveMonitorsAsync(CancellationToken cancellationToken);
+
+    /// <summary>Reconciles monitors and returns those due for another search.</summary>
+    Task<IReadOnlyList<DueMonitor>> ListDueMonitorsAsync(
+        int defaultIntervalMinutes,
+        CancellationToken cancellationToken);
+
+    /// <summary>
+    /// Resolves the exact work an active Entity monitor can perform now, bypassing only its time interval.
+    /// Production adapters preserve the same upgrade, missing-child fallback, and lifecycle gates as the
+    /// recurring due sweep. The default supports focused adapters with Entity-only intent.
+    /// </summary>
+    async Task<IReadOnlyList<DueMonitor>> ListImmediateForEntityAsync(
+        Guid entityId,
+        CancellationToken cancellationToken) =>
+        (await ListForEntityAsync(entityId, cancellationToken))
+            .Where(monitor => monitor.Status == MonitorStatus.Active)
+            .Select(monitor => new DueMonitor(
+                monitor.Id,
+                monitor.AcquisitionId,
+                monitor.Title,
+                EntityId: monitor.EntityId,
+                BookRendition: monitor.BookRendition,
+                ProfileId: monitor.ProfileId,
+                Kind: monitor.Kind))
+            .ToArray();
+
+    /// <summary>
+    /// Re-resolves one active monitor selected by the durable sequential drainer, bypassing only its
+    /// cadence timestamp. The default keeps focused adapters compatible; production preserves the same
+    /// upgrade, release-date, missing-child, and lifecycle gates as normal due selection.
+    /// </summary>
+    async Task<IReadOnlyList<DueMonitor>> ListImmediateForMonitorAsync(
+        Guid monitorId,
+        CancellationToken cancellationToken) =>
+        (await ListDueMonitorsAsync(1, cancellationToken))
+            .Where(monitor => monitor.MonitorId == monitorId)
+            .Take(1)
+            .ToArray();
+
+    /// <summary>Stamps a monitor as just searched.</summary>
+    Task MarkSearchedAsync(Guid monitorId, CancellationToken cancellationToken);
+
+    /// <summary>Makes an active acquisition monitor immediately eligible for another sweep.</summary>
+    Task MarkSearchDueByAcquisitionAsync(Guid acquisitionId, CancellationToken cancellationToken) =>
+        Task.CompletedTask;
+
+    /// <summary>Claims the monitor's one upgrade slot and creates its child acquisition.</summary>
+    Task<Guid?> CreateUpgradeChildAsync(Guid monitorId, CancellationToken cancellationToken);
+
+    /// <summary>
+    /// Creates a fresh season search after its missing episodes exhaust individual searches. The adapter
+    /// rechecks monitor intent, child work, import reconciliation, and a bounded pack retry cadence atomically.
+    /// </summary>
+    Task<Guid?> CreateSeasonPackRetryAsync(Guid monitorId, CancellationToken cancellationToken) =>
+        Task.FromResult<Guid?>(null);
+
+    /// <summary>
+    /// Claims an episode monitor's search while serializing with season-pack recovery. Returns false when
+    /// a pack is already working on this season or the exact episode attempt no longer permits a search.
+    /// </summary>
+    async Task<bool> TryStartEpisodeSearchAsync(
+        Guid monitorId, Guid acquisitionId, IAcquisitionLifecycleStore acquisitions,
+        CancellationToken cancellationToken) {
+        var status = await acquisitions.GetStatusAsync(acquisitionId, cancellationToken);
+        return status is { } current && Jobs.Handlers.AcquisitionSearchJobHandler.CanScheduleSearch(current)
+            && (current == AcquisitionStatus.Searching || await acquisitions.TryTransitionStatusAsync(
+                acquisitionId, [current], AcquisitionStatus.Searching, null, cancellationToken));
+    }
+
+    /// <summary>Releases an upgrade slot and records whether its replacement succeeded.</summary>
+    Task ResolveUpgradeChildAsync(Guid childId, bool succeeded, CancellationToken cancellationToken);
+}
+
+/// <summary>Required metadata work before an existing video can safely enter automatic upgrade monitoring.</summary>
+public sealed record OwnedVideoInspectionNeeds(bool ProbeRequired, bool SubtitlesRequired);

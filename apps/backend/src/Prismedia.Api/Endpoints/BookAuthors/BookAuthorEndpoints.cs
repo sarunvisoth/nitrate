@@ -1,0 +1,14 @@
+using Prismedia.Contracts.Entities;
+using Prismedia.Domain.Entities;
+
+namespace Prismedia.Api.Endpoints;
+
+public static class BookAuthorEndpoints {
+    public static RouteGroupBuilder MapBookAuthorEndpoints(this IEndpointRouteBuilder routes) =>
+        routes.MapEntityKindRoutes(
+            "/api/book-authors",
+            EntityKind.BookAuthor.ToCode(),
+            "Authors",
+            "ListBookAuthors",
+            "GetBookAuthor");
+}

@@ -1,0 +1,372 @@
+<script lang="ts">
+  import { ToggleButton } from "@prismedia/ui-svelte";
+  import { CalendarRange } from "@lucide/svelte";
+  import { MEDIA_RESOLUTION_TIERS } from "$lib/api/generated/codes";
+  import { TextInput,  cn  } from "@prismedia/ui-svelte";
+  import {
+    CAPABILITY_KIND,
+    ENTITY_ENGAGEMENT_MODE,
+    ENTITY_KIND,
+    ENTITY_KIND_DEFINITIONS,
+    isEntityKindCode,
+    isTaxonomyEntityKind,
+  } from "$lib/entities/entity-codes";
+  import {
+    AVAILABILITY_FILTER_DEFS,
+    BOOK_FORMAT_FILTER_DEFS,
+    BOOK_TYPE_FILTER_DEFS,
+    type EntityGridFilterOption,
+  } from "$lib/entities/entity-grid";
+
+  interface Props {
+    activeFilterIds: string[];
+    filterOptions: EntityGridFilterOption[];
+    entityKind?: string;
+    /** Hide the book type/format chips (constrained views that already lock those filters). */
+    lockBookFilters?: boolean;
+    onActiveFilterIdsChange: (ids: string[]) => void;
+  }
+
+  let {
+    activeFilterIds,
+    filterOptions,
+    entityKind,
+    lockBookFilters = false,
+    onActiveFilterIdsChange,
+  }: Props = $props();
+
+  // Adaptive engagement-status labels. Reading kinds phrase the status as
+  // Read/Unread/Reading; everything else uses Watched/Unwatched/In progress.
+  const engagementMode = $derived(
+    entityKind != null && isEntityKindCode(entityKind)
+      ? ENTITY_KIND_DEFINITIONS[entityKind].engagementMode
+      : null,
+  );
+  const statusChoices = $derived(
+    engagementMode === ENTITY_ENGAGEMENT_MODE.reading
+      ? [
+          { id: "status:watched", label: "Read" },
+          { id: "status:unwatched", label: "Unread" },
+          { id: "status:in-progress", label: "Reading" },
+        ]
+      : [
+          { id: "status:watched", label: "Watched" },
+          { id: "status:unwatched", label: "Unwatched" },
+          { id: "status:in-progress", label: "In progress" },
+        ],
+  );
+
+  const activeSet = $derived(new Set(activeFilterIds));
+  const optionMap = $derived(new Map(filterOptions.map((option) => [option.id, option])));
+
+  const hasTechnicalFilters = $derived(
+    filterOptions.some((option) => option.capabilityKind === CAPABILITY_KIND.technical),
+  );
+  const hasRatingFilters = $derived(
+    filterOptions.some((option) => option.capabilityKind === CAPABILITY_KIND.rating),
+  );
+  const hasDateFilters = $derived(
+    filterOptions.some((option) => option.capabilityKind === CAPABILITY_KIND.dates),
+  );
+  const hasAvailabilityFilters = $derived(
+    filterOptions.some((option) => AVAILABILITY_FILTER_DEFS.some((definition) => definition.id === option.id)),
+  );
+  const hasFlagFilters = $derived(
+    filterOptions.some((option) => option.capabilityKind === CAPABILITY_KIND.flags),
+  );
+
+  // Only kinds that record playback or reading progress get the status filter;
+  // for taxonomy and standalone media it would never match. When the kind is
+  // unknown (mixed surfaces) the control is shown so it stays discoverable.
+  const showStatus = $derived(
+    entityKind == null || engagementMode !== ENTITY_ENGAGEMENT_MODE.none,
+  );
+
+  // Book type/format are properties of the book detail row, so they only make sense on the
+  // Books grid; the server resolves them across the whole library.
+  const showBookFilters = $derived(entityKind === ENTITY_KIND.book && !lockBookFilters);
+
+  // Taxonomy kinds (tags/people/studios) can be filtered by whether anything references them,
+  // resolved server-side across the whole library. The two chips are mutually exclusive — neither
+  // selected means "all".
+  const showReferenceFilters = $derived(entityKind != null && isTaxonomyEntityKind(entityKind));
+  const REFERENCE_FILTER_IDS = ["taxonomy:referenced", "taxonomy:orphaned"];
+  const AVAILABILITY_FILTER_IDS = AVAILABILITY_FILTER_DEFS.map((definition) => definition.id);
+
+  const resolutions = MEDIA_RESOLUTION_TIERS.map(tier => tier.code);
+  const durationChoices = [
+    { id: "lt300", label: "< 5 min" },
+    { id: "300-900", label: "5-15 min" },
+    { id: "900-1800", label: "15-30 min" },
+    { id: "gte1800", label: "30+ min" },
+  ];
+  const codecs = [
+    { id: "h264", label: "H.264" },
+    { id: "h265", label: "HEVC" },
+    { id: "av1", label: "AV1" },
+    { id: "vp9", label: "VP9" },
+    { id: "vp8", label: "VP8" },
+    { id: "mpeg4", label: "MPEG-4" },
+    { id: "prores", label: "ProRes" },
+    { id: "wmv", label: "WMV" },
+  ];
+  const ratingValues = [1, 2, 3, 4, 5];
+
+  function isActive(id: string): boolean {
+    return activeSet.has(id);
+  }
+
+  function toggleFilter(id: string) {
+    onActiveFilterIdsChange(
+      isActive(id)
+        ? activeFilterIds.filter((filterId) => filterId !== id)
+        : [...activeFilterIds, id],
+    );
+  }
+
+  function replaceRangeFilter(prefix: string, value: string) {
+    const next = activeFilterIds.filter((id) => !id.startsWith(prefix));
+    if (value) next.push(`${prefix}${value}`);
+    onActiveFilterIdsChange(next);
+  }
+
+  // Toggles one id within a mutually exclusive group: selecting it clears the others, and
+  // re-selecting the active one clears the group back to "all".
+  function toggleExclusive(id: string, group: string[]) {
+    const without = activeFilterIds.filter((filterId) => !group.includes(filterId));
+    onActiveFilterIdsChange(isActive(id) ? without : [...without, id]);
+  }
+
+
+  function countFor(id: string): number | null {
+    return optionMap.get(id)?.count ?? null;
+  }
+
+  function dateValue(prefix: string): string {
+    return activeFilterIds.find((id) => id.startsWith(prefix))?.slice(prefix.length) ?? "";
+  }
+</script>
+
+<div class="surface-well mt-px p-3">
+  <div class="grid grid-cols-1 gap-4 md:grid-cols-2 xl:grid-cols-3">
+    {#if hasTechnicalFilters}
+      <section>
+        <div class="mb-2 text-kicker">Resolution</div>
+        <div class="flex flex-wrap gap-1">
+          {#each resolutions as resolution (resolution)}
+            {@const id = `technical:resolution:${resolution}`}
+            <ToggleButton variant="outline" size="sm" bind:pressed={() => isActive(id), () => toggleFilter(id)} >
+              {resolution}
+              {#if countFor(id) != null}<span class="ml-1 text-text-disabled">{countFor(id)}</span>{/if}
+            </ToggleButton>
+          {/each}
+        </div>
+      </section>
+    {/if}
+
+    {#if hasRatingFilters}
+      <section>
+        <div class="mb-2 text-kicker">Rating</div>
+        <div class="space-y-2">
+          <div class="font-mono text-[0.6rem] uppercase tracking-wider text-text-disabled">At least</div>
+          <div class="flex flex-wrap gap-1">
+            {#each ratingValues as value (value)}
+              {@const id = `rating:min:${value}`}
+              <ToggleButton variant="outline" size="sm" bind:pressed={() => isActive(id), () => toggleFilter(id)} >
+                {value}★+
+              </ToggleButton>
+            {/each}
+          </div>
+          <div class="font-mono text-[0.6rem] uppercase tracking-wider text-text-disabled">At most</div>
+          <div class="flex flex-wrap gap-1">
+            {#each ratingValues as value (value)}
+              {@const id = `rating:max:${value}`}
+              <ToggleButton variant="outline" size="sm" bind:pressed={() => isActive(id), () => toggleFilter(id)} >
+                ≤{value}★
+              </ToggleButton>
+            {/each}
+          </div>
+          <div class="flex flex-wrap gap-1">
+            <ToggleButton variant="outline" size="sm" bind:pressed={() => isActive("rating:unrated"), () => toggleFilter("rating:unrated")} >
+              Unrated
+            </ToggleButton>
+          </div>
+        </div>
+      </section>
+    {/if}
+
+    {#if hasDateFilters}
+      <section>
+        <div class="mb-2 text-kicker">Date</div>
+        <div class="flex flex-col gap-2">
+          <label class="date-row">
+            <CalendarRange class="h-3 w-3 shrink-0 text-text-disabled" />
+            <span>From</span>
+            <TextInput
+              class="min-w-0 flex-1" size="sm"
+              type="date"
+              value={dateValue("dates:from:")}
+              onchange={(event) => replaceRangeFilter("dates:from:", (event.currentTarget as HTMLInputElement).value)}
+            />
+          </label>
+          <label class="date-row">
+            <CalendarRange class="h-3 w-3 shrink-0 text-text-disabled" />
+            <span>To</span>
+            <TextInput
+              class="min-w-0 flex-1" size="sm"
+              type="date"
+              value={dateValue("dates:to:")}
+              onchange={(event) => replaceRangeFilter("dates:to:", (event.currentTarget as HTMLInputElement).value)}
+            />
+          </label>
+        </div>
+      </section>
+    {/if}
+
+    {#if hasTechnicalFilters}
+      <section>
+        <div class="mb-2 text-kicker">Duration</div>
+        <div class="flex flex-wrap gap-1">
+          {#each durationChoices as duration (duration.id)}
+            {@const id = `technical:duration:${duration.id}`}
+            <ToggleButton variant="outline" size="sm" bind:pressed={() => isActive(id), () => toggleFilter(id)} >
+              {duration.label}
+            </ToggleButton>
+          {/each}
+        </div>
+      </section>
+    {/if}
+
+    {#if showStatus}
+      <section>
+        <div class="mb-2 text-kicker">Status</div>
+        <div class="flex flex-wrap gap-1">
+          {#each statusChoices as item (item.id)}
+            <ToggleButton variant="outline" size="sm" bind:pressed={() => isActive(item.id), () => toggleFilter(item.id)} >
+              {item.label}
+            </ToggleButton>
+          {/each}
+        </div>
+      </section>
+    {/if}
+
+    {#if showBookFilters}
+      <section>
+        <div class="mb-2 text-kicker">Type</div>
+        <div class="flex flex-wrap gap-1">
+          {#each BOOK_TYPE_FILTER_DEFS as type (type.id)}
+            <ToggleButton variant="outline" size="sm" bind:pressed={() => isActive(type.id), () => toggleFilter(type.id)} >
+              {type.label}
+            </ToggleButton>
+          {/each}
+        </div>
+      </section>
+
+      <section>
+        <div class="mb-2 text-kicker">Format</div>
+        <div class="flex flex-wrap gap-1">
+          {#each BOOK_FORMAT_FILTER_DEFS as format (format.id)}
+            <ToggleButton variant="outline" size="sm" bind:pressed={() => isActive(format.id), () => toggleFilter(format.id)} >
+              {format.label}
+            </ToggleButton>
+          {/each}
+        </div>
+      </section>
+    {/if}
+
+    {#if hasAvailabilityFilters}
+      <section>
+        <div class="mb-2 text-kicker">Availability</div>
+        <div class="flex flex-wrap gap-1">
+          {#each AVAILABILITY_FILTER_DEFS as item (item.id)}
+            <ToggleButton variant="outline" size="sm" bind:pressed={() => isActive(item.id), () => toggleExclusive(item.id, AVAILABILITY_FILTER_IDS)} >
+              {item.label}
+            </ToggleButton>
+          {/each}
+        </div>
+      </section>
+    {/if}
+
+    {#if showReferenceFilters}
+      <section>
+        <div class="mb-2 text-kicker">References</div>
+        <div class="flex flex-wrap gap-1">
+          <ToggleButton variant="outline" size="sm" bind:pressed={() => isActive("taxonomy:referenced"), () => toggleExclusive("taxonomy:referenced", REFERENCE_FILTER_IDS)}
+          >
+            Has references
+          </ToggleButton>
+          <ToggleButton variant="outline" size="sm" bind:pressed={() => isActive("taxonomy:orphaned"), () => toggleExclusive("taxonomy:orphaned", REFERENCE_FILTER_IDS)}
+          >
+            No references
+          </ToggleButton>
+        </div>
+      </section>
+    {/if}
+
+    {#if hasFlagFilters}
+      <section>
+        <div class="mb-2 text-kicker">Library Flags</div>
+        <div class="flex flex-wrap gap-1">
+          {#each [
+            { id: "flags:favorite", label: "Favorites" },
+            { id: "flags:organized:true", label: "Organized" },
+            { id: "flags:organized:false", label: "Not organized" },
+            { id: "flags:nsfw:true", label: "Is NSFW" },
+            { id: "flags:nsfw:false", label: "Not NSFW" },
+          ] as item (item.id)}
+            <ToggleButton variant="outline" size="sm" bind:pressed={() => isActive(item.id), () => toggleFilter(item.id)} >
+              {item.label}
+              {#if countFor(item.id) != null}<span class="ml-1 text-text-disabled">{countFor(item.id)}</span>{/if}
+            </ToggleButton>
+          {/each}
+        </div>
+      </section>
+    {/if}
+
+    {#if hasTechnicalFilters}
+      <section>
+        <div class="mb-2 text-kicker">Codec</div>
+        <div class="flex flex-wrap gap-1">
+          {#each codecs as codec (codec.id)}
+            {@const id = `technical:codec:${codec.id}`}
+            <ToggleButton variant="outline" size="sm" bind:pressed={() => isActive(id), () => toggleFilter(id)} >
+              {codec.label}
+              {#if countFor(id) != null}<span class="ml-1 text-text-disabled">{countFor(id)}</span>{/if}
+            </ToggleButton>
+          {/each}
+        </div>
+      </section>
+    {/if}
+  </div>
+</div>
+
+<style>
+  .surface-well {
+    background: var(--color-surface-1, #0c0f15);
+    border: 1px solid var(--color-border-subtle, rgba(148, 158, 178, 0.07));
+    border-radius: var(--radius-sm, 6px);
+    box-shadow: inset 0 2px 8px rgba(0,0,0,0.30);
+  }
+
+  .date-row {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    color: var(--color-text-muted);
+    font-size: 0.7rem;
+  }
+
+  .date-row span {
+    width: 2.5rem;
+    font-family: var(--font-mono, "JetBrains Mono", monospace);
+    font-size: 0.6rem;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+  }
+
+
+
+  :global(.tag-chip) {
+    border-radius: var(--radius-xs, 4px) !important;
+  }
+</style>

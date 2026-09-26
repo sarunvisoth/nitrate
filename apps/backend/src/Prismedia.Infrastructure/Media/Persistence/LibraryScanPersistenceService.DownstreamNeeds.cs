@@ -1,0 +1,480 @@
+using Microsoft.EntityFrameworkCore;
+using Prismedia.Application.Jobs;
+using Prismedia.Application.Jobs.Ports;
+using Prismedia.Application.Settings;
+using Prismedia.Domain.Entities;
+using Prismedia.Infrastructure.Entities;
+using Prismedia.Infrastructure.Media.Processing;
+using Prismedia.Infrastructure.Persistence;
+using Prismedia.Infrastructure.Persistence.Entities;
+using Prismedia.Infrastructure.Settings;
+
+namespace Prismedia.Infrastructure.Media.Persistence;
+
+/// <summary>
+/// Implements entity persistence operations for library scanning against the entity schema.
+/// </summary>
+
+public sealed partial class LibraryScanPersistenceService {
+    public async Task<IReadOnlyDictionary<Guid, DownstreamNeeds>> CheckDownstreamNeedsBatchAsync(
+        IReadOnlyList<Guid> entityIds, CancellationToken cancellationToken) {
+        if (entityIds.Count == 0) return new Dictionary<Guid, DownstreamNeeds>();
+
+        var ids = entityIds.ToList();
+
+        var hasTechnical = (await _db.EntityTechnical.AsNoTracking()
+            .Where(t => ids.Contains(t.EntityId) && t.DurationSeconds != null)
+            .Select(t => t.EntityId)
+            .ToListAsync(cancellationToken)).ToHashSet();
+
+        // Entities whose source file the probe could not read (corrupt media). No probe- or
+        // ffmpeg-based work can succeed for these until the file changes on disk, which clears
+        // the marker — so scans stop re-enqueueing the same doomed jobs on every pass.
+        var probeFailed = (await _db.EntityTechnical.AsNoTracking()
+            .Where(t => ids.Contains(t.EntityId) && t.ProbeFailedAt != null)
+            .Select(t => t.EntityId)
+            .ToListAsync(cancellationToken)).ToHashSet();
+
+        // A retired file's probe must not make its replacement look ready. Match the current source
+        // identity, path, and known size; legacy sources without a recorded size still use their binding.
+        var hasMediaSource = (await (from source in _db.MediaSources.AsNoTracking()
+            join file in _db.EntityFiles.AsNoTracking() on source.EntityFileId equals file.Id
+            where ids.Contains(source.EntityId) && source.DurationSeconds != null
+                && file.EntityId == source.EntityId && file.Role == EntityFileRole.Source && file.Path == source.Path
+                && (file.SizeBytes == null || file.SizeBytes == source.SizeBytes)
+            select source.EntityId).ToListAsync(cancellationToken)).ToHashSet();
+
+        // Unbound provider/legacy hashes and fingerprints of retired sources or generated assets do
+        // not establish current-file readiness. Keep those records available until fresh hashing runs.
+        var fingerprintRows = await (
+            from fingerprint in _db.EntityFileFingerprints.AsNoTracking()
+            join source in _db.EntityFiles.AsNoTracking() on fingerprint.EntityFileId equals (Guid?)source.Id
+            where ids.Contains(fingerprint.EntityId) && source.EntityId == fingerprint.EntityId
+                && source.Role == EntityFileRole.Source
+                && (fingerprint.Algorithm == FingerprintAlgorithm.Md5 || fingerprint.Algorithm == FingerprintAlgorithm.Oshash)
+            select new { fingerprint.EntityId, fingerprint.Algorithm })
+            .ToListAsync(cancellationToken);
+        var hasOshash = fingerprintRows
+            .Where(f => f.Algorithm == FingerprintAlgorithm.Oshash)
+            .Select(f => f.EntityId)
+            .ToHashSet();
+        var hasMd5 = fingerprintRows
+            .Where(f => f.Algorithm == FingerprintAlgorithm.Md5)
+            .Select(f => f.EntityId)
+            .ToHashSet();
+
+        var entityKinds = await _db.Entities.AsNoTracking()
+            .Where(entity => ids.Contains(entity.Id))
+            .Select(entity => new { entity.Id, entity.KindCode })
+            .ToDictionaryAsync(entity => entity.Id, entity => entity.KindCode, cancellationToken);
+
+        var hasThumbnail = await LoadUsableAssetIdsAsync(ids, [EntityFileRole.Thumbnail], cancellationToken);
+
+        var hasPreview = await LoadUsableAssetIdsAsync(ids, [EntityFileRole.Preview], cancellationToken);
+
+        var sourcePaths = await _db.EntityFiles.AsNoTracking()
+            .Where(f => ids.Contains(f.EntityId) && f.Role == EntityFileRole.Source)
+            .Select(f => new { f.EntityId, f.Path })
+            .ToDictionaryAsync(f => f.EntityId, f => f.Path, cancellationToken);
+
+        var hasCover = await LoadUsableAssetIdsAsync(
+            ids,
+            [
+                EntityFileRole.Thumbnail,
+                EntityFileRole.Poster,
+                EntityFileRole.Cover,
+                EntityFileRole.Logo,
+                EntityFileRole.Backdrop
+            ],
+            cancellationToken);
+
+        var hasGridThumbnail = await LoadUsableAssetIdsAsync(ids, [EntityFileRole.GridThumbnail], cancellationToken);
+        var hasGridThumbnail2x = await LoadUsableAssetIdsAsync(ids, [EntityFileRole.GridThumbnail2x], cancellationToken);
+
+        // Static container thumbnails are also valid when the Entity has no artwork of its own
+        // but one of its direct structural children already has a cover or generated variant.
+        // This scan-only query lets artist/series/container jobs enter the background rollup path
+        // without making list APIs walk their children.
+        var childArtworkRows = await _db.Entities.AsNoTracking()
+            .Where(child => child.ParentEntityId != null && ids.Contains(child.ParentEntityId.Value))
+            .Join(
+                _db.EntityFiles.AsNoTracking().Where(file =>
+                    EntityCoverSelection.CoverRoles.Contains(file.Role) ||
+                    file.Role == EntityFileRole.GridThumbnail ||
+                    file.Role == EntityFileRole.GridThumbnail2x),
+                child => child.Id,
+                file => file.EntityId,
+                (child, file) => new { ParentId = child.ParentEntityId!.Value, file.Path })
+            .ToArrayAsync(cancellationToken);
+        var hasChildArtwork = childArtworkRows
+            .Where(row => HasUsableAssetPath(row.Path))
+            .Select(row => row.ParentId)
+            .ToHashSet();
+
+        var hasWaveform = await LoadUsableAssetIdsAsync(ids, [EntityFileRole.Waveform], cancellationToken);
+
+        var hasTrickplay = (await _db.TrickplayInfos.AsNoTracking()
+            .Where(t => ids.Contains(t.EntityId) && t.ThumbnailCount > 0)
+            .Select(t => new { t.EntityId, t.Width })
+            .ToListAsync(cancellationToken))
+            .Where(row => HasUsableTrickplayTiles(row.EntityId, row.Width))
+            .Select(row => row.EntityId)
+            .ToHashSet();
+
+        var subtitlesExtracted = (await _db.EntitySubtitleStates.AsNoTracking()
+            .Where(v => ids.Contains(v.EntityId) && v.SubtitlesExtractedAt != null)
+            .Select(v => v.EntityId)
+            .ToListAsync(cancellationToken)).ToHashSet();
+        var subtitleRows = await _db.EntitySubtitles.AsNoTracking()
+            .Where(subtitle => ids.Contains(subtitle.EntityId) &&
+                (subtitle.Source == EntitySubtitleSource.Embedded ||
+                    subtitle.Source == EntitySubtitleSource.Sidecar))
+            .Select(subtitle => new {
+                subtitle.EntityId,
+                subtitle.Source,
+                subtitle.StoragePath,
+                subtitle.SourceFormat,
+                subtitle.SourcePath
+            })
+            .ToListAsync(cancellationToken);
+        var subtitlesByEntity = subtitleRows
+            .GroupBy(subtitle => subtitle.EntityId)
+            .ToDictionary(group => group.Key, group => group.ToArray());
+        var hasUsableSubtitleState = subtitlesExtracted
+            .Where(id => !subtitlesByEntity.TryGetValue(id, out var rows) ||
+                rows.All(row => SubtitleAssetAvailability.IsManagedTrackAvailable(
+                    _assets,
+                    row.EntityId,
+                    row.Source,
+                    row.StoragePath,
+                    row.SourceFormat,
+                    row.SourcePath)))
+            .ToHashSet();
+
+        var result = new Dictionary<Guid, DownstreamNeeds>(ids.Count);
+        foreach (var id in ids) {
+            entityKinds.TryGetValue(id, out var kindCode);
+            var unreadable = probeFailed.Contains(id);
+            var needsPreview = string.Equals(kindCode, EntityKind.AudioTrack.ToCode(), StringComparison.OrdinalIgnoreCase)
+                ? !hasWaveform.Contains(id)
+                : !hasThumbnail.Contains(id) ||
+                  (kindCode is not null && NeedsAnimatedImagePreviewClip(kindCode, id, sourcePaths, hasPreview));
+
+            result[id] = new DownstreamNeeds(
+                NeedsProbe: !unreadable && (!hasTechnical.Contains(id) || !hasMediaSource.Contains(id)),
+                MissingOshash: !hasOshash.Contains(id),
+                MissingMd5: !hasMd5.Contains(id),
+                NeedsPreview: !unreadable && needsPreview,
+                NeedsTrickplay: !unreadable && !hasTrickplay.Contains(id),
+                // Adjacent sidecars remain importable even when the source video is unreadable.
+                // Source-file changes clear both the probe marker and subtitle completion so a
+                // repaired video receives a fresh embedded-stream pass as well.
+                NeedsSubtitleExtraction: !hasUsableSubtitleState.Contains(id),
+                // Backfill own covers and structural rollups without making API reads resolve
+                // representative children on demand.
+                NeedsGridThumbnail: !PreservesOriginalArtwork(kindCode) &&
+                    (hasCover.Contains(id) || hasChildArtwork.Contains(id)) &&
+                    (!hasGridThumbnail.Contains(id) || !hasGridThumbnail2x.Contains(id)));
+        }
+
+        return result;
+    }
+
+    // ── Reads for downstream chaining decisions ──
+
+    public Task<bool> HasEntityTechnicalAsync(Guid entityId, CancellationToken cancellationToken) =>
+        _db.EntityTechnical.AnyAsync(t => t.EntityId == entityId && t.DurationSeconds != null, cancellationToken);
+
+    public Task<bool> HasEntityFingerprintAsync(Guid entityId, FingerprintAlgorithm algorithm, CancellationToken cancellationToken) =>
+        _db.EntityFileFingerprints.AnyAsync(f => f.EntityId == entityId && f.Algorithm == algorithm, cancellationToken);
+
+    public Task<bool> HasEntityFileAsync(Guid entityId, EntityFileRole role, CancellationToken cancellationToken) =>
+        HasUsableEntityFileAsync(entityId, role, cancellationToken);
+
+    public Task<bool> IsEntityOrganizedAsync(Guid entityId, CancellationToken cancellationToken) =>
+        _db.Entities.AsNoTracking().AnyAsync(entity => entity.Id == entityId && entity.IsOrganized, cancellationToken);
+
+    private async Task<HashSet<Guid>> LoadUsableAssetIdsAsync(
+        IReadOnlyList<Guid> ids,
+        IReadOnlyCollection<EntityFileRole> roles,
+        CancellationToken cancellationToken) {
+        var files = await _db.EntityFiles.AsNoTracking()
+            .Where(f => ids.Contains(f.EntityId) && roles.Contains(f.Role))
+            .Select(f => new { f.EntityId, f.Path })
+            .ToListAsync(cancellationToken);
+
+        return files
+            .Where(file => HasUsableAssetPath(file.Path))
+            .Select(file => file.EntityId)
+            .ToHashSet();
+    }
+
+    private async Task<bool> HasUsableEntityFileAsync(
+        Guid entityId,
+        EntityFileRole role,
+        CancellationToken cancellationToken) {
+        var paths = await _db.EntityFiles.AsNoTracking()
+            .Where(f => f.EntityId == entityId && f.Role == role)
+            .Select(f => f.Path)
+            .ToListAsync(cancellationToken);
+
+        return paths.Any(HasUsableAssetPath);
+    }
+
+    private bool HasUsableAssetPath(string path) {
+        if (!path.StartsWith(AssetPaths.AssetsUrlPrefix, StringComparison.Ordinal)) {
+            return true;
+        }
+
+        if (_assets is null) {
+            return true;
+        }
+
+        var diskPath = _assets.ResolveAssetDiskPath(path);
+        return diskPath is not null && File.Exists(diskPath);
+    }
+
+    private bool HasUsableTrickplayTiles(Guid entityId, int width) {
+        if (_assets is null) {
+            return true;
+        }
+
+        var tileDir = _assets.TrickplayTileDir(entityId, width);
+        try {
+            return Directory.Exists(tileDir) && Directory.EnumerateFiles(tileDir, "*.jpg").Any();
+        } catch (IOException) {
+            return false;
+        } catch (UnauthorizedAccessException) {
+            return false;
+        }
+    }
+
+    private static bool NeedsAnimatedImagePreviewClip(
+        string kindCode,
+        Guid entityId,
+        IReadOnlyDictionary<Guid, string> sourcePaths,
+        IReadOnlySet<Guid> hasPreview) =>
+        string.Equals(kindCode, EntityKind.Image.ToCode(), StringComparison.OrdinalIgnoreCase) &&
+        sourcePaths.TryGetValue(entityId, out var sourcePath) &&
+        AnimatedImagePreviewPolicy.RequiresPreviewClip(sourcePath) &&
+        !hasPreview.Contains(entityId);
+
+    private static bool PreservesOriginalArtwork(string? kindCode) =>
+        EntityKindRegistry.TryDescribe(kindCode, out var definition) &&
+        definition.Presentation.ArtworkSurface == EntityArtworkSurface.BrandPlate;
+
+    public async Task<bool> HasSubtitlesExtractedAsync(Guid entityId, CancellationToken cancellationToken) {
+        var detail = await _db.EntitySubtitleStates.AsNoTracking()
+            .FirstOrDefaultAsync(v => v.EntityId == entityId, cancellationToken);
+        return detail?.SubtitlesExtractedAt is not null;
+    }
+
+    public async Task<IReadOnlyList<EntityRefreshTarget>> GetAudioContainerTargetsInRootAsync(
+        Guid rootId, CancellationToken cancellationToken) {
+        var rootedAudioIds = await _db.EntityLibraryRoots.AsNoTracking()
+            .Where(detail => detail.LibraryRootId == rootId)
+            .Select(detail => detail.EntityId)
+            .ToListAsync(cancellationToken);
+        var audioContainers = await _db.Entities.AsNoTracking()
+            .Where(entity => rootedAudioIds.Contains(entity.Id) &&
+                (entity.KindCode == EntityKind.AudioLibrary.ToCode() || entity.KindCode == EntityKind.MusicArtist.ToCode()))
+            .Select(entity => new { entity.Id, entity.KindCode, entity.ParentEntityId })
+            .ToListAsync(cancellationToken);
+        var containerIdSet = audioContainers.Select(entity => entity.Id).ToHashSet();
+        var containerIds = audioContainers
+            .Where(entity => entity.ParentEntityId is null || !containerIdSet.Contains(entity.ParentEntityId.Value))
+            .Select(entity => entity.Id)
+            .ToArray();
+        if (containerIds.Length == 0) {
+            return [];
+        }
+
+        return await _db.Entities.AsNoTracking()
+            .Where(entity => containerIds.Contains(entity.Id))
+            .OrderBy(entity => entity.Title)
+            .Select(entity => new EntityRefreshTarget(entity.Id, entity.KindCode, entity.Title))
+            .ToListAsync(cancellationToken);
+    }
+
+    public async Task<IReadOnlyList<EntityRefreshTarget>> GetAudioTrackTargetsInRootAsync(
+        Guid rootId, CancellationToken cancellationToken) {
+        var albumIds = await _db.EntityLibraryRoots.AsNoTracking()
+            .Where(detail => detail.LibraryRootId == rootId)
+            .Join(_db.Entities.AsNoTracking().Where(entity => entity.KindCode == EntityKind.AudioLibrary.ToCode()),
+                root => root.EntityId, entity => entity.Id, (root, entity) => entity.Id)
+            .ToListAsync(cancellationToken);
+
+        var targets = new Dictionary<Guid, EntityRefreshTarget>();
+        if (albumIds.Count > 0) {
+            var albumTracks = await _db.Entities.AsNoTracking()
+                .Where(entity => entity.KindCode == EntityKind.AudioTrack.ToCode() &&
+                    entity.ParentEntityId != null &&
+                    albumIds.Contains(entity.ParentEntityId.Value))
+                .OrderBy(entity => entity.ParentEntityId)
+                .ThenBy(entity => entity.SortOrder)
+                .ThenBy(entity => entity.Title)
+                .Select(entity => new EntityRefreshTarget(entity.Id, entity.KindCode, entity.Title))
+                .ToListAsync(cancellationToken);
+
+            foreach (var track in albumTracks) {
+                targets[track.Id] = track;
+            }
+        }
+
+        var rootPath = await _db.LibraryRoots.AsNoTracking()
+            .Where(root => root.Id == rootId)
+            .Select(root => root.Path)
+            .FirstOrDefaultAsync(cancellationToken);
+        if (!string.IsNullOrWhiteSpace(rootPath)) {
+            var looseTracks = await _db.EntityFiles.AsNoTracking()
+                .Where(file => file.Role == EntityFileRole.Source)
+                .Join(
+                    _db.Entities.AsNoTracking().Where(entity =>
+                        entity.KindCode == EntityKind.AudioTrack.ToCode() &&
+                        entity.ParentEntityId == null),
+                    file => file.EntityId,
+                    entity => entity.Id,
+                    (file, entity) => new { entity.Id, entity.KindCode, entity.Title, file.Path })
+                .ToListAsync(cancellationToken);
+
+            foreach (var track in looseTracks.Where(track =>
+                         LibraryScanPathRules.IsDirectChildPath(track.Path, rootPath))) {
+                targets[track.Id] = new EntityRefreshTarget(track.Id, track.KindCode, track.Title);
+            }
+        }
+
+        return targets.Values.ToList();
+    }
+
+    public async Task<IReadOnlyList<AutoIdentifyRootTarget>> ResolveAutoIdentifyRootsForLibraryRootAsync(
+        Guid libraryRootId,
+        IReadOnlyList<MediaCategory> scanCategories,
+        CancellationToken cancellationToken) {
+        if (scanCategories.Count == 0) return [];
+
+        var categories = scanCategories.ToHashSet();
+        var entityIds = new List<Guid>();
+
+        if (categories.Contains(MediaCategory.Video)) {
+            var playableVideoKindCodes = EntityKindRegistry.All
+                .OfType<IPlayableVideoKindDefinition>()
+                .Select(definition => definition.Kind.ToCode())
+                .ToArray();
+            entityIds.AddRange(await DirectRootedKindIdsAsync(
+                libraryRootId,
+                playableVideoKindCodes,
+                cancellationToken));
+        }
+
+        if (categories.Contains(MediaCategory.Image)) {
+            var galleryIds = await DirectRootedKindIdsAsync(libraryRootId, EntityKind.Gallery, cancellationToken);
+            entityIds.AddRange(galleryIds);
+        }
+
+        if (categories.Contains(MediaCategory.Audio)) {
+            // Preserve the full-scan queue ordering: artists first, then albums. When an artist
+            // identifies successfully, later album jobs can use the saved artist external IDs as
+            // provider context.
+            var artistIds = await DirectRootedKindIdsAsync(libraryRootId, EntityKind.MusicArtist, cancellationToken);
+            entityIds.AddRange(artistIds);
+
+            var albumIds = await DirectRootedKindIdsAsync(libraryRootId, EntityKind.AudioLibrary, cancellationToken);
+            entityIds.AddRange(albumIds);
+        }
+
+        if (categories.Contains(MediaCategory.ComicArchive) || categories.Contains(MediaCategory.Book)) {
+            var bookIds = await DirectRootedKindIdsAsync(libraryRootId, EntityKind.Book, cancellationToken);
+            entityIds.AddRange(bookIds);
+        }
+
+        return await ResolveAutoIdentifyRootsAsync(entityIds.Distinct().ToList(), cancellationToken);
+    }
+
+    public async Task<IReadOnlyList<AutoIdentifyRootTarget>> ResolveAutoIdentifyRootsAsync(
+        IReadOnlyList<Guid> entityIds,
+        CancellationToken cancellationToken) =>
+        await ResolveEntityRootsAsync(entityIds, enforceIdentifyAttemptLimit: true, cancellationToken);
+
+    public async Task<IReadOnlyList<AutoIdentifyRootTarget>> ResolveEntityProcessingRootsAsync(
+        IReadOnlyList<Guid> entityIds,
+        CancellationToken cancellationToken) =>
+        await ResolveEntityRootsAsync(entityIds, enforceIdentifyAttemptLimit: false, cancellationToken);
+
+    private async Task<IReadOnlyList<AutoIdentifyRootTarget>> ResolveEntityRootsAsync(
+        IReadOnlyList<Guid> entityIds,
+        bool enforceIdentifyAttemptLimit,
+        CancellationToken cancellationToken) {
+        if (entityIds.Count == 0) return [];
+
+        // Load the scanned entities plus their ancestor chain in waves (libraries are only a few
+        // levels deep), then walk each scanned entity up to its top-level ancestor.
+        var info = new Dictionary<Guid, (string KindCode, string Title, Guid? ParentId, int AutoIdentifyAttempts, bool IsOrganized)>();
+        var toLoad = new HashSet<Guid>(entityIds);
+        while (toLoad.Count > 0) {
+            var batch = toLoad.ToList();
+            toLoad.Clear();
+            var rows = await _db.Entities.AsNoTracking()
+                .Where(entity => batch.Contains(entity.Id))
+                .Select(entity => new { entity.Id, entity.KindCode, entity.Title, entity.ParentEntityId, entity.AutoIdentifyAttempts, entity.IsOrganized })
+                .ToListAsync(cancellationToken);
+            foreach (var row in rows) {
+                info[row.Id] = (row.KindCode, row.Title, row.ParentEntityId, row.AutoIdentifyAttempts, row.IsOrganized);
+                if (row.ParentEntityId is { } parentId && !info.ContainsKey(parentId)) {
+                    toLoad.Add(parentId);
+                }
+            }
+        }
+
+        var musicArtistCode = EntityKind.MusicArtist.ToCode();
+        var roots = new Dictionary<Guid, AutoIdentifyRootTarget>();
+        foreach (var id in entityIds) {
+            var current = id;
+            var guard = 0;
+            while (info.TryGetValue(current, out var node) && node.ParentId is { } parent && guard++ < 64) {
+                // An artist grouping is identified on demand, not as part of the scan cascade, so an
+                // album stays its own auto-identify root rather than collapsing into the artist.
+                if (info.TryGetValue(parent, out var parentNode) && parentNode.KindCode == musicArtistCode) {
+                    break;
+                }
+
+                current = parent;
+            }
+
+            if (!roots.ContainsKey(current)
+                && info.TryGetValue(current, out var rootInfo)
+                && (!enforceIdentifyAttemptLimit
+                    || rootInfo.AutoIdentifyAttempts < AutoIdentifyPolicy.MaxAttemptsPerEntity)) {
+                roots[current] = new AutoIdentifyRootTarget(current, rootInfo.KindCode, rootInfo.Title, rootInfo.IsOrganized);
+            }
+        }
+
+        return roots.Values.ToList();
+    }
+
+    private Task<List<Guid>> DirectRootedKindIdsAsync(
+        Guid libraryRootId,
+        EntityKind kind,
+        CancellationToken cancellationToken) =>
+        _db.EntityLibraryRoots.AsNoTracking()
+            .Where(root => root.LibraryRootId == libraryRootId)
+            .Join(
+                _db.Entities.AsNoTracking().Where(entity => entity.KindCode == kind.ToCode()),
+                root => root.EntityId,
+                entity => entity.Id,
+                (root, entity) => entity.Id)
+            .ToListAsync(cancellationToken);
+
+    private Task<List<Guid>> DirectRootedKindIdsAsync(
+        Guid libraryRootId,
+        IReadOnlyCollection<string> kindCodes,
+        CancellationToken cancellationToken) =>
+        _db.EntityLibraryRoots.AsNoTracking()
+            .Where(root => root.LibraryRootId == libraryRootId)
+            .Join(
+                _db.Entities.AsNoTracking().Where(entity => kindCodes.Contains(entity.KindCode)),
+                root => root.EntityId,
+                entity => entity.Id,
+                (root, entity) => entity.Id)
+            .ToListAsync(cancellationToken);
+
+}
