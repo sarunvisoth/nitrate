@@ -1341,6 +1341,16 @@ export const READER_MODE = {
 
 export type ReaderModeCode = (typeof READER_MODE)[keyof typeof READER_MODE];
 
+// source: enum ReaderProviderKind
+export const READER_PROVIDER_KIND = {
+  wiktionary: "wiktionary",
+  wikipedia: "wikipedia",
+  myMemory: "mymemory",
+  libreTranslate: "libretranslate",
+} as const;
+
+export type ReaderProviderKindCode = (typeof READER_PROVIDER_KIND)[keyof typeof READER_PROVIDER_KIND];
+
 // source: enum RelationshipKind
 export const RELATIONSHIP_CODE = {
   cast: "cast",
@@ -1592,6 +1602,8 @@ export const SETTING_KEYS = {
   playbackDefaultMode: "playback.defaultMode",
   playbackShowCastControls: "playback.showCastControls",
   pluginsAutoUpdateEnabled: "plugins.autoUpdateEnabled",
+  readerTranslationLibreApiKey: "reader.translationLibreApiKey",
+  readerTranslationLibreUrl: "reader.translationLibreUrl",
   scanAutoScanEnabled: "scan.autoScanEnabled",
   scanIntegrityIntervalHours: "scan.integrityIntervalHours",
   scanIntervalMinutes: "scan.intervalMinutes",
@@ -1671,6 +1683,8 @@ export const PROBLEM_CODE = {
   playbackSourceNotFound: "playback_source_not_found",
   pluginNotFound: "plugin_not_found",
   pluginUpdateNotFound: "plugin_update_not_found",
+  readerLookupInvalid: "reader_lookup_invalid",
+  readerLookupProviderUnavailable: "reader_lookup_provider_unavailable",
   requestInvalid: "request_invalid",
   requestPermissionRequired: "request_permission_required",
   requestProposalChanged: "request_proposal_changed",

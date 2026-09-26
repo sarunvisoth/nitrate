@@ -96,8 +96,43 @@ public static class DependencyInjection {
         RegisterRequests(services);
         RegisterAcquisition(services, dataDir);
         RegisterJobsSettingsAndState(services, configuration, dataDir, connectionString, pathBase);
+        RegisterReaderLookups(services);
 
         return services;
+    }
+
+    /// <summary>
+    /// Registers the reader's Define/Translate/Wikipedia lookup providers: an in-memory cache
+    /// shared by all three, and one named <see cref="HttpClient"/> per upstream (each sending the
+    /// descriptive User-Agent Wikimedia requires, and an ~8s timeout so a slow provider can't hang
+    /// a request).
+    /// </summary>
+    private static void RegisterReaderLookups(IServiceCollection services) {
+        const string userAgent = "Nitrate/1.0 (self-hosted personal media server)";
+        var timeout = TimeSpan.FromSeconds(8);
+
+        services.AddMemoryCache();
+        services.AddHttpClient(Reader.WiktionaryDictionaryProvider.HttpClientName, client => {
+            client.Timeout = timeout;
+            client.DefaultRequestHeaders.UserAgent.ParseAdd(userAgent);
+        });
+        services.AddHttpClient(Reader.WikipediaEncyclopediaProvider.HttpClientName, client => {
+            client.Timeout = timeout;
+            client.DefaultRequestHeaders.UserAgent.ParseAdd(userAgent);
+        });
+        services.AddHttpClient(Reader.MyMemoryTranslationProvider.HttpClientName, client => {
+            client.Timeout = timeout;
+            client.DefaultRequestHeaders.UserAgent.ParseAdd(userAgent);
+        });
+        services.AddHttpClient(Reader.LibreTranslateTranslationProvider.HttpClientName, client => {
+            client.Timeout = timeout;
+            client.DefaultRequestHeaders.UserAgent.ParseAdd(userAgent);
+        });
+
+        services.AddSingleton<Prismedia.Application.Reader.IDictionaryProvider, Reader.WiktionaryDictionaryProvider>();
+        services.AddSingleton<Prismedia.Application.Reader.IEncyclopediaProvider, Reader.WikipediaEncyclopediaProvider>();
+        services.AddSingleton<Reader.MyMemoryTranslationProvider>();
+        services.AddScoped<Prismedia.Application.Reader.ITranslationProvider, Reader.TranslationProviderSelector>();
     }
 
     private static void RegisterPersistence(IServiceCollection services, string connectionString) {

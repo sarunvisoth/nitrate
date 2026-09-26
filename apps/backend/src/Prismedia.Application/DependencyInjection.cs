@@ -35,6 +35,7 @@ public static class DependencyInjection {
         services.AddScoped<EntityCapabilityService>();
         services.AddSingleton(TimeProvider.System);
         services.AddScoped<SettingsService>();
+        services.AddScoped<Reader.ReaderLookupService>();
         services.AddScoped<IAutomaticSubtitleAcquisitionScheduler, AutomaticSubtitleAcquisitionScheduler>();
         services.AddScoped<NavLayoutService>();
         services.AddScoped<UserAuthService>();

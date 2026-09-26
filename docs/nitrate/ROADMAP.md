@@ -14,7 +14,7 @@ Legend for who does the work: **Cloud** = a Claude cloud session can do it end t
 | M2 | Windows-native host: AMD AMF encoder profile + Windows install guide | Cloud builds, Owner verifies | [foundation](plans/2026-09-26-foundation.md) | Built; awaiting owner verification |
 | M3 | **Reader slice 1:** annotation model + API, text selection, highlights (5 colours), notes, cross-device sync | Cloud; Owner reads with it | [m3-reader-slice-1](plans/2026-09-26-m3-reader-slice-1.md) | Built; awaiting owner reading test |
 | M4 | Bookmarks, `/annotations` dashboard (search, filter by book/colour), Markdown/JSON/CSV export | Cloud | [m4-bookmarks-annotations-export](plans/2026-09-26-m4-bookmarks-annotations-export.md) | Built; awaiting owner check |
-| M5 | `DictionaryProvider` + Define popup, `TranslationProvider` + Translate, Wikipedia / Search Book / Search Web | Cloud | — | Not started |
+| M5 | `DictionaryProvider` + Define popup, `TranslationProvider` + Translate, Wikipedia / Search Book / Search Web | Cloud | [m5-reader-lookups](plans/2026-09-26-m5-reader-lookups.md) | Built; awaiting owner check |
 | M6 | Per-user reader settings (fonts, spacing, themes, scroll/paginated), vocabulary list | Cloud | — | Not started |
 | M7 | PDF annotations (page-anchored), PDF search/define/translate | Cloud | — | Not started |
 | M8 | Mobile/tablet layout pass, unified global search | Cloud; Owner checks devices | — | Not started |

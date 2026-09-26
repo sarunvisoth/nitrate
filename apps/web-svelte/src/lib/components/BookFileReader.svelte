@@ -17,6 +17,7 @@
     Plus,
     Rows3,
     X,
+    Search,
   } from "@lucide/svelte";
   import { apiAssetUrl as toApiUrl } from "$lib/api/orval-fetch";
   import ReaderShell from "$lib/components/reader/ReaderShell.svelte";
@@ -24,6 +25,7 @@
     type ReaderSelectionAction,
   } from "$lib/components/reader/ReaderSelectionMenu.svelte";
   import AnnotationEditor from "$lib/components/reader/AnnotationEditor.svelte";
+  import BookSearchPanel from "$lib/components/reader/BookSearchPanel.svelte";
   import ReaderBookmarkList from "$lib/components/reader/ReaderBookmarkList.svelte";
   import type { ReaderNotice } from "$lib/components/reader/reader-notice";
   import { ANNOTATION_COLOR, type AnnotationColorCode } from "$lib/api/generated/codes";
@@ -277,6 +279,9 @@
   const editingAnnotation = $derived(
     editing ? (annotations ?? []).find((item) => item.id === editing?.id) ?? null : null,
   );
+
+  // Search book (foliate's own full-text search) is a separate sheet, toggled from the toolbar.
+  let bookSearchOpen = $state(false);
 
   const selectionActions: ReaderSelectionAction[] = [
     { id: "highlight", label: "Highlight", icon: Highlighter, run: () => createFromSelection(false) },
@@ -719,6 +724,10 @@
         {/if}
       </Button>
     {/if}
+    {#if !isFixedLayout}
+      <Button variant="outline" size="sm" type="button" onclick={() => (bookSearchOpen = true)}
+        aria-label="Search book" title="Search book"><Search class="h-4 w-4" /></Button>
+    {/if}
     {#if hasToc || bookmarksEnabled}
       <Button variant="outline" size="sm"
         type="button"
@@ -806,6 +815,7 @@
     {#if annotationsEnabled}
       <ReaderSelectionMenu
         anchor={pendingSelection?.anchor ?? null}
+        selectedText={pendingSelection?.draft.selectedText ?? ""}
         actions={selectionActions}
         onDismiss={clearSelection}
       />
@@ -877,6 +887,11 @@
 >
   {@render tocItems(toc, 0)}
 </ReaderContentsSheet>
+
+{#if ready}
+  <BookSearchPanel open={bookSearchOpen} {view} onClose={() => (bookSearchOpen = false)}
+    onNavigate={(cfi) => { try { void view?.goTo?.(cfi); } catch { /* section may be unloaded */ } }} />
+{/if}
 
 {#snippet bookmarkItems()}
   <ReaderBookmarkList
