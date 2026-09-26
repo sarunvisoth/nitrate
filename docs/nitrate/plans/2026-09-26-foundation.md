@@ -54,14 +54,14 @@
 - Consumes: the current `nitrate` `main`, which contains only `docs/nitrate/**` (no `README.md`, no `.gitignore`), so the merge is conflict-free.
 - Produces: a `main` whose history contains `627958a491f565babf1f8f693a5bb48ea834bc7e` and whose tree is Prismedia v3.7.2 plus `docs/nitrate/**`.
 
-- [ ] **Step 1: Confirm starting state**
+- [x] **Step 1: Confirm starting state**
 
 ```bash
 git status --short          # expect: clean
 git ls-files                # expect: only docs/nitrate/** files
 ```
 
-- [ ] **Step 2: Fetch Prismedia (full history, not shallow)**
+- [x] **Step 2: Fetch Prismedia (full history, not shallow)**
 
 ```bash
 git remote add prismedia https://github.com/pauljoda/Prismedia.git
@@ -69,7 +69,7 @@ git fetch prismedia main
 git cat-file -t 627958a491f565babf1f8f693a5bb48ea834bc7e   # expect: commit
 ```
 
-- [ ] **Step 3: Merge the pinned commit**
+- [x] **Step 3: Merge the pinned commit**
 
 ```bash
 git merge --allow-unrelated-histories --no-edit \
@@ -79,7 +79,7 @@ git merge --allow-unrelated-histories --no-edit \
 
 Expected: merge succeeds with no conflicts. If there is a conflict it can only be under `docs/nitrate/`; keep the Nitrate version (`git checkout --ours docs/nitrate && git add docs/nitrate`).
 
-- [ ] **Step 4: Remove the remote and verify**
+- [x] **Step 4: Remove the remote and verify**
 
 ```bash
 git remote remove prismedia
@@ -89,7 +89,7 @@ test -d apps/backend && test -d apps/web-svelte && test -f LICENSE && echo OK   
 test -L CLAUDE.md && echo symlink                                                        # expect: symlink
 ```
 
-- [ ] **Step 5: Push**
+- [x] **Step 5: Push**
 
 ```bash
 git push origin main
