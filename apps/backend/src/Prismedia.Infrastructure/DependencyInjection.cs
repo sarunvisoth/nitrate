@@ -317,6 +317,7 @@ public static class DependencyInjection {
         services.AddScoped<IBookChapterMappingService, EfBookChapterMappingService>();
         services.TryAddSingleton(TimeProvider.System);
         services.AddScoped<IBookAnnotationService, EfBookAnnotationService>();
+        services.AddScoped<IBookBookmarkService, EfBookBookmarkService>();
         services.AddScoped<IBookChapterMapService, EfBookChapterMapService>();
         services.AddScoped<IGridThumbnailService>(provider =>
             new GridThumbnailService(

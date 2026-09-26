@@ -1639,6 +1639,7 @@ export const PROBLEM_CODE = {
   indexerInvalid: "indexer_invalid",
   indexerUnreachable: "indexer_unreachable",
   invalidBookAnnotation: "invalid_book_annotation",
+  invalidBookBookmark: "invalid_book_bookmark",
   invalidBookChapterMapping: "invalid_book_chapter_mapping",
   invalidCollection: "invalid_collection",
   invalidCollectionItems: "invalid_collection_items",

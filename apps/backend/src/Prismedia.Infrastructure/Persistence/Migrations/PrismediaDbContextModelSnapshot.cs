@@ -837,6 +837,71 @@ namespace Prismedia.Infrastructure.Persistence.Migrations
                     b.ToTable("book_annotations", (string)null);
                 });
 
+            modelBuilder.Entity("Prismedia.Infrastructure.Persistence.Entities.BookBookmarkRow", b =>
+                {
+                    b.Property<Guid>("Id")
+                        .HasColumnType("uuid")
+                        .HasColumnName("id");
+
+                    b.Property<Guid>("BookId")
+                        .HasColumnType("uuid")
+                        .HasColumnName("book_id");
+
+                    b.Property<string>("ChapterLabel")
+                        .HasMaxLength(512)
+                        .HasColumnType("character varying(512)")
+                        .HasColumnName("chapter_label");
+
+                    b.Property<DateTimeOffset>("CreatedAt")
+                        .HasColumnType("timestamp with time zone")
+                        .HasColumnName("created_at");
+
+                    b.Property<DateTimeOffset?>("DeletedAt")
+                        .HasColumnType("timestamp with time zone")
+                        .HasColumnName("deleted_at");
+
+                    b.Property<string>("Label")
+                        .HasMaxLength(512)
+                        .HasColumnType("character varying(512)")
+                        .HasColumnName("label");
+
+                    b.Property<string>("Locator")
+                        .IsRequired()
+                        .HasMaxLength(4096)
+                        .HasColumnType("character varying(4096)")
+                        .HasColumnName("locator");
+
+                    b.Property<string>("LocatorKind")
+                        .IsRequired()
+                        .HasMaxLength(32)
+                        .HasColumnType("character varying(32)")
+                        .HasColumnName("locator_kind");
+
+                    b.Property<double>("Position")
+                        .HasColumnType("double precision")
+                        .HasColumnName("position");
+
+                    b.Property<int>("SpineIndex")
+                        .HasColumnType("integer")
+                        .HasColumnName("spine_index");
+
+                    b.Property<DateTimeOffset>("UpdatedAt")
+                        .HasColumnType("timestamp with time zone")
+                        .HasColumnName("updated_at");
+
+                    b.Property<Guid>("UserId")
+                        .HasColumnType("uuid")
+                        .HasColumnName("user_id");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("BookId");
+
+                    b.HasIndex("UserId", "BookId");
+
+                    b.ToTable("book_bookmarks", (string)null);
+                });
+
             modelBuilder.Entity("Prismedia.Infrastructure.Persistence.Entities.BookChapterAudioMappingRow", b =>
                 {
                     b.Property<Guid>("Id")
@@ -4931,6 +4996,21 @@ namespace Prismedia.Infrastructure.Persistence.Migrations
                 });
 
             modelBuilder.Entity("Prismedia.Infrastructure.Persistence.Entities.BookAnnotationRow", b =>
+                {
+                    b.HasOne("Prismedia.Infrastructure.Persistence.Entities.EntityRow", null)
+                        .WithMany()
+                        .HasForeignKey("BookId")
+                        .OnDelete(DeleteBehavior.Cascade)
+                        .IsRequired();
+
+                    b.HasOne("Prismedia.Infrastructure.Persistence.Entities.UserRow", null)
+                        .WithMany()
+                        .HasForeignKey("UserId")
+                        .OnDelete(DeleteBehavior.Cascade)
+                        .IsRequired();
+                });
+
+            modelBuilder.Entity("Prismedia.Infrastructure.Persistence.Entities.BookBookmarkRow", b =>
                 {
                     b.HasOne("Prismedia.Infrastructure.Persistence.Entities.EntityRow", null)
                         .WithMany()

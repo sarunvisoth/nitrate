@@ -69,15 +69,15 @@
 ## Tasks
 
 ### Task 1: Bookmarks backend
-- [ ] **Step 1:** Domain/contracts/application:
+- [x] **Step 1:** Domain/contracts/application:
   - `BookBookmark`, `UpsertBookBookmarkRequest` and `BookBookmarksResponse`;
   - `IBookBookmarkService` with a write result, reusing `BookAnnotationWritePolicy` for last-write-wins and clock
     plausibility.
-- [ ] **Step 2:** Add `BookBookmarkRow` with its mapping, DbSet and migration `AddBookBookmarks`. The migration must
+- [x] **Step 2:** Add `BookBookmarkRow` with its mapping, DbSet and migration `AddBookBookmarks`. The migration must
   create only `book_bookmarks`, with cascade FKs to users and entities.
-- [ ] **Step 3:** Write `EfBookBookmarkService` test-first, covering the same cases as `EfBookAnnotationServiceTests`:
+- [x] **Step 3:** Write `EfBookBookmarkService` test-first, covering the same cases as `EfBookAnnotationServiceTests`:
   owner-only, superseded, tombstone, other user → NotFound, non-book or hidden → NotFound, anonymous, invalid.
-- [ ] **Step 4:** Add `GET/PUT/DELETE /api/books/{id}/bookmarks[/{bookmarkId}]` with endpoint tests.
+- [x] **Step 4:** Add `GET/PUT/DELETE /api/books/{id}/bookmarks[/{bookmarkId}]` with endpoint tests.
 - [ ] **Step 5:** Run `pnpm test:backend`, regenerate the client in the same commit, then commit.
 
 ### Task 2: Annotation library and export backend

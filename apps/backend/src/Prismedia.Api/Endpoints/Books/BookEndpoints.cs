@@ -112,8 +112,62 @@ public static class BookEndpoints {
             .Produces<ApiProblem>(StatusCodes.Status400BadRequest)
             .Produces<ApiProblem>(StatusCodes.Status404NotFound);
 
+        group.MapGet("/{id:guid}/bookmarks", async (
+            Guid id,
+            IBookBookmarkService bookmarks,
+            CancellationToken cancellationToken) => {
+                var result = await bookmarks.ListAsync(id, cancellationToken);
+                return result is null
+                    ? Results.NotFound(new ApiProblem(
+                        ApiProblemCodes.EntityNotFound,
+                        $"Book '{id}' was not found."))
+                    : Results.Ok(result);
+            })
+            .WithName("ListBookBookmarks")
+            .WithSummary("List the current user's bookmarks for a Book, including deleted tombstones.")
+            .Produces<BookBookmarksResponse>()
+            .Produces<ApiProblem>(StatusCodes.Status404NotFound);
+
+        group.MapPut("/{id:guid}/bookmarks/{bookmarkId:guid}", async (
+            Guid id,
+            Guid bookmarkId,
+            UpsertBookBookmarkRequest request,
+            IBookBookmarkService bookmarks,
+            CancellationToken cancellationToken) =>
+                ToBookmarkResult(id, await bookmarks.UpsertAsync(id, bookmarkId, request, cancellationToken)))
+            .WithName("UpsertBookBookmark")
+            .WithSummary("Create or update one bookmark; the write with the newest updatedAt wins.")
+            .Produces<BookBookmark>()
+            .Produces<ApiProblem>(StatusCodes.Status400BadRequest)
+            .Produces<ApiProblem>(StatusCodes.Status404NotFound);
+
+        group.MapDelete("/{id:guid}/bookmarks/{bookmarkId:guid}", async (
+            Guid id,
+            Guid bookmarkId,
+            DateTimeOffset updatedAt,
+            IBookBookmarkService bookmarks,
+            CancellationToken cancellationToken) =>
+                ToBookmarkResult(id, await bookmarks.DeleteAsync(id, bookmarkId, updatedAt, cancellationToken)))
+            .WithName("DeleteBookBookmark")
+            .WithSummary("Tombstone one bookmark; the write with the newest updatedAt wins.")
+            .Produces<BookBookmark>()
+            .Produces<ApiProblem>(StatusCodes.Status400BadRequest)
+            .Produces<ApiProblem>(StatusCodes.Status404NotFound);
+
         return group;
     }
+
+    private static IResult ToBookmarkResult(Guid bookId, BookBookmarkWriteResult result) =>
+        result.Status switch {
+            BookAnnotationWriteStatus.Applied or BookAnnotationWriteStatus.Superseded => Results.Ok(result.Bookmark),
+            BookAnnotationWriteStatus.NotFound => Results.NotFound(new ApiProblem(
+                ApiProblemCodes.EntityNotFound,
+                $"Bookmark on book '{bookId}' was not found.")),
+            BookAnnotationWriteStatus.Invalid => Results.BadRequest(new ApiProblem(
+                ApiProblemCodes.InvalidBookBookmark,
+                result.Error ?? "The bookmark is invalid.")),
+            _ => throw new ArgumentOutOfRangeException(nameof(result))
+        };
 
     private static IResult ToAnnotationResult(Guid bookId, BookAnnotationWriteResult result) =>
         result.Status switch {
