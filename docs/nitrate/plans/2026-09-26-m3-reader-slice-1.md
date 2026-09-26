@@ -111,7 +111,7 @@ Library, Playwright, vendored foliate-js (`overlayer.js`, `view.js`).
 **Files:** create the three enums in `apps/backend/src/Prismedia.Domain/Entities/Enums/Books/`, plus
 `apps/backend/tests/Prismedia.Domain.Tests/AnnotationCodeTests.cs`.
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 ```csharp
 using Prismedia.Domain.Entities;
@@ -142,11 +142,11 @@ Before writing the test, check how existing Domain tests import `ToCode`/`Decode
 `DecodeAs<ConsumptionEventKind>` and copy its `using` lines. Also check whether an unknown code throws or returns
 a default (grep the `DecodeAs` implementation). Task 4's validation relies on that behaviour.
 
-- [ ] **Step 2: Run it and confirm it fails.** Run
+- [x] **Step 2: Run it and confirm it fails.** Run
   `dotnet test apps/backend/tests/Prismedia.Domain.Tests --filter "FullyQualifiedName~AnnotationCodeTests"`.
   Expected: a build error, because the types do not exist yet.
 
-- [ ] **Step 3: Implement the enums.** Use the same namespace as `ConsumptionEventKind`, i.e. `Prismedia.Domain.Entities`:
+- [x] **Step 3: Implement the enums.** Use the same namespace as `ConsumptionEventKind`, i.e. `Prismedia.Domain.Entities`:
 
 ```csharp
 namespace Prismedia.Domain.Entities;
@@ -190,10 +190,10 @@ public enum AnnotationLocatorKind {
 
 Format the enums to match the repository style: one attribute per line, as `ConsumptionEventKind.cs` does.
 
-- [ ] **Step 4: Run the test and confirm it passes.** Also run
+- [x] **Step 4: Run the test and confirm it passes.** Also run
   `dotnet test apps/backend/tests/Prismedia.Domain.Tests`. It is all green at baseline, and the architecture and
   identifier-discipline tests live there.
-- [ ] **Step 5: Commit.** `feat(api): add annotation style, colour and locator code enums`
+- [x] **Step 5: Commit.** `feat(api): add annotation style, colour and locator code enums`
 
 ---
 
