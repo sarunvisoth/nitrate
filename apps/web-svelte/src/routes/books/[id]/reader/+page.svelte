@@ -72,6 +72,7 @@
   // it saved itself, so a focus refresh only follows *other* devices (see progress-catch-up.ts).
   let progressSeenAt: string | null = null;
   const ownProgressPositions: string[] = [];
+  let lastSavedPositionKey: string | null = null;
   const OWN_POSITION_MEMORY = 64;
   let lastRemoteRefreshAt = 0;
   const REMOTE_REFRESH_THROTTLE_MS = 5_000;
@@ -138,11 +139,11 @@
   }
 
   /** Follows reading progress saved on another device while this reader was in the background. */
-  async function catchUpProgress() {
-    if (loadState !== "ready" || !book || !surface) return;
+  async function catchUpProgress(): Promise<boolean> {
+    if (loadState !== "ready" || !book || !surface) return false;
     const latest = await fetchEntity(book.id);
     const progress = getCapability(latest.capabilities, CAPABILITY_KIND.progress);
-    if (!progress) return;
+    if (!progress) return false;
     const isPdf = surface === "pdf";
     const target = remoteProgressToAdopt(
       { updatedAt: progress.updatedAt, location: progress.location, index: progress.index, total: progress.total },
@@ -155,7 +156,7 @@
       },
     );
     if (progress.updatedAt) progressSeenAt = progress.updatedAt;
-    if (!target) return;
+    if (!target) return false;
 
     const previous: ProgressTarget = isPdf
       ? { kind: "page", page: pdfLastPage }
@@ -172,6 +173,7 @@
       },
       onDismiss: dismissReaderNotice,
     });
+    return true;
   }
 
   async function moveReaderTo(target: ProgressTarget) {
@@ -199,11 +201,25 @@
   function queueReaderActivityHeartbeat(stop: boolean) {
     const activitySeconds = stop ? readerActivityClock.stop() : readerActivityClock.take();
     if (!activitySeconds || loadState !== "ready") return;
-    if (surface === "epub") {
-      void queueEpubSave(false, activitySeconds).catch(() => undefined);
-    } else if (surface === "pdf") {
-      void queuePdfSave(pdfLastPage, pdfLastCount, false, activitySeconds).catch(() => undefined);
+    const send = () => {
+      if (surface === "epub") {
+        void queueEpubSave(false, activitySeconds).catch(() => undefined);
+      } else if (surface === "pdf") {
+        void queuePdfSave(pdfLastPage, pdfLastCount, false, activitySeconds).catch(() => undefined);
+      }
+    };
+    // A heartbeat re-saves the current position. If this reader has not moved since its last save, another
+    // device may have saved a newer position meanwhile; follow it first instead of overwriting it with ours.
+    if (currentPositionKey() !== null && currentPositionKey() === lastSavedPositionKey) {
+      void catchUpProgress().catch(() => false).finally(send);
+      return;
     }
+    send();
+  }
+
+  function currentPositionKey(): string | null {
+    if (surface === "pdf") return pdfPositionKey(pdfLastPage);
+    return surface === "epub" ? epubSaveLocation : null;
   }
 
   async function loadReader(url: URL) {
@@ -289,7 +305,8 @@
     activitySeconds = readerActivityClock.take(),
   ) {
     if (!book) return;
-    if (epubSaveLocation) rememberOwnPosition(epubSaveLocation);
+    const savedLocation = epubSaveLocation;
+    if (savedLocation) rememberOwnPosition(savedLocation);
     const index = Math.max(0, Math.min(10_000, Math.round(epubSaveFraction * 10_000)));
     await updateEntityProgress(book.id, {
       currentEntityId: book.id,
@@ -297,11 +314,12 @@
       index,
       total: 10_000,
       mode: epubFlowMode === "scrolled" ? READER_MODE.scrolled : READER_MODE.paged,
-      location: epubSaveLocation,
+      location: savedLocation,
       completed: completed ? true : null,
       activitySeconds,
       activityKind: activitySeconds ? CONSUMPTION_ACTIVITY_KIND.reading : undefined,
     });
+    lastSavedPositionKey = savedLocation;
   }
 
   function queueEpubSave(completed = false, activitySeconds?: number | null) {
@@ -319,7 +337,8 @@
     activitySeconds = readerActivityClock.take(),
   ) {
     if (!book || pageCount <= 0) return;
-    rememberOwnPosition(pdfPositionKey(clampPageIndex(pageIndex, pageCount)));
+    const savedKey = pdfPositionKey(clampPageIndex(pageIndex, pageCount));
+    rememberOwnPosition(savedKey);
     await updateEntityProgress(book.id, {
       currentEntityId: book.id,
       unit: PROGRESS_UNIT.page,
@@ -330,6 +349,7 @@
       activitySeconds,
       activityKind: activitySeconds ? CONSUMPTION_ACTIVITY_KIND.reading : undefined,
     });
+    lastSavedPositionKey = savedKey;
   }
 
   function queuePdfSave(

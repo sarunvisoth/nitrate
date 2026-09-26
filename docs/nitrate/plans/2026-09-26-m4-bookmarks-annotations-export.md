@@ -3,7 +3,8 @@
 > **For agentic workers:** execute task by task (superpowers:executing-plans or subagent-driven-development).
 > Tick the checkboxes and commit as you go.
 >
-> **Status:** written and executed on 2026-09-26, in the same session, at the owner's request ("just continue").
+> **Status: built on 2026-09-26 (Tasks 1–6). Awaiting the owner's device check** (Task 6 Step 4). Written and executed in
+> the same session, at the owner's request ("just continue").
 > The design defaults below were chosen by the agent, not reviewed in advance. The owner can override any of them
 > (see "Owner decisions").
 
@@ -140,12 +141,27 @@
 - [x] **Step 5:** Run the web tests and `pnpm check`, then commit.
 
 ### Task 6: E2E, verification, docs
-- [ ] **Step 1:** `e2e/reader-bookmarks-and-library.spec.ts`:
+
+> **As built / findings:**
+> - **Bug found and fixed (M3 progress sync).** Prismedia's reader re-saves its current position on a 15-second
+>   activity heartbeat while visible. An open, idle reader on one device (e.g. an iPad left on the table)
+>   therefore kept overwriting newer progress made on another device. The heartbeat now first checks the server
+>   when the reader has not moved since its last save. If another device saved a newer position, the reader
+>   follows it (same "Go back" notice) instead of overwriting it. Regression test: "an open, idle reader follows
+>   progress from another device…" in `e2e/reader-bookmarks-and-library.spec.ts`.
+> - `BookFileReader.svelte` hit the repo's 1000-line source-discipline ceiling, so the bookmark list was extracted
+>   to `components/reader/ReaderBookmarkList.svelte`. Reader-side sync is now a shared `SyncedItemStore`, used by
+>   both annotations and bookmarks.
+> - The e2e checks that a highlight is actually painted, by sampling screenshot pixels (decoded in the browser with
+>   a canvas; no new dependency).
+> - Run: `PRISMEDIA_E2E_SVELTE_URL=http://localhost:5173 npx playwright test e2e/reader-*.spec.ts --workers=1`.
+>   Result on 2026-09-26: 4/4 passed, and 6/6 with `--repeat-each 2` before the idle-heartbeat test was added.
+- [x] **Step 1:** `e2e/reader-bookmarks-and-library.spec.ts`:
   - bookmark a page, reload, and see it in the Bookmarks tab; jump to it;
   - highlight with a note, open `/annotations`, find it by searching the note, and filter by colour;
   - download the CSV export and check it contains the quote and the note.
-- [ ] **Step 2:** Run the full backend and web suites, `pnpm check` and `pnpm api:check`, and the e2e (`--workers=1`).
-- [ ] **Step 3:** Update `docs/THIRD_PARTY_LICENSES.md` (no new dependencies expected), ARCHITECTURE_ANALYSIS
+- [x] **Step 2:** Run the full backend and web suites, `pnpm check` and `pnpm api:check`, and the e2e (`--workers=1`).
+- [x] **Step 3:** Update `docs/THIRD_PARTY_LICENSES.md` (no new dependencies expected), ARCHITECTURE_ANALYSIS
   §20, and the ROADMAP (M4 → `Built; awaiting owner check`).
 - [ ] **Step 4:** Owner-verified checklist (list it; do not claim it):
   - [ ] Bookmark on the Mac, then open the Bookmarks tab on the iPad and jump to it.
