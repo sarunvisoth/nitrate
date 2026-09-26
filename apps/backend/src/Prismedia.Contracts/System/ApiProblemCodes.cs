@@ -202,6 +202,15 @@ public static class ApiProblemCodes {
     /// <summary>Problem code <c>reader_lookup_provider_unavailable</c>.</summary>
     public const string ReaderLookupProviderUnavailable = "reader_lookup_provider_unavailable";
 
+    /// <summary>Problem code <c>reader_preferences_invalid</c>.</summary>
+    public const string ReaderPreferencesInvalid = "reader_preferences_invalid";
+
+    /// <summary>Problem code <c>vocabulary_invalid</c>.</summary>
+    public const string VocabularyInvalid = "vocabulary_invalid";
+
+    /// <summary>Problem code <c>vocabulary_not_found</c>.</summary>
+    public const string VocabularyNotFound = "vocabulary_not_found";
+
     /// <summary>Problem code <c>request_invalid</c>.</summary>
     public const string RequestInvalid = "request_invalid";
 

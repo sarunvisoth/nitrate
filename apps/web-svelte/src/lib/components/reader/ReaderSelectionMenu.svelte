@@ -14,7 +14,7 @@
   import { Button, Popover } from "@prismedia/ui-svelte";
   import { Search } from "@lucide/svelte";
   import { measurableFromRect } from "$lib/reader/epub-selection";
-  import { buildLookupActions, searchWebUrl } from "$lib/reader/reader-lookup-actions";
+  import { buildLookupActions, searchWebUrl, type LookupSourceContext } from "$lib/reader/reader-lookup-actions";
   import LookupPopover from "./LookupPopover.svelte";
 
   interface Props {
@@ -24,9 +24,11 @@
     selectedText: string;
     actions: readonly ReaderSelectionAction[];
     onDismiss: () => void;
+    /** Where this selection lives in the book, for Define's "Add to Vocabulary". */
+    sourceContext?: LookupSourceContext | null;
   }
 
-  let { anchor, selectedText = "", actions, onDismiss }: Props = $props();
+  let { anchor, selectedText = "", actions, onDismiss, sourceContext = null }: Props = $props();
 
   const customAnchor = $derived(anchor ? measurableFromRect(anchor) : null);
 
@@ -87,4 +89,5 @@
   term={selectedText}
   initialMode={lookupMode ?? "define"}
   onDismiss={() => { lookupMode = null; onDismiss(); }}
+  {sourceContext}
 />

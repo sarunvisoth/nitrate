@@ -17,6 +17,27 @@ export interface LookupActionCallbacks {
 }
 
 /**
+ * Where the current selection lives in the book: enough to save a vocabulary entry that links
+ * back to its source (bookId + CFI locator) and shows the surrounding sentence. Null when there
+ * is no book/annotation context (e.g. a fixed-layout book, or annotations disabled).
+ */
+export interface LookupSourceContext {
+  bookId: string | null;
+  locator: string;
+  textBefore: string | null;
+  textAfter: string | null;
+}
+
+const SOURCE_SENTENCE_MAX_LENGTH = 1000;
+
+/** Joins the text-quote before/selected/after into one surrounding-sentence string, clipped. */
+export function buildSourceSentence(selectedText: string, context: LookupSourceContext | null): string | null {
+  if (!context) return null;
+  const sentence = `${context.textBefore ?? ""}${selectedText}${context.textAfter ?? ""}`.trim();
+  return sentence ? sentence.slice(0, SOURCE_SENTENCE_MAX_LENGTH) : null;
+}
+
+/**
  * Builds the Define/Translate/Wikipedia selection-menu entries for the given selected text.
  * Define only appears for a single short word/phrase; Translate only for text short enough to
  * send to the translate endpoint; Wikipedia is always offered.

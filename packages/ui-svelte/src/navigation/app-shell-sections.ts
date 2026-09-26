@@ -50,6 +50,7 @@ export const appShellSections = [
       { label: "Comics", href: "/comics", icon: "book-copy" },
       { label: "eBooks", href: "/ebooks", icon: "book-marked" },
       { label: "Annotations", href: "/annotations", icon: "highlighter" },
+      { label: "Vocabulary", href: "/vocabulary", icon: "layout-list" },
     ],
   },
   {

@@ -439,6 +439,7 @@
   <BookFileReader
     bind:this={epubReader}
     notice={readerNotice}
+    bookId={bookId}
     sourceUrl={sourceUrl}
     contentType="application/epub+zip"
     title={readerTitle}

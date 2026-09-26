@@ -4738,6 +4738,60 @@ namespace Prismedia.Infrastructure.Persistence.Migrations
                     b.ToTable("user_library_access", (string)null);
                 });
 
+            modelBuilder.Entity("Prismedia.Infrastructure.Persistence.Entities.UserReaderPreferencesRow", b =>
+                {
+                    b.Property<Guid>("UserId")
+                        .HasColumnType("uuid")
+                        .HasColumnName("user_id");
+
+                    b.Property<string>("Flow")
+                        .IsRequired()
+                        .HasMaxLength(32)
+                        .HasColumnType("character varying(32)")
+                        .HasColumnName("flow");
+
+                    b.Property<string>("FontFamily")
+                        .IsRequired()
+                        .HasMaxLength(32)
+                        .HasColumnType("character varying(32)")
+                        .HasColumnName("font_family");
+
+                    b.Property<int>("FontSizePercent")
+                        .HasColumnType("integer")
+                        .HasColumnName("font_size_percent");
+
+                    b.Property<double>("LineHeight")
+                        .HasColumnType("double precision")
+                        .HasColumnName("line_height");
+
+                    b.Property<int>("MarginStep")
+                        .HasColumnType("integer")
+                        .HasColumnName("margin_step");
+
+                    b.Property<int>("MaxContentWidth")
+                        .HasColumnType("integer")
+                        .HasColumnName("max_content_width");
+
+                    b.Property<string>("Theme")
+                        .IsRequired()
+                        .HasMaxLength(32)
+                        .HasColumnType("character varying(32)")
+                        .HasColumnName("theme");
+
+                    b.Property<string>("TranslationTargetLanguage")
+                        .HasMaxLength(16)
+                        .HasColumnType("character varying(16)")
+                        .HasColumnName("translation_target_language");
+
+                    b.Property<DateTimeOffset>("UpdatedAt")
+                        .HasColumnType("timestamp with time zone")
+                        .HasColumnName("updated_at");
+
+                    b.HasKey("UserId");
+
+                    b.ToTable("user_reader_preferences", (string)null);
+                });
+
             modelBuilder.Entity("Prismedia.Infrastructure.Persistence.Entities.UserRow", b =>
                 {
                     b.Property<Guid>("Id")
@@ -4883,6 +4937,75 @@ namespace Prismedia.Infrastructure.Persistence.Migrations
                     b.HasKey("EntityId");
 
                     b.ToTable("video_series_details", (string)null);
+                });
+
+            modelBuilder.Entity("Prismedia.Infrastructure.Persistence.Entities.VocabularyEntryRow", b =>
+                {
+                    b.Property<Guid>("Id")
+                        .HasColumnType("uuid")
+                        .HasColumnName("id");
+
+                    b.Property<Guid?>("BookId")
+                        .HasColumnType("uuid")
+                        .HasColumnName("book_id");
+
+                    b.Property<DateTimeOffset>("CreatedAt")
+                        .HasColumnType("timestamp with time zone")
+                        .HasColumnName("created_at");
+
+                    b.Property<string>("Definition")
+                        .HasColumnType("text")
+                        .HasColumnName("definition");
+
+                    b.Property<DateTimeOffset?>("DeletedAt")
+                        .HasColumnType("timestamp with time zone")
+                        .HasColumnName("deleted_at");
+
+                    b.Property<string>("Language")
+                        .IsRequired()
+                        .HasMaxLength(16)
+                        .HasColumnType("character varying(16)")
+                        .HasColumnName("language");
+
+                    b.Property<string>("SourceLocator")
+                        .HasMaxLength(4096)
+                        .HasColumnType("character varying(4096)")
+                        .HasColumnName("source_locator");
+
+                    b.Property<string>("SourceSentence")
+                        .HasMaxLength(1000)
+                        .HasColumnType("character varying(1000)")
+                        .HasColumnName("source_sentence");
+
+                    b.Property<string>("Status")
+                        .IsRequired()
+                        .HasMaxLength(32)
+                        .HasColumnType("character varying(32)")
+                        .HasColumnName("status");
+
+                    b.Property<DateTimeOffset>("UpdatedAt")
+                        .HasColumnType("timestamp with time zone")
+                        .HasColumnName("updated_at");
+
+                    b.Property<Guid>("UserId")
+                        .HasColumnType("uuid")
+                        .HasColumnName("user_id");
+
+                    b.Property<string>("Word")
+                        .IsRequired()
+                        .HasMaxLength(256)
+                        .HasColumnType("character varying(256)")
+                        .HasColumnName("word");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("BookId");
+
+                    b.HasIndex("UserId", "BookId");
+
+                    b.HasIndex("UserId", "UpdatedAt");
+
+                    b.ToTable("vocabulary_entries", (string)null);
                 });
 
             modelBuilder.Entity("Prismedia.Infrastructure.Persistence.Entities.WantedSuppressionRow", b =>
@@ -5766,6 +5889,15 @@ namespace Prismedia.Infrastructure.Persistence.Migrations
                         .IsRequired();
                 });
 
+            modelBuilder.Entity("Prismedia.Infrastructure.Persistence.Entities.UserReaderPreferencesRow", b =>
+                {
+                    b.HasOne("Prismedia.Infrastructure.Persistence.Entities.UserRow", null)
+                        .WithMany()
+                        .HasForeignKey("UserId")
+                        .OnDelete(DeleteBehavior.Cascade)
+                        .IsRequired();
+                });
+
             modelBuilder.Entity("Prismedia.Infrastructure.Persistence.Entities.UserSessionRow", b =>
                 {
                     b.HasOne("Prismedia.Infrastructure.Persistence.Entities.UserRow", null)
@@ -5780,6 +5912,20 @@ namespace Prismedia.Infrastructure.Persistence.Migrations
                     b.HasOne("Prismedia.Infrastructure.Persistence.Entities.EntityRow", null)
                         .WithOne()
                         .HasForeignKey("Prismedia.Infrastructure.Persistence.Entities.VideoSeriesDetailRow", "EntityId")
+                        .OnDelete(DeleteBehavior.Cascade)
+                        .IsRequired();
+                });
+
+            modelBuilder.Entity("Prismedia.Infrastructure.Persistence.Entities.VocabularyEntryRow", b =>
+                {
+                    b.HasOne("Prismedia.Infrastructure.Persistence.Entities.EntityRow", null)
+                        .WithMany()
+                        .HasForeignKey("BookId")
+                        .OnDelete(DeleteBehavior.SetNull);
+
+                    b.HasOne("Prismedia.Infrastructure.Persistence.Entities.UserRow", null)
+                        .WithMany()
+                        .HasForeignKey("UserId")
                         .OnDelete(DeleteBehavior.Cascade)
                         .IsRequired();
                 });

@@ -1332,6 +1332,16 @@ export const PROVIDER_TYPE = {
 
 export type ProviderTypeCode = (typeof PROVIDER_TYPE)[keyof typeof PROVIDER_TYPE];
 
+// source: enum ReaderFontFamily
+export const READER_FONT_FAMILY = {
+  publisher: "publisher",
+  serif: "serif",
+  sans: "sans",
+  monospace: "monospace",
+} as const;
+
+export type ReaderFontFamilyCode = (typeof READER_FONT_FAMILY)[keyof typeof READER_FONT_FAMILY];
+
 // source: enum ReaderMode
 export const READER_MODE = {
   paged: "paged",
@@ -1350,6 +1360,16 @@ export const READER_PROVIDER_KIND = {
 } as const;
 
 export type ReaderProviderKindCode = (typeof READER_PROVIDER_KIND)[keyof typeof READER_PROVIDER_KIND];
+
+// source: enum ReaderTheme
+export const READER_THEME = {
+  auto: "auto",
+  light: "light",
+  dark: "dark",
+  sepia: "sepia",
+} as const;
+
+export type ReaderThemeCode = (typeof READER_THEME)[keyof typeof READER_THEME];
 
 // source: enum RelationshipKind
 export const RELATIONSHIP_CODE = {
@@ -1513,6 +1533,16 @@ export const VIDEO_SERIES_RENDERING_MODE = {
 } as const;
 
 export type VideoSeriesRenderingModeCode = (typeof VIDEO_SERIES_RENDERING_MODE)[keyof typeof VIDEO_SERIES_RENDERING_MODE];
+
+// source: enum VocabularyStatus
+export const VOCABULARY_STATUS = {
+  new: "new",
+  learning: "learning",
+  familiar: "familiar",
+  known: "known",
+} as const;
+
+export type VocabularyStatusCode = (typeof VOCABULARY_STATUS)[keyof typeof VOCABULARY_STATUS];
 
 // source: registry CapabilityKinds
 export const CAPABILITY_KIND = {
@@ -1685,6 +1715,7 @@ export const PROBLEM_CODE = {
   pluginUpdateNotFound: "plugin_update_not_found",
   readerLookupInvalid: "reader_lookup_invalid",
   readerLookupProviderUnavailable: "reader_lookup_provider_unavailable",
+  readerPreferencesInvalid: "reader_preferences_invalid",
   requestInvalid: "request_invalid",
   requestPermissionRequired: "request_permission_required",
   requestProposalChanged: "request_proposal_changed",
@@ -1708,6 +1739,8 @@ export const PROBLEM_CODE = {
   videoSubtitleSourceNotFound: "video_subtitle_source_not_found",
   videoTrickplayNotFound: "video_trickplay_not_found",
   videoTrickplayTileNotFound: "video_trickplay_tile_not_found",
+  vocabularyInvalid: "vocabulary_invalid",
+  vocabularyNotFound: "vocabulary_not_found",
 } as const;
 
 export type ProblemCode = (typeof PROBLEM_CODE)[keyof typeof PROBLEM_CODE];

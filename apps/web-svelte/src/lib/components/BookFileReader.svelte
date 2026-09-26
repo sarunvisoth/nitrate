@@ -36,6 +36,9 @@
   import { bookmarkOnPage, pageStartLocator } from "$lib/reader/bookmark-page";
   import { findTextQuote, sameQuotedText } from "$lib/reader/annotation-reanchor";
   import type { BookmarkPage } from "$lib/reader/book-bookmark-store.svelte";
+  import ReaderSettingsButton from "$lib/components/reader/ReaderSettingsButton.svelte";
+  import { ReaderPreferencesStore } from "$lib/reader/reader-preferences-store.svelte";
+  import { buildReaderContentStyles } from "$lib/reader/reader-content-styles";
 
   type ReaderFlow = "paginated" | "scrolled";
 
@@ -78,6 +81,8 @@
     onAddBookmark?: (page: BookmarkPage) => void;
     onRenameBookmark?: (bookmark: BookBookmark, label: string) => void;
     onDeleteBookmark?: (bookmark: BookBookmark) => void;
+    /** Book Entity id, threaded into the selection menu's lookup source context (Add to Vocabulary). */
+    bookId?: string | null;
   }
 
   let {
@@ -102,11 +107,9 @@
     onAddBookmark,
     onRenameBookmark,
     onDeleteBookmark,
+    bookId = null,
   }: Props = $props();
-
-  const MIN_FONT = 80;
-  const MAX_FONT = 200;
-
+  const MIN_FONT = 80, MAX_FONT = 200;
   let shell = $state<ReturnType<typeof ReaderShell>>();
   let stageEl = $state<HTMLDivElement>();
   // The foliate `<foliate-view>` custom element has no published types; treat as a loose handle.
@@ -115,31 +118,25 @@
   let ready = $state(false);
   let errorMessage = $state<string | null>(null);
   let flow = $state<ReaderFlow>(untrack(() => initialFlow));
-  let fontPercent = $state(100);
-  let counterLabel = $state("");
-  let atEnd = $state(false);
+  let fontPercent = $state(100), counterLabel = $state(""), atEnd = $state(false);
   let toc = $state.raw<TocEntry[]>([]);
   let tocOpen = $state(false);
-  // Fixed-layout books (PDF) have no reflow, so font-size and paged/scrolled flow do not apply.
+  // Fixed-layout books (PDF) have no reflow, so font-size/flow do not apply; M6 prefs load with the book.
   let isFixedLayout = $state(false);
+  const prefsStore = new ReaderPreferencesStore();
 
   const hasToc = $derived(toc.length > 0);
 
-  // Neutral accent accent so in-book links read as interactive without the default deep-blue.
   function contentStyles(percent: number): string {
-    // !important so the book's own stylesheet (which often colors links a hard blue) can't win.
-    return `
-      html { color-scheme: dark; font-size: ${percent}%; }
-      html, body { background: transparent !important; color: #e7e7ea !important; }
-      a, a:link, a:visited, a *,
-      a[href], a[href]:link, a[href]:visited, a[href] * {
-        color: #c7c9cc !important;
-        text-decoration: underline;
-        text-underline-offset: 2px;
-      }
-      a:hover, a:hover *, a[href]:hover, a[href]:hover * { color: #f7d59a !important; }
-      img { background: transparent; }
-    `;
+    const { fontFamily, lineHeight, marginStep, maxContentWidth, theme } = prefsStore.value;
+    return buildReaderContentStyles({ fontFamily, fontSizePercent: percent, lineHeight, marginStep, maxContentWidth, theme });
+  }
+
+  function onSettingsChange(patch: Partial<typeof prefsStore.value>) {
+    prefsStore.update(patch);
+    if (patch.fontSizePercent !== undefined) fontPercent = patch.fontSizePercent;
+    if (patch.flow !== undefined) setFlow(patch.flow === "scrolled" ? "scrolled" : "paginated");
+    applyStyles();
   }
 
   function applyFlow(next: ReaderFlow) {
@@ -620,6 +617,12 @@
   onMount(() => {
     let disposed = false;
 
+    void prefsStore.load().then(() => {
+      if (disposed) return;
+      fontPercent = prefsStore.value.fontSizePercent;
+      applyStyles();
+    });
+
     void (async () => {
       try {
         // Registers the <foliate-view> custom element (vendored, client-only).
@@ -728,6 +731,7 @@
       <Button variant="outline" size="sm" type="button" onclick={() => (bookSearchOpen = true)}
         aria-label="Search book" title="Search book"><Search class="h-4 w-4" /></Button>
     {/if}
+    <ReaderSettingsButton preferences={prefsStore.value} {isFixedLayout} onChange={onSettingsChange} />
     {#if hasToc || bookmarksEnabled}
       <Button variant="outline" size="sm"
         type="button"
@@ -818,6 +822,7 @@
         selectedText={pendingSelection?.draft.selectedText ?? ""}
         actions={selectionActions}
         onDismiss={clearSelection}
+        sourceContext={pendingSelection && { bookId, locator: pendingSelection.draft.locator, textBefore: pendingSelection.draft.textBefore, textAfter: pendingSelection.draft.textAfter }}
       />
       <AnnotationEditor
         anchor={editingAnnotation ? editing?.anchor ?? null : null}

@@ -11,6 +11,11 @@
     TranslateTextResponse,
     WikipediaSummaryResponse,
   } from "$lib/api/generated/model";
+  import { VOCABULARY_STATUS } from "$lib/api/generated/codes";
+  import { saveVocabularyEntry } from "$lib/api/vocabulary";
+  import { createUuid } from "$lib/utils/uuid";
+  import { BookMarked, Check } from "@lucide/svelte";
+  import { buildSourceSentence, type LookupSourceContext } from "$lib/reader/reader-lookup-actions";
 
   type LookupMode = "define" | "translate" | "wikipedia";
 
@@ -22,9 +27,11 @@
     /** Which view opens first. */
     initialMode: LookupMode;
     onDismiss: () => void;
+    /** Where this selection lives in the book, saved with Add to Vocabulary. */
+    sourceContext?: LookupSourceContext | null;
   }
 
-  let { anchor, term, initialMode, onDismiss }: Props = $props();
+  let { anchor, term, initialMode, onDismiss, sourceContext = null }: Props = $props();
 
   // `mode` only takes its initial value from `initialMode` on mount; after that it is switched by
   // the tab buttons or reset by the effect below when the popover is reopened for a new selection.
@@ -37,6 +44,7 @@
   let loaded = $state<{ term: string; mode: LookupMode } | null>(null);
   let loading = $state(false);
   let defineResult = $state<ReaderLookupOutcome<DictionaryDefinitionResponse> | null>(null);
+  let vocabularyState = $state<"idle" | "saving" | "added">("idle");
   let translateResult = $state<ReaderLookupOutcome<TranslateTextResponse> | null>(null);
   let wikipediaResult = $state<ReaderLookupOutcome<WikipediaSummaryResponse> | null>(null);
 
@@ -47,7 +55,34 @@
     translateResult = null;
     wikipediaResult = null;
     loaded = null;
+    vocabularyState = "idle";
   });
+
+  /**
+   * Saves the current term to the reader's vocabulary list: word, first definition, book id,
+   * CFI locator, and the surrounding sentence (from the selection's text-quote before/after),
+   * so the saved entry can jump back to where it was found.
+   */
+  async function addToVocabulary() {
+    if (vocabularyState !== "idle" || defineResult?.status !== "ok") return;
+    vocabularyState = "saving";
+    const firstDefinition = defineResult.data.entries[0]?.definitions[0]?.text ?? null;
+    try {
+      await saveVocabularyEntry(createUuid(), {
+        word: term,
+        language: "en",
+        definition: firstDefinition,
+        bookId: sourceContext?.bookId ?? null,
+        sourceLocator: sourceContext?.locator ?? null,
+        sourceSentence: buildSourceSentence(term, sourceContext),
+        status: VOCABULARY_STATUS.new,
+        updatedAt: new Date().toISOString(),
+      });
+      vocabularyState = "added";
+    } catch {
+      vocabularyState = "idle";
+    }
+  }
 
   $effect(() => {
     if (!anchor || !term) return;
@@ -137,6 +172,14 @@
             {defineResult.data.attribution}
             <ExternalLink class="size-3" />
           </a>
+          <Button variant={vocabularyState === "added" ? "secondary" : "outline"} size="sm" type="button"
+            disabled={vocabularyState !== "idle"} onclick={addToVocabulary}>
+            {#if vocabularyState === "added"}
+              <Check class="size-3.5" /> In vocabulary
+            {:else}
+              <BookMarked class="size-3.5" /> Add to Vocabulary
+            {/if}
+          </Button>
         {:else if defineResult?.status === "not-found"}
           <p class="text-label text-muted-foreground">No definition found for "{term}".</p>
         {:else if defineResult?.status}
