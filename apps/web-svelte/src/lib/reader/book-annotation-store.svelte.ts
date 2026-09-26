@@ -43,12 +43,12 @@ export class BookAnnotationStore extends SyncedItemStore<BookAnnotation> {
   }
 
   /** Creates a highlight from a reader selection and returns it immediately. */
-  create(draft: AnnotationDraft): BookAnnotation {
+  create(draft: AnnotationDraft, locatorKind: string = ANNOTATION_LOCATOR_KIND.epubCfi): BookAnnotation {
     const at = this.now();
     const annotation: BookAnnotation = {
       id: this.newId(),
       bookId: this.bookId,
-      locatorKind: ANNOTATION_LOCATOR_KIND.epubCfi,
+      locatorKind,
       style: ANNOTATION_STYLE.highlight,
       ...draft,
       sourceSignature: null,

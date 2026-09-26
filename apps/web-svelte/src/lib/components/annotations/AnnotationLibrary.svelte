@@ -26,6 +26,8 @@
     annotationColorPaint,
   } from "$lib/reader/annotation-colors";
   import { bookReaderHref } from "$lib/entities/book-reader-route";
+  import { parsePdfLocator, pdfPageLabel } from "$lib/reader/pdf-locator";
+  import { ANNOTATION_LOCATOR_KIND } from "$lib/api/generated/codes";
 
   let {
     loaders = { list: fetchAnnotationLibrary, books: fetchAnnotationLibraryBooks },
@@ -108,6 +110,15 @@
     return bookReaderHref({ bookId: item.bookId, kind: "book", id: item.bookId, location: item.locator });
   }
 
+  /** "p. N" for a PDF-kind item's 1-based page, or the reading-position percentage for any other kind. */
+  function locationLabel(item: AnnotationLibraryItem): string {
+    if (item.locatorKind === ANNOTATION_LOCATOR_KIND.pdf) {
+      const locator = parsePdfLocator(item.locator);
+      if (locator) return `p. ${pdfPageLabel(locator)}`;
+    }
+    return `${Math.round(Number(item.position) * 100)}%`;
+  }
+
   onMount(() => {
     void loaders.books().then((response) => (books = response.books)).catch(() => undefined);
     reload();
@@ -167,7 +178,7 @@
         <Empty.Description>
           {hasFilters
             ? "Try a different search or clear the filters."
-            : "Select text while reading an EPUB and choose Highlight or Add Note."}
+            : "Select text while reading an EPUB or PDF and choose Highlight or Add Note."}
         </Empty.Description>
       </Empty.Header>
     </Empty.Root>
@@ -201,7 +212,7 @@
                     </span>
                   {/if}
                   <span class="flex flex-wrap items-center gap-2 font-mono text-[0.6rem] uppercase tracking-[0.14em] text-text-muted">
-                    {Math.round(Number(item.position) * 100)}%
+                    {locationLabel(item)}
                     {#if item.isStale}
                       <Badge variant="outline" title="The book's file changed since this highlight was made">File changed</Badge>
                     {/if}

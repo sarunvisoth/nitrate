@@ -28,10 +28,10 @@
   import BookSearchPanel from "$lib/components/reader/BookSearchPanel.svelte";
   import ReaderBookmarkList from "$lib/components/reader/ReaderBookmarkList.svelte";
   import type { ReaderNotice } from "$lib/components/reader/reader-notice";
-  import { ANNOTATION_COLOR, type AnnotationColorCode } from "$lib/api/generated/codes";
+  import type { AnnotationColorCode } from "$lib/api/generated/codes";
   import type { BookAnnotation, BookBookmark } from "$lib/api/generated/model";
   import type { AnnotationDraft } from "$lib/reader/annotation-sync";
-  import { ANNOTATION_COLOR_ORDER, annotationColorPaint } from "$lib/reader/annotation-colors";
+  import { annotationColorPaint, readLastHighlightColor, rememberHighlightColor } from "$lib/reader/annotation-colors";
   import { selectionAnchorRect, textQuoteFor } from "$lib/reader/epub-selection";
   import { bookmarkOnPage, pageStartLocator } from "$lib/reader/bookmark-page";
   import { findTextQuote, sameQuotedText } from "$lib/reader/annotation-reanchor";
@@ -258,7 +258,6 @@
     anchor: ViewportRect;
   }
 
-  const LAST_COLOR_STORAGE_KEY = "nitrate.reader.lastHighlightColor";
   const SELECTION_SETTLE_MS = 350;
 
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -266,7 +265,7 @@
   let lastFraction = 0;
   let pendingSelection = $state<PendingSelection | null>(null);
   let editing = $state<{ id: string; anchor: ViewportRect; focusNote: boolean } | null>(null);
-  let lastColor = $state<AnnotationColorCode>(readLastColor());
+  let lastColor = $state<AnnotationColorCode>(readLastHighlightColor());
   let annotationTapAt = 0;
   let selectionTimer: ReturnType<typeof setTimeout> | null = null;
   const drawn = new Map<string, { locator: string; color: string }>();
@@ -284,27 +283,6 @@
     { id: "highlight", label: "Highlight", icon: Highlighter, run: () => createFromSelection(false) },
     { id: "note", label: "Add Note", icon: NotebookPen, run: () => createFromSelection(true) },
   ];
-
-  function readLastColor(): AnnotationColorCode {
-    try {
-      const stored = localStorage.getItem(LAST_COLOR_STORAGE_KEY);
-      if (stored && (ANNOTATION_COLOR_ORDER as readonly string[]).includes(stored)) {
-        return stored as AnnotationColorCode;
-      }
-    } catch {
-      // storage unavailable (private mode); fall back to the default colour
-    }
-    return ANNOTATION_COLOR.yellow;
-  }
-
-  function rememberColor(color: AnnotationColorCode) {
-    lastColor = color;
-    try {
-      localStorage.setItem(LAST_COLOR_STORAGE_KEY, color);
-    } catch {
-      // ignore storage failures; the colour still applies for this session
-    }
-  }
 
   function viewportRectOf(range: Range): ViewportRect {
     const frame = range.startContainer.ownerDocument?.defaultView?.frameElement?.getBoundingClientRect() ?? null;
@@ -830,7 +808,8 @@
         note={editingAnnotation?.note ?? null}
         focusNote={editing?.focusNote ?? false}
         onChangeColor={(color) => {
-          rememberColor(color);
+          lastColor = color;
+          rememberHighlightColor(color);
           if (editingAnnotation) onUpdateAnnotation?.({ ...editingAnnotation, color });
         }}
         onSaveNote={(note) => {

@@ -403,6 +403,7 @@ export type AnnotationExportFormatCode = (typeof ANNOTATION_EXPORT_FORMAT)[keyof
 // source: enum AnnotationLocatorKind
 export const ANNOTATION_LOCATOR_KIND = {
   epubCfi: "epub-cfi",
+  pdf: "pdf",
 } as const;
 
 export type AnnotationLocatorKindCode = (typeof ANNOTATION_LOCATOR_KIND)[keyof typeof ANNOTATION_LOCATOR_KIND];

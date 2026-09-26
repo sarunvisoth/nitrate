@@ -22,6 +22,8 @@
   import { BookAnnotationStore } from "$lib/reader/book-annotation-store.svelte";
   import { BookBookmarkStore } from "$lib/reader/book-bookmark-store.svelte";
   import { pdfPositionKey, remoteProgressToAdopt, type ProgressTarget } from "$lib/reader/progress-catch-up";
+  import { ANNOTATION_LOCATOR_KIND } from "$lib/api/generated/codes";
+  import { buildPdfLocator, parsePdfLocator } from "$lib/reader/pdf-locator";
   import type { ReaderNotice } from "$lib/components/reader/reader-notice";
   import {
     exactWebEpubResumeLocation,
@@ -245,11 +247,10 @@
       readerTitle = nextBook.title;
       returnHref = await resolveReaderReturnHref(nextBook.id, nextContext);
       sourceUrl = `/entities/${nextBook.id}/files/source`;
-      if (format === BOOK_FORMAT.epub) {
-        loadEpubState(nextBook, nextContext);
-        annotationStore = new BookAnnotationStore(nextBook.id);
-        bookmarkStore = new BookBookmarkStore(nextBook.id);
-      } else loadPdfState(nextBook, nextContext);
+      annotationStore = new BookAnnotationStore(nextBook.id);
+      bookmarkStore = new BookBookmarkStore(nextBook.id);
+      if (format === BOOK_FORMAT.epub) loadEpubState(nextBook, nextContext);
+      else loadPdfState(nextBook, nextContext);
       loadState = "ready";
       refreshRemoteState(true);
     } catch (error) {
@@ -283,10 +284,21 @@
   function loadPdfState(nextBook: EntityCardFull, nextContext: BookReaderRouteContext) {
     const progress = getCapability(nextBook.capabilities, CAPABILITY_KIND.progress);
     const resume = nextContext.command !== "start-over" && !progress?.completedAt;
+    // "Open at location" from the annotations/vocabulary dashboards passes the PDF's own JSON
+    // locator through the generic `location` param (opaque there); land on its page.
+    const launchPage = nextContext.location ? parsePdfLocator(nextContext.location)?.page ?? null : null;
     surface = "pdf";
-    pdfInitialPage = resume ? Math.max(0, Number(progress?.index ?? 0)) : 0;
+    pdfInitialPage = launchPage ?? (resume ? Math.max(0, Number(progress?.index ?? 0)) : 0);
     pdfLastPage = pdfInitialPage;
     pdfLastCount = Math.max(0, Number(progress?.total ?? 0));
+  }
+
+  /** Builds a page bookmark's locator/spine/position for the PDF surface. */
+  function addPdfBookmark(page: number) {
+    bookmarkStore?.add(
+      { locator: buildPdfLocator({ page, rects: [] }), spineIndex: page, position: 0, chapterLabel: null },
+      ANNOTATION_LOCATOR_KIND.pdf,
+    );
   }
 
   function handleEpubLocation(location: { cfi: string | null; fraction: number; label: string | null }) {
@@ -434,6 +446,15 @@
     initialPage={pdfInitialPage}
     onPageChange={handlePdfPageChange}
     onClose={() => void closeReader()}
+    bookId={bookId}
+    annotations={annotationStore?.visible}
+    onCreateAnnotation={annotationStore ? (draft) => annotationStore?.create(draft, ANNOTATION_LOCATOR_KIND.pdf) : undefined}
+    onUpdateAnnotation={(annotation) => annotationStore?.update(annotation)}
+    onDeleteAnnotation={(annotation) => annotationStore?.remove(annotation)}
+    bookmarks={bookmarkStore?.visible}
+    onAddBookmark={bookmarkStore ? addPdfBookmark : undefined}
+    onRenameBookmark={(bookmark, label) => bookmarkStore?.rename(bookmark, label)}
+    onDeleteBookmark={(bookmark) => bookmarkStore?.remove(bookmark)}
   />
 {:else if loadState === "ready" && surface === "epub"}
   <BookFileReader

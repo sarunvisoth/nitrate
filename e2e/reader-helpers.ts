@@ -65,6 +65,32 @@ export async function textCentre(frame: Frame, text: string) {
 }
 
 
+/**
+ * Selects the first occurrence of `text` directly on the page (PdfReader's text layer lives in the
+ * main document, unlike foliate's per-section iframes) and returns its viewport centre.
+ */
+export async function selectOnPage(page: Page, text: string) {
+  return page.evaluate((t) => {
+    const walker = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT);
+    let node: Node | null;
+    while ((node = walker.nextNode())) {
+      const at = node.textContent?.indexOf(t) ?? -1;
+      if (at < 0) continue;
+      const range = document.createRange();
+      range.setStart(node, at);
+      range.setEnd(node, at + t.length);
+      range.startContainer.parentElement?.scrollIntoView({ block: "center" });
+      const selection = document.getSelection()!;
+      selection.removeAllRanges();
+      selection.addRange(range);
+      document.dispatchEvent(new Event("selectionchange", { bubbles: true }));
+      const r = range.getBoundingClientRect();
+      return { x: r.left + r.width / 2, y: r.top + r.height / 2 };
+    }
+    throw new Error(`text not found: ${t}`);
+  }, text);
+}
+
 /** Reveals the reader's auto-hidden top bar the way a mouse does (gradual move out of the book iframe). */
 export async function revealReaderChrome(page: Page) {
   await page.mouse.move(700, 600);
