@@ -1015,16 +1015,20 @@ Here `draft` is `{ locator, spineIndex, position, selectedText, textBefore, text
 
 ## Task 10: Reader route sync (`routes/books/[id]/reader/+page.svelte`)
 
-- [ ] **Step 1:** Hold `let annotationMap = $state(new Map<string, BookAnnotation>())`. Pass
+> **As built:** the load/merge/queue/retry logic lives in `apps/web-svelte/src/lib/reader/book-annotation-store.svelte.ts`
+> (unit-tested in `book-annotation-store.svelte.test.ts`); the route only creates the store and calls `refresh()` on open,
+> visibility and focus.
+
+- [x] **Step 1:** Hold `let annotationMap = $state(new Map<string, BookAnnotation>())`. Pass
   `annotations={visibleAnnotations(annotationMap.values())}` and the three callbacks to `BookFileReader` in the
   EPUB branch (`+page.svelte:317-330`).
-- [ ] **Step 2: Load and refresh.**
+- [x] **Step 2: Load and refresh.**
   - On mount, once `bookId` is known, run `fetchBookAnnotations(bookId)` and then
     `annotationMap = mergeAll(annotationMap, response.annotations)`.
   - Repeat on `visibilitychange` when the page becomes visible, and on window `focus`, throttled to once per 5
     seconds. The page already has a `visibilitychange` handler for progress (`+page.svelte:88-92`); extend it
     rather than adding a second one.
-- [ ] **Step 3: Write.**
+- [x] **Step 3: Write.**
   - **Create:** generate the id with `crypto.randomUUID()` and set `updatedAt = new Date().toISOString()`.
     Apply the change locally first (optimistic), then call `saveBookAnnotation`, and merge the server's response.
     If the server returns a newer version, it wins.
@@ -1034,7 +1038,7 @@ Here `draft` is `{ locator, spineIndex, position, selectedText, textBefore, text
   - Serialize writes through a promise queue like `progressSaveQueue` (`+page.svelte:60,208-214`).
   - On a network failure, keep the local change and retry on the next visibility or focus refresh by re-sending
     local entries that are newer than the server's. Keep that in memory only; offline persistence is out of scope.
-- [ ] **Step 4: Run** `pnpm check` and `pnpm test:web-svelte`, then commit: `feat(web): sync reader annotations across devices`
+- [x] **Step 4: Run** `pnpm check` and `pnpm test:web-svelte`, then commit: `feat(web): sync reader annotations across devices`
 
 
 ---

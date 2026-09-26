@@ -19,6 +19,7 @@
   import PdfReader from "$lib/components/PdfReader.svelte";
   import { ConsumptionActivityClock } from "$lib/entities/consumption-activity-clock";
   import { createUuid } from "$lib/utils/uuid";
+  import { BookAnnotationStore } from "$lib/reader/book-annotation-store.svelte";
   import {
     exactWebEpubResumeLocation,
     webEpubLaunchLocation,
@@ -58,6 +59,9 @@
   let pdfLastPage = 0;
   let pdfLastCount = 0;
   let progressSaveQueue: Promise<void> = Promise.resolve();
+  let annotationStore = $state.raw<BookAnnotationStore | null>(null);
+  let lastRemoteRefreshAt = 0;
+  const REMOTE_REFRESH_THROTTLE_MS = 5_000;
   const readerActivityClock = new ConsumptionActivityClock();
   const readerConsumptionSessionId = createReaderSessionId();
 
@@ -86,18 +90,31 @@
     };
     const heartbeat = window.setInterval(() => queueReaderActivityHeartbeat(false), 15_000);
     const handleVisibilityChange = () => {
-      if (document.visibilityState === "visible") readerActivityClock.start();
-      else queueReaderActivityHeartbeat(true);
+      if (document.visibilityState === "visible") {
+        readerActivityClock.start();
+        refreshRemoteState();
+      } else queueReaderActivityHeartbeat(true);
     };
+    const handleWindowFocus = () => refreshRemoteState();
     document.addEventListener("visibilitychange", handleVisibilityChange);
+    window.addEventListener("focus", handleWindowFocus);
     void startReader();
 
     return () => {
       window.clearInterval(heartbeat);
       document.removeEventListener("visibilitychange", handleVisibilityChange);
+      window.removeEventListener("focus", handleWindowFocus);
       queueReaderActivityHeartbeat(true);
     };
   });
+
+  /** Pulls state other devices may have changed (annotations) when the reader regains focus. */
+  function refreshRemoteState(force = false) {
+    const now = Date.now();
+    if (!force && now - lastRemoteRefreshAt < REMOTE_REFRESH_THROTTLE_MS) return;
+    lastRemoteRefreshAt = now;
+    void annotationStore?.refresh().catch(() => undefined);
+  }
 
   function createReaderSessionId(): string {
     return createUuid();
@@ -135,9 +152,12 @@
       readerTitle = nextBook.title;
       returnHref = await resolveReaderReturnHref(nextBook.id, nextContext);
       sourceUrl = `/entities/${nextBook.id}/files/source`;
-      if (format === BOOK_FORMAT.epub) loadEpubState(nextBook, nextContext);
-      else loadPdfState(nextBook, nextContext);
+      if (format === BOOK_FORMAT.epub) {
+        loadEpubState(nextBook, nextContext);
+        annotationStore = new BookAnnotationStore(nextBook.id);
+      } else loadPdfState(nextBook, nextContext);
       loadState = "ready";
+      refreshRemoteState(true);
     } catch (error) {
       if (redirectHiddenEntityNotFound(error, nsfw.mode)) return;
       errorMessage = error instanceof Error ? error.message : String(error);
@@ -326,6 +346,10 @@
     onLocationChange={handleEpubLocation}
     onFlowChange={handleEpubFlow}
     companionControls={combinedAudiobookActive ? combinedAudioControls : undefined}
+    annotations={annotationStore?.visible}
+    onCreateAnnotation={annotationStore ? (draft) => annotationStore?.create(draft) : undefined}
+    onUpdateAnnotation={(annotation) => annotationStore?.update(annotation)}
+    onDeleteAnnotation={(annotation) => annotationStore?.remove(annotation)}
     onClose={() => void closeReader()}
   />
 {:else}
