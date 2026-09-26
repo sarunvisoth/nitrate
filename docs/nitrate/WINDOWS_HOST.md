@@ -164,6 +164,31 @@ Private network**). Then open `http://<PC LAN IP>:8008` (e.g. `http://192.168.x.
 Android phone. Find the IP with `ipconfig`. Do **not** port-forward on the router. Remote access comes later over
 Tailscale or WireGuard (M9).
 
+## 8b. Reader lookups: outbound calls & privacy
+
+The EPUB reader's **Define**, **Translate**, and **Wikipedia** selection-menu actions (M5) are
+backend-proxied: the server, not the browser, sends the selected text to a third party.
+
+- **Define** → English Wiktionary's REST API (`https://{lang}.wiktionary.org`).
+- **Translate** → MyMemory's translation API (`https://api.mymemory.translated.net`) by default.
+- **Wikipedia** → Wikipedia's REST summary API (`https://{lang}.wikipedia.org`).
+
+This means selected words/passages leave the LAN to reach those services when these actions are
+used. To keep translations entirely local, run a self-hosted
+[LibreTranslate](https://github.com/LibreTranslate/LibreTranslate) instance and point Nitrate at it:
+
+```powershell
+# Example setting values (PUT /api/settings/reader.translationLibreUrl, .../reader.translationLibreApiKey)
+reader.translationLibreUrl = "http://127.0.0.1:5000"
+reader.translationLibreApiKey = ""   # optional
+```
+
+Once set, Translate calls go to that instance instead of MyMemory, and translated text never
+leaves the machine. Define and Wikipedia have no self-hosted alternative in M5 (a local
+dictionary/offline Wikipedia mirror is a possible future milestone, not this one). Search web
+always opens DuckDuckGo directly in the browser (not proxied); Search book never leaves the
+device.
+
 ## 9. Known blockers and gaps
 
 Fixed in Nitrate (Task 7):

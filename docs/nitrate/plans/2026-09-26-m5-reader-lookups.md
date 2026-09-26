@@ -140,5 +140,31 @@ third-party API from the browser directly.
 
 ## As-built notes
 
-(Filled in during/after implementation — see the final commit list and the hand-off report for
-exact test output, any deviations, and anything left unticked.)
+- `ReaderSelectionMenu.svelte` ended up owning the Define/Translate/Wikipedia popover and the
+  Define/Translate visibility rules directly (via `reader-lookup-actions.ts`), rather than
+  `BookFileReader.svelte` holding that state, so `BookFileReader.svelte` stays under the 1000-line
+  ceiling (994 lines after this change, was 979 before).
+- Real test output at hand-off:
+  - `pnpm test:backend` (`dotnet test apps/backend/Prismedia.slnx`): 4576 tests total across the
+    four projects (197 + 1153 + 350 + 2876), **1 failed** —
+    `AcquisitionDownloadRemovalTests.RecoveryMigrationReopensOnlyCompletedImportedUsenetTransfers`,
+    the documented pre-existing failure (unrelated migration/schema mismatch). All new
+    `*Reader*` tests passed (28 Infrastructure, 8 Application, 10 Api).
+  - `pnpm test:web-svelte` (`vitest run`): **1419/1419 tests passed** across 258 files. The process
+    still exited non-zero because of one unhandled async teardown error from
+    `ComicReader.test.ts` (a `bits-ui` scroll-lock timer firing after the test environment tore
+    down) — pre-existing flake, same class as the documented `AcquisitionProtocolPreference`
+    teardown race, not caused by this milestone's changes.
+  - `pnpm check` (svelte-check + typecheck across workspaces): 0 errors. One pre-existing warning
+    (`BookFileReader.svelte:114`, the untyped foliate `view` handle) is unrelated to M5.
+  - `pnpm api:check`: in sync after `pnpm api:generate` (dev API running).
+  - e2e: `reader-lookups.spec.ts` (2 tests, Define+Translate+Wikipedia and Search book, both
+    mocking `/api/reader/*` with `page.route`) — both passed. Re-ran `reader-annotations.spec.ts`
+    and `reader-bookmarks-and-library.spec.ts` as a regression check — all passed.
+    `smoke.spec.ts` failed on an unrelated 401 from `/api/libraries` in `fixture-library.ts`
+    (unauthenticated request helper, no relation to reader/books work) — flagged for the owner as
+    a separate, pre-existing e2e gap, not fixed here (out of scope for M5).
+- LibreTranslate and the real Wiktionary/MyMemory/Wikipedia hosts were not reachable from this
+  session in a way that was exercised end-to-end against the real internet; all provider tests use
+  a fake `HttpMessageHandler` and the e2e spec mocks `/api/reader/*`, per the environment
+  constraint. No real-provider response was observed or claimed.
