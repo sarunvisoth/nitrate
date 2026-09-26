@@ -69,10 +69,12 @@ import type {
   DatabaseRestoreRequest,
   DatabaseRestoreScheduledResponse,
   DatabaseRestoreStatusResponse,
+  DefineReaderTermParams,
   DeleteBookAnnotationParams,
   DeleteBookBookmarkParams,
   DeleteEntityParams,
   DeleteFileParams,
+  DictionaryDefinitionResponse,
   DownloadClientSaveRequest,
   DownloadClientSummary,
   DownloadClientTestRequest,
@@ -135,6 +137,7 @@ import type {
   GetOpdsTagBooksParams,
   GetOpdsTagsParams,
   GetOrganizePlanParams,
+  GetReaderWikipediaSummaryParams,
   GetSettingValuesParams,
   GetUpdateCheckParams,
   GetVideoPlaybackHlsAssetParams,
@@ -256,6 +259,8 @@ import type {
   StashScraperListing,
   SubtitleProviderTestResponse,
   TranscodeCacheStatusResponse,
+  TranslateTextRequest,
+  TranslateTextResponse,
   UpdateCheckResponse,
   UpdateMusicPlayerProgressRequest,
   UpdateMusicPlayerStateRequest,
@@ -276,6 +281,7 @@ import type {
   WantedPageView,
   WantedRemovalRequest,
   WantedRemovalResponse,
+  WikipediaSummaryResponse,
   WorkerHealthResponse
 } from './model';
 
@@ -4960,6 +4966,175 @@ export const getBookAuthorPatch = async (id: string,
     headers: { 'Content-Type': 'application/json', ...options?.headers },
     body: JSON.stringify(
       entityMetadataUpdateRequest,)
+  }
+);}
+
+
+
+export type defineReaderTermResponse200 = {
+  data: DictionaryDefinitionResponse
+  status: 200
+}
+
+export type defineReaderTermResponse400 = {
+  data: ApiProblem
+  status: 400
+}
+
+export type defineReaderTermResponse404 = {
+  data: ApiProblem
+  status: 404
+}
+
+export type defineReaderTermResponse502 = {
+  data: ApiProblem
+  status: 502
+}
+
+export type defineReaderTermResponseSuccess = (defineReaderTermResponse200) & {
+  headers: Headers;
+};
+export type defineReaderTermResponseError = (defineReaderTermResponse400 | defineReaderTermResponse404 | defineReaderTermResponse502) & {
+  headers: Headers;
+};
+
+export type defineReaderTermResponse = (defineReaderTermResponseSuccess | defineReaderTermResponseError)
+
+export const getDefineReaderTermUrl = (params?: DefineReaderTermParams,) => {
+  const normalizedParams = new URLSearchParams();
+
+  Object.entries(params || {}).forEach(([key, value]) => {
+
+    if (value !== undefined) {
+      normalizedParams.append(key, value === null ? 'null' : value.toString())
+    }
+  });
+
+  const stringifiedParams = normalizedParams.toString();
+
+  return stringifiedParams.length > 0 ? `/api/reader/define?${stringifiedParams}` : `/api/reader/define`
+}
+
+/**
+ * @summary Look up a dictionary definition for a selected word.
+ */
+export const defineReaderTerm = async (params?: DefineReaderTermParams, options?: RequestInit): Promise<defineReaderTermResponse> => {
+
+  return orvalFetch<defineReaderTermResponse>(getDefineReaderTermUrl(params),
+  {
+    ...options,
+    method: 'GET'
+
+
+  }
+);}
+
+
+
+export type translateReaderTextResponse200 = {
+  data: TranslateTextResponse
+  status: 200
+}
+
+export type translateReaderTextResponse400 = {
+  data: ApiProblem
+  status: 400
+}
+
+export type translateReaderTextResponse502 = {
+  data: ApiProblem
+  status: 502
+}
+
+export type translateReaderTextResponseSuccess = (translateReaderTextResponse200) & {
+  headers: Headers;
+};
+export type translateReaderTextResponseError = (translateReaderTextResponse400 | translateReaderTextResponse502) & {
+  headers: Headers;
+};
+
+export type translateReaderTextResponse = (translateReaderTextResponseSuccess | translateReaderTextResponseError)
+
+export const getTranslateReaderTextUrl = () => {
+
+
+
+
+  return `/api/reader/translate`
+}
+
+/**
+ * @summary Translate selected text.
+ */
+export const translateReaderText = async (translateTextRequest: TranslateTextRequest, options?: RequestInit): Promise<translateReaderTextResponse> => {
+
+  return orvalFetch<translateReaderTextResponse>(getTranslateReaderTextUrl(),
+  {
+    ...options,
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', ...options?.headers },
+    body: JSON.stringify(
+      translateTextRequest,)
+  }
+);}
+
+
+
+export type getReaderWikipediaSummaryResponse200 = {
+  data: WikipediaSummaryResponse
+  status: 200
+}
+
+export type getReaderWikipediaSummaryResponse400 = {
+  data: ApiProblem
+  status: 400
+}
+
+export type getReaderWikipediaSummaryResponse404 = {
+  data: ApiProblem
+  status: 404
+}
+
+export type getReaderWikipediaSummaryResponse502 = {
+  data: ApiProblem
+  status: 502
+}
+
+export type getReaderWikipediaSummaryResponseSuccess = (getReaderWikipediaSummaryResponse200) & {
+  headers: Headers;
+};
+export type getReaderWikipediaSummaryResponseError = (getReaderWikipediaSummaryResponse400 | getReaderWikipediaSummaryResponse404 | getReaderWikipediaSummaryResponse502) & {
+  headers: Headers;
+};
+
+export type getReaderWikipediaSummaryResponse = (getReaderWikipediaSummaryResponseSuccess | getReaderWikipediaSummaryResponseError)
+
+export const getGetReaderWikipediaSummaryUrl = (params?: GetReaderWikipediaSummaryParams,) => {
+  const normalizedParams = new URLSearchParams();
+
+  Object.entries(params || {}).forEach(([key, value]) => {
+
+    if (value !== undefined) {
+      normalizedParams.append(key, value === null ? 'null' : value.toString())
+    }
+  });
+
+  const stringifiedParams = normalizedParams.toString();
+
+  return stringifiedParams.length > 0 ? `/api/reader/wikipedia?${stringifiedParams}` : `/api/reader/wikipedia`
+}
+
+/**
+ * @summary Look up a Wikipedia summary for a selected term.
+ */
+export const getReaderWikipediaSummary = async (params?: GetReaderWikipediaSummaryParams, options?: RequestInit): Promise<getReaderWikipediaSummaryResponse> => {
+
+  return orvalFetch<getReaderWikipediaSummaryResponse>(getGetReaderWikipediaSummaryUrl(params),
+  {
+    ...options,
+    method: 'GET'
+
+
   }
 );}
 
