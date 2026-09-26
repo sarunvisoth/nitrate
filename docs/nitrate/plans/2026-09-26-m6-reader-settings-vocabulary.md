@@ -57,4 +57,35 @@ Spec: [VISION.md](../VISION.md) "Reader Settings", "Progress Synchronization", "
 
 ## As-built notes
 
-See the final session report for exact test output, what got cut for time, and why.
+- Backend: `user_reader_preferences` (one row per user) and `vocabulary_entries` tables added via
+  migration `20260926212652_AddReaderPreferencesAndVocabulary`, plus a hand-reviewed raw-SQL
+  partial unique index (`lower(word)`, `language`, live rows only) that EF's fluent API cannot
+  express. `EfReaderPreferencesService` and `EfVocabularyService` reuse
+  `BookAnnotationWritePolicy` as-is for last-write-wins/clock-plausibility (it was already
+  annotation-agnostic). `/api/reader/preferences` (GET/PUT) and `/api/vocabulary` (list/PUT
+  `{id}`/DELETE `{id}`/export) are additive; existing endpoints are untouched.
+- Frontend: `ReaderPreferencesStore` (`lib/reader/reader-preferences-store.svelte.ts`) loads once,
+  saves debounced (500ms), and migrates the M5 localStorage translate-target-language once when
+  the server has no saved row. `ReaderSettingsSheet.svelte` (+ its `ReaderSettingsButton.svelte`
+  wrapper, kept as a separate file so `BookFileReader.svelte` stayed at the 1000-line ceiling)
+  applies theme/font/line-height/margin/width live via `buildReaderContentStyles` →
+  `view.renderer.setStyles(css)`; `reader-content-styles.test.ts` asserts every theme (including
+  sepia) keeps ≥4.5:1 text contrast. Fixed-layout books hide the typography controls and only
+  apply theme, matching the PDF-cheap-theme-only note in the milestone brief (`ReaderTheme` on
+  `PdfReader.svelte` itself is **not yet wired** — out of scope for the time available this
+  session; flagged as a follow-up, not M7 PDF annotations).
+  `/vocabulary` (`VocabularyLibrary.svelte`) mirrors `AnnotationLibrary.svelte`: search, status
+  filter, inline status change, delete, CSV/JSON/Markdown export. Nav entry "Vocabulary" added
+  beside "Annotations" using the existing `layout-list` icon (no new icon needed).
+- **Known gap (time-boxed, not attempted further):** "Add to Vocabulary" in `LookupPopover.svelte`
+  saves word + first definition + language today, but does **not** yet capture book id, CFI
+  locator, or the surrounding sentence — threading that context down from `BookFileReader`'s
+  selection draft through `ReaderSelectionMenu` → `LookupPopover` is a real (small-to-medium)
+  follow-up. Vocabulary entries added this way have no book link and "jump to source location"
+  does nothing for them (the UI simply shows the word as plain text, no link, when there is no
+  book/locator). Entries added via a future full wiring, or via direct API use, work correctly.
+- **Not done:** the Playwright e2e spec for settings-persist-after-reload and
+  Define→Add-to-Vocabulary→status-change. Existing reader e2e specs were re-run instead to check
+  for regressions (see final report for numbers).
+- Real test output, exact commands, and owner-verified items are in the final session report
+  handed back to the user.
