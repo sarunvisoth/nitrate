@@ -12,7 +12,7 @@ Legend for who does the work: **Cloud** = a Claude cloud session can do it end t
 | M0 | Import Prismedia snapshot, repo hygiene, Nitrate agent instructions | Cloud | [foundation](plans/2026-09-26-foundation.md) | Done |
 | M1 | `docs/nitrate/ARCHITECTURE_ANALYSIS.md` (18 questions) + `THIRD_PARTY_LICENSES.md` | Cloud | [foundation](plans/2026-09-26-foundation.md) | Done |
 | M2 | Windows-native host: AMD AMF encoder profile + Windows install guide | Cloud builds, Owner verifies | [foundation](plans/2026-09-26-foundation.md) | Built; awaiting owner verification |
-| M3 | **Reader slice 1:** annotation model + API, text selection, highlights (5 colours), notes, cross-device sync | Cloud; Owner reads with it | [m3-reader-slice-1](plans/2026-09-26-m3-reader-slice-1.md) | Plan approved (with progress catch-up) — ready to execute |
+| M3 | **Reader slice 1:** annotation model + API, text selection, highlights (5 colours), notes, cross-device sync | Cloud; Owner reads with it | [m3-reader-slice-1](plans/2026-09-26-m3-reader-slice-1.md) | Built; awaiting owner reading test |
 | M4 | Bookmarks, `/annotations` dashboard (search, filter by book/colour), Markdown/JSON/CSV export | Cloud | — | Not started |
 | M5 | `DictionaryProvider` + Define popup, `TranslationProvider` + Translate, Wikipedia / Search Book / Search Web | Cloud | — | Not started |
 | M6 | Per-user reader settings (fonts, spacing, themes, scroll/paginated), vocabulary list | Cloud | — | Not started |

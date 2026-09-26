@@ -1052,6 +1052,17 @@ The Prismedia config keys can also be set in the standard .NET env form (e.g. `P
 
 ## 20. Proposed annotation system (summary)
 
+> **Implemented in M3 (2026-09-26).** See `docs/nitrate/plans/2026-09-26-m3-reader-slice-1.md` for the "As built"
+> notes. Entry points:
+> - Backend: `Prismedia.Domain/Entities/Enums/Books/Annotation*.cs`, `Prismedia.Contracts/Books/BookAnnotations.cs`,
+>   `Prismedia.Application/Books/IBookAnnotationService.cs` + `BookAnnotationWritePolicy.cs`,
+>   `Prismedia.Infrastructure/Media/Books/EfBookAnnotationService.cs`, migration `*_AddBookAnnotations`, and the routes in
+>   `Prismedia.Api/Endpoints/Books/BookEndpoints.cs`.
+> - Web: `apps/web-svelte/src/lib/reader/*` (sync store, selection helpers, colours, progress catch-up),
+>   `components/reader/ReaderSelectionMenu.svelte` + `AnnotationEditor.svelte`, `BookFileReader.svelte`, and
+>   `routes/books/[id]/reader/+page.svelte`.
+> - E2E: `e2e/reader-annotations.spec.ts`.
+
 This summarises the design that `docs/nitrate/plans/2026-09-26-m3-reader-slice-1.md` expands into tasks. It rests on
 §11, §13, §14 and §16, and on the product intent in `docs/nitrate/VISION.md` ("Highlights", "Notes", "Progress
 Synchronization").

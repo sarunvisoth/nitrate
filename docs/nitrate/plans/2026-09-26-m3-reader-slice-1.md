@@ -4,8 +4,9 @@
 > superpowers:executing-plans to carry out this plan task by task. Steps use checkbox (`- [ ]`) syntax. Tick
 > boxes in this file and commit them as you go, so a later session can resume.
 >
-> **Status: approved by the owner on 2026-09-26, with one addition (Task 10A: reading position follows you
-> between devices). Not yet executed.** See "Owner decisions" at the end.
+> **Status: built on 2026-09-26 (Tasks 1–12). Awaiting the owner's reading test** (Task 12 Step 3 checklist).
+> Approved by the owner with one addition (Task 10A: reading position follows you between devices). See "Owner
+> decisions" at the end.
 
 **Goal:** The owner can select text in an EPUB, highlight it in one of five colours, and optionally attach a
 note. Highlights survive reloads and server restarts, and appear on the owner's other devices the next time the
@@ -1190,9 +1191,9 @@ authenticate: it predates multi-user auth. Build the minimum needed.
 
 ## Task 12: Verify, document, hand off
 
-- [ ] **Step 1:** Run `pnpm test:backend`, `pnpm test:web-svelte`, `pnpm test:unit`, `pnpm check` and
+- [x] **Step 1:** Run `pnpm test:backend`, `pnpm test:web-svelte`, `pnpm test:unit`, `pnpm check` and
   `pnpm api:check`. Compare against `BASELINE.md`, and report real counts.
-- [ ] **Step 2:** Add an "Annotations" note to `docs/nitrate/ARCHITECTURE_ANALYSIS.md` §20 saying it is
+- [x] **Step 2:** Add an "Annotations" note to `docs/nitrate/ARCHITECTURE_ANALYSIS.md` §20 saying it is
   implemented, with pointers to the new files. Update `docs/nitrate/ROADMAP.md`: M3 Status becomes
   `Built; awaiting owner reading test`.
 - [ ] **Step 3: Owner-verified acceptance** (list these for the owner; do not claim them):
@@ -1203,10 +1204,12 @@ authenticate: it predates multi-user auth. Build the minimum needed.
   - [ ] Read a few pages on the Mac, then switch to the iPad tab that already had the book open. It jumps to the
         Mac's page, and **Go back** returns you to where the iPad was. Repeat with a PDF.
   - [ ] Text selection works in both paged and scrolled modes on the iPad (touch long-press) and on the Mac
-        (mouse drag). Edge taps still turn pages, and a centre tap still toggles the controls.
+        (mouse drag). Edge taps still turn pages, and a centre tap still toggles the controls. (Headless Chromium
+        would not extend a synthetic selection at fractional pixel positions. Retina screens can produce
+        fractional positions, so check selection on the Mac with a trackpad as well as a mouse.)
   - [ ] The Prismedia iPhone/iPad App Store app still opens books and resumes progress. No existing endpoint
         changed.
-- [ ] **Step 4: Commit and push**, then stop for owner review.
+- [x] **Step 4: Commit and push**, then stop for owner review.
 
 ---
 
