@@ -535,8 +535,11 @@
 
     void (async () => {
       try {
-        pdfjsLib = await import("pdfjs-dist/build/pdf.mjs");
-        const workerModule = await import("pdfjs-dist/build/pdf.worker.min.mjs?url");
+        // The legacy build bundles core-js polyfills (e.g. Map.prototype.getOrInsertComputed) the
+        // non-legacy build assumes the runtime already has, so PDFs still render on older browsers
+        // (older iPad Safari, Chrome/Edge that haven't shipped the newest Map methods).
+        pdfjsLib = await import("pdfjs-dist/legacy/build/pdf.mjs");
+        const workerModule = await import("pdfjs-dist/legacy/build/pdf.worker.min.mjs?url");
         pdfjsLib.GlobalWorkerOptions.workerSrc = (workerModule as { default: string }).default;
 
         const absoluteUrl = toApiUrl(sourceUrl) ?? sourceUrl;
