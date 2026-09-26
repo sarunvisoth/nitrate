@@ -961,7 +961,7 @@ Read `BookFileReader.svelte` in full and ARCHITECTURE_ANALYSIS §11, §14 and §
 
 Here `draft` is `{ locator, spineIndex, position, selectedText, textBefore, textAfter, color, note? }`.
 
-- [ ] **Step 1: Rework the gesture overlay** (`.book-reader-gestures`, `BookFileReader.svelte:417-426,517-522`).
+- [x] **Step 1: Rework the gesture overlay** (`.book-reader-gestures`, `BookFileReader.svelte:417-426,517-522`).
   Today it covers the whole stage in paged mode and swallows the pointer events that start a text selection (§11).
   Change it to **two edge strips**, `previous` and `next`, each about 18% of the width, that keep tap-to-turn. The
   middle is then open to the book content, which gives text selection. Move the other gestures:
@@ -973,7 +973,7 @@ Here `draft` is `{ locator, spineIndex, position, selectedText, textBefore, text
   - **Swipe down to close:** keep it on the edge strips only.
 
   Record this UX change in the commit body. It is also an owner decision (below).
-- [ ] **Step 2: Capture selections.**
+- [x] **Step 2: Capture selections.**
   - Add `view.addEventListener("load", handleSectionLoad)` next to `relocate` (and remove it in the cleanup).
   - In `handleSectionLoad({ detail: { doc, index } })`, listen for `pointerup` and `keyup` on `doc` (a debounced
     `selectionchange` is an acceptable alternative).
@@ -990,7 +990,7 @@ Here `draft` is `{ locator, spineIndex, position, selectedText, textBefore, text
       under a namespaced key), then calls `view.deselect()`.
     - **Add Note:** creates the draft and opens `AnnotationEditor` focused on the note.
   - Skip all of this when `isFixedLayout`.
-- [ ] **Step 3: Draw highlights.**
+- [x] **Step 3: Draw highlights.**
   - `import { Overlayer } from "$lib/vendor/foliate-js/overlayer.js"` (dynamic import next to `view.js`).
   - Listen for `draw-annotation` and call `e.detail.draw(Overlayer.highlight, { color: annotationColorCss(e.detail.annotation.color) })`.
   - Listen for `create-overlay` and call `view.addAnnotation({ value: a.locator, color: a.color })` for each
@@ -1001,14 +1001,14 @@ Here `draft` is `{ locator, spineIndex, position, selectedText, textBefore, text
   - Keep a `Map<locator, id>`, because foliate keys overlays by `value` (the CFI). Two annotations on an identical
     range would collide. On create, if an annotation with the same locator already exists, update that one
     instead of creating a duplicate.
-- [ ] **Step 4: Tap a highlight.** Listen for `show-annotation` and look up the annotation by `detail.value`.
+- [x] **Step 4: Tap a highlight.** Listen for `show-annotation` and look up the annotation by `detail.value`.
   Open `AnnotationEditor` anchored at `detail.range`'s rect (converted as in Step 2). Its callbacks map to
   `onUpdateAnnotation` (colour or note) and `onDeleteAnnotation`.
-- [ ] **Step 5: Tests.** No component test exists for `BookFileReader` (§16c), and foliate needs a real browser,
+- [x] **Step 5: Tests.** No component test exists for `BookFileReader` (§16c), and foliate needs a real browser,
   so the behaviour here is covered by the Playwright test in Task 11. Add a unit test only for any pure function
   you extract, such as the edge-strip zone calculation: extend `comicTapZone` or add a sibling function with a
   test.
-- [ ] **Step 6: Run** `pnpm check` and `pnpm test:web-svelte`, then commit:
+- [x] **Step 6: Run** `pnpm check` and `pnpm test:web-svelte`, then commit:
   `feat(web): highlight and annotate EPUB selections in the reader`
 
 ---

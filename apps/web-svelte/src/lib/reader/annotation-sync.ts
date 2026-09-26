@@ -30,3 +30,15 @@ export function visibleAnnotations(items: Iterable<BookAnnotation>): BookAnnotat
         Date.parse(a.createdAt) - Date.parse(b.createdAt),
     );
 }
+
+/** A new highlight captured in the reader, before the route assigns an id and clock. */
+export interface AnnotationDraft {
+  locator: string;
+  spineIndex: number;
+  position: number;
+  selectedText: string;
+  textBefore: string | null;
+  textAfter: string | null;
+  color: string;
+  note: string | null;
+}

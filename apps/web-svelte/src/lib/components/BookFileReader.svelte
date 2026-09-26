@@ -9,14 +9,24 @@
     ChevronLeft,
     ChevronRight,
     List,
+    Highlighter,
     Minus,
+    NotebookPen,
     Plus,
     Rows3,
     X,
   } from "@lucide/svelte";
   import { apiAssetUrl as toApiUrl } from "$lib/api/orval-fetch";
   import ReaderShell from "$lib/components/reader/ReaderShell.svelte";
-  import { comicTapZone } from "$lib/components/comic-reader";
+  import ReaderSelectionMenu, {
+    type ReaderSelectionAction,
+  } from "$lib/components/reader/ReaderSelectionMenu.svelte";
+  import AnnotationEditor from "$lib/components/reader/AnnotationEditor.svelte";
+  import { ANNOTATION_COLOR, type AnnotationColorCode } from "$lib/api/generated/codes";
+  import type { BookAnnotation } from "$lib/api/generated/model";
+  import type { AnnotationDraft } from "$lib/reader/annotation-sync";
+  import { ANNOTATION_COLOR_ORDER, annotationColorPaint } from "$lib/reader/annotation-colors";
+  import { selectionAnchorRect, textQuoteFor } from "$lib/reader/epub-selection";
 
   type ReaderFlow = "paginated" | "scrolled";
 
@@ -46,6 +56,12 @@
     onFlowChange?: (flow: ReaderFlow) => void;
     /** Optional transport from a companion rendition, such as the matched audiobook. */
     companionControls?: Snippet;
+    /** Highlights to draw (already filtered to non-deleted). Omit to disable annotations. */
+    annotations?: readonly BookAnnotation[];
+    /** Called for a new highlight; returns the stored (optimistic) annotation so its editor can open. */
+    onCreateAnnotation?: (draft: AnnotationDraft) => BookAnnotation | undefined;
+    onUpdateAnnotation?: (annotation: BookAnnotation) => void;
+    onDeleteAnnotation?: (annotation: BookAnnotation) => void;
   }
 
   let {
@@ -61,6 +77,10 @@
     onLocationChange,
     onFlowChange,
     companionControls,
+    annotations,
+    onCreateAnnotation,
+    onUpdateAnnotation,
+    onDeleteAnnotation,
   }: Props = $props();
 
   const MIN_FONT = 80;
@@ -161,6 +181,7 @@
     const fraction = typeof detail.fraction === "number" ? detail.fraction : 0;
     const cfi = typeof detail.cfi === "string" ? detail.cfi : null;
     const label = detail.tocItem?.label?.trim() || null;
+    lastFraction = fraction;
     atEnd = fraction >= 0.999;
     counterLabel = `${Math.round(fraction * 100)}%${label ? ` · ${label}` : ""}`;
     onLocationChange?.({ cfi, fraction, label });
@@ -189,6 +210,211 @@
         // ignore warm-up failures; the page still renders on demand
       }
     }
+  }
+
+  // ── Annotations ─────────────────────────────────────────────────────────────
+  // Selection is captured inside each loaded section document (foliate `load`), turned into a range
+  // CFI plus a text quote, and offered through ReaderSelectionMenu. Highlights are drawn with
+  // foliate's overlayer (`draw-annotation` / `create-overlay`), keyed by their CFI.
+
+  interface ViewportRect {
+    left: number;
+    top: number;
+    width: number;
+    height: number;
+  }
+
+  interface PendingSelection {
+    draft: Omit<AnnotationDraft, "color" | "note">;
+    anchor: ViewportRect;
+  }
+
+  const LAST_COLOR_STORAGE_KEY = "nitrate.reader.lastHighlightColor";
+  const SELECTION_SETTLE_MS = 350;
+
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  let Overlayer: any = null;
+  let lastFraction = 0;
+  let pendingSelection = $state<PendingSelection | null>(null);
+  let editing = $state<{ id: string; anchor: ViewportRect; focusNote: boolean } | null>(null);
+  let lastColor = $state<AnnotationColorCode>(readLastColor());
+  let annotationTapAt = 0;
+  let selectionTimer: ReturnType<typeof setTimeout> | null = null;
+  const drawn = new Map<string, { locator: string; color: string }>();
+
+  const annotationsEnabled = $derived(Boolean(annotations && onCreateAnnotation) && !isFixedLayout);
+  const annotationByLocator = $derived(new Map((annotations ?? []).map((item) => [item.locator, item])));
+  const editingAnnotation = $derived(
+    editing ? (annotations ?? []).find((item) => item.id === editing?.id) ?? null : null,
+  );
+
+  const selectionActions: ReaderSelectionAction[] = [
+    { id: "highlight", label: "Highlight", icon: Highlighter, run: () => createFromSelection(false) },
+    { id: "note", label: "Add Note", icon: NotebookPen, run: () => createFromSelection(true) },
+  ];
+
+  function readLastColor(): AnnotationColorCode {
+    try {
+      const stored = localStorage.getItem(LAST_COLOR_STORAGE_KEY);
+      if (stored && (ANNOTATION_COLOR_ORDER as readonly string[]).includes(stored)) {
+        return stored as AnnotationColorCode;
+      }
+    } catch {
+      // storage unavailable (private mode); fall back to the default colour
+    }
+    return ANNOTATION_COLOR.yellow;
+  }
+
+  function rememberColor(color: AnnotationColorCode) {
+    lastColor = color;
+    try {
+      localStorage.setItem(LAST_COLOR_STORAGE_KEY, color);
+    } catch {
+      // ignore storage failures; the colour still applies for this session
+    }
+  }
+
+  function viewportRectOf(range: Range): ViewportRect {
+    const frame = range.startContainer.ownerDocument?.defaultView?.frameElement?.getBoundingClientRect() ?? null;
+    return selectionAnchorRect(range.getBoundingClientRect(), frame);
+  }
+
+  function handleSectionLoad(event: Event) {
+    const { doc, index } = (event as CustomEvent).detail ?? {};
+    // Section documents live in iframes (another realm), so check shape rather than `instanceof`.
+    if (typeof doc?.getSelection !== "function" || typeof index !== "number") return;
+    const sectionDoc = doc as Document;
+    const settle = () => {
+      if (selectionTimer) clearTimeout(selectionTimer);
+      selectionTimer = setTimeout(() => captureSelection(sectionDoc, index), SELECTION_SETTLE_MS);
+    };
+    sectionDoc.addEventListener("selectionchange", settle);
+    sectionDoc.addEventListener("pointerup", settle);
+    sectionDoc.addEventListener("keyup", settle);
+    sectionDoc.addEventListener("click", (clickEvent) => handleContentClick(sectionDoc, clickEvent));
+  }
+
+  function captureSelection(doc: Document, index: number) {
+    if (!annotationsEnabled || editing) return;
+    const selection = doc.getSelection();
+    if (!selection || selection.isCollapsed || selection.rangeCount === 0) {
+      pendingSelection = null;
+      return;
+    }
+    const range = selection.getRangeAt(0);
+    const quote = textQuoteFor(range);
+    if (!quote.selectedText.trim()) return;
+    let locator: string;
+    try {
+      locator = view.getCFI(index, range);
+    } catch {
+      return;
+    }
+    pendingSelection = {
+      draft: { locator, spineIndex: index, position: lastFraction, ...quote },
+      anchor: viewportRectOf(range),
+    };
+  }
+
+  function clearSelection() {
+    pendingSelection = null;
+    try {
+      view?.deselect?.();
+    } catch {
+      // ignore: the section may have unloaded
+    }
+  }
+
+  function createFromSelection(openNote: boolean) {
+    const pending = pendingSelection;
+    if (!pending || !onCreateAnnotation) return;
+    clearSelection();
+    const existing = annotationByLocator.get(pending.draft.locator);
+    const annotation = existing
+      ? (onUpdateAnnotation?.({ ...existing, color: lastColor }), existing)
+      : onCreateAnnotation({ ...pending.draft, color: lastColor, note: null });
+    if (openNote && annotation) {
+      editing = { id: annotation.id, anchor: pending.anchor, focusNote: true };
+    }
+  }
+
+  function handleContentClick(doc: Document, event: MouseEvent) {
+    // Centre taps toggle the reader chrome in paged mode (edge strips handle page turns). Deferred so
+    // foliate's own overlay hit-test (`show-annotation`) and link handling run first.
+    if (flow !== "paginated") return;
+    const target = event.target as Element | null;
+    if (target?.closest?.("a[href]")) return;
+    setTimeout(() => {
+      if (performance.now() - annotationTapAt < 400) return;
+      if (!(doc.getSelection()?.isCollapsed ?? true)) return;
+      if (pendingSelection || editing) return;
+      shell?.toggleControls();
+    }, 0);
+  }
+
+  function handleDrawAnnotation(event: Event) {
+    const { draw, annotation } = (event as CustomEvent).detail ?? {};
+    if (typeof draw !== "function" || !Overlayer) return;
+    draw(Overlayer.highlight, { color: annotationColorPaint(annotation?.color ?? "") });
+  }
+
+  function handleCreateOverlay(event: Event) {
+    const index = (event as CustomEvent).detail?.index;
+    for (const item of annotations ?? []) {
+      if (Number(item.spineIndex) === index) void drawAnnotation(item.locator, item.color);
+    }
+  }
+
+  function handleShowAnnotation(event: Event) {
+    const { value, range } = (event as CustomEvent).detail ?? {};
+    const annotation = typeof value === "string" ? annotationByLocator.get(value) : undefined;
+    if (!annotation || typeof range?.getBoundingClientRect !== "function") return;
+    annotationTapAt = performance.now();
+    pendingSelection = null;
+    editing = { id: annotation.id, anchor: viewportRectOf(range as Range), focusNote: false };
+  }
+
+  async function drawAnnotation(locator: string, color: string) {
+    try {
+      await view?.addAnnotation?.({ value: locator, color });
+    } catch {
+      // unresolvable CFI (e.g. the file changed); the text quote is kept for later re-anchoring
+    }
+  }
+
+  async function eraseAnnotation(locator: string) {
+    try {
+      await view?.deleteAnnotation?.({ value: locator });
+    } catch {
+      // ignore: nothing drawn for this locator
+    }
+  }
+
+  function syncDrawnAnnotations(items: readonly BookAnnotation[]) {
+    const next = new Map(items.map((item) => [item.id, { locator: item.locator, color: item.color }]));
+    for (const [id, previous] of drawn) {
+      const current = next.get(id);
+      if (!current || current.locator !== previous.locator) {
+        void eraseAnnotation(previous.locator);
+        drawn.delete(id);
+      }
+    }
+    for (const [id, current] of next) {
+      const previous = drawn.get(id);
+      if (!previous || previous.color !== current.color || previous.locator !== current.locator) {
+        void drawAnnotation(current.locator, current.color);
+        drawn.set(id, current);
+      }
+    }
+  }
+
+  $effect(() => {
+    const items = annotations ?? [];
+    if (ready && annotationsEnabled) syncDrawnAnnotations(items);
+  });
+
+  function closeEditor() {
+    editing = null;
   }
 
   // Comic-style gesture overlay (paged mode only). foliate columnizes the page into a single
@@ -228,7 +454,7 @@
     readerPointerGesture = null;
   }
 
-  function handleGesturePointerUp(event: PointerEvent) {
+  function handleGesturePointerUp(event: PointerEvent, edge: "previous" | "next") {
     const gesture = readerPointerGesture;
     clearGesture();
 
@@ -255,15 +481,9 @@
       if (gesture.moved) return;
     }
 
-    const rect = (event.currentTarget as HTMLElement).getBoundingClientRect();
-    const zone = comicTapZone(event.clientX - rect.left, rect.width);
-    if (event.pointerType === "mouse") {
-      if (zone === "controls") shell?.toggleControls();
-      return;
-    }
-    if (zone === "previous") goPrev();
-    else if (zone === "next") goNext();
-    else shell?.toggleControls();
+    if (event.pointerType === "mouse") return;
+    if (edge === "previous") goPrev();
+    else goNext();
   }
 
   onMount(() => {
@@ -273,6 +493,7 @@
       try {
         // Registers the <foliate-view> custom element (vendored, client-only).
         await import("$lib/vendor/foliate-js/view.js");
+        Overlayer = (await import("$lib/vendor/foliate-js/overlayer.js")).Overlayer;
         if (disposed || !stageEl) return;
 
         const absoluteUrl = toApiUrl(sourceUrl) ?? sourceUrl;
@@ -296,6 +517,10 @@
         toc = normalizeToc(view.book?.toc);
         isFixedLayout = Boolean(view.isFixedLayout);
         view.addEventListener("relocate", handleRelocate);
+        view.addEventListener("load", handleSectionLoad);
+        view.addEventListener("draw-annotation", handleDrawAnnotation);
+        view.addEventListener("create-overlay", handleCreateOverlay);
+        view.addEventListener("show-annotation", handleShowAnnotation);
         applyFlow(flow);
         applyStyles();
         const boundedInitialFraction = typeof initialFraction === "number" && Number.isFinite(initialFraction)
@@ -320,6 +545,11 @@
       disposed = true;
       try {
         view?.removeEventListener?.("relocate", handleRelocate);
+        view?.removeEventListener?.("load", handleSectionLoad);
+        view?.removeEventListener?.("draw-annotation", handleDrawAnnotation);
+        view?.removeEventListener?.("create-overlay", handleCreateOverlay);
+        view?.removeEventListener?.("show-annotation", handleShowAnnotation);
+        if (selectionTimer) clearTimeout(selectionTimer);
         view?.close?.();
         view?.remove?.();
       } catch {
@@ -415,14 +645,46 @@
 
   <div class="book-reader-stage" bind:this={stageEl}>
     {#if ready && flow === "paginated"}
-      <!-- svelte-ignore a11y_no_static_element_interactions -->
-      <div
-        class="book-reader-gestures"
-        onpointerdown={handleGesturePointerDown}
-        onpointermove={handleGesturePointerMove}
-        onpointerup={handleGesturePointerUp}
-        onpointercancel={clearGesture}
-      ></div>
+      <!-- Edge strips turn pages on touch; the middle is left to the book so text can be selected. -->
+      {#each ["previous", "next"] as const as edge (edge)}
+        <!-- svelte-ignore a11y_no_static_element_interactions -->
+        <div
+          class="book-reader-edge"
+          class:book-reader-edge-previous={edge === "previous"}
+          class:book-reader-edge-next={edge === "next"}
+          onpointerdown={handleGesturePointerDown}
+          onpointermove={handleGesturePointerMove}
+          onpointerup={(event) => handleGesturePointerUp(event, edge)}
+          onpointercancel={clearGesture}
+        ></div>
+      {/each}
+    {/if}
+
+    {#if annotationsEnabled}
+      <ReaderSelectionMenu
+        anchor={pendingSelection?.anchor ?? null}
+        actions={selectionActions}
+        onDismiss={clearSelection}
+      />
+      <AnnotationEditor
+        anchor={editingAnnotation ? editing?.anchor ?? null : null}
+        color={editingAnnotation?.color ?? lastColor}
+        note={editingAnnotation?.note ?? null}
+        focusNote={editing?.focusNote ?? false}
+        onChangeColor={(color) => {
+          rememberColor(color);
+          if (editingAnnotation) onUpdateAnnotation?.({ ...editingAnnotation, color });
+        }}
+        onSaveNote={(note) => {
+          if (editingAnnotation) onUpdateAnnotation?.({ ...editingAnnotation, note: note.trim() ? note : null });
+          closeEditor();
+        }}
+        onDelete={() => {
+          if (editingAnnotation) onDeleteAnnotation?.(editingAnnotation);
+          closeEditor();
+        }}
+        onDismiss={closeEditor}
+      />
     {/if}
 
     {#if ready}
@@ -512,13 +774,31 @@
     pointer-events: none;
   }
 
-  /* Captures comic-style tap/swipe gestures above the foliate view in paged mode.
+  /* Touch tap/swipe strips at the page edges in paged mode. The middle of the page is left to the
+     book so text can be selected; centre taps toggle the chrome from inside the content instead.
      Sits below the edge nav buttons (z-index 10) so those still receive their own clicks. */
-  .book-reader-gestures {
+  .book-reader-edge {
     position: absolute;
-    inset: 0;
+    top: 0;
+    bottom: 0;
+    width: 18%;
     z-index: 5;
     touch-action: none;
+  }
+
+  .book-reader-edge-previous {
+    left: 0;
+  }
+
+  .book-reader-edge-next {
+    right: 0;
+  }
+
+  /* Mouse users page with the arrow buttons and keys; let clicks reach the text for selection. */
+  @media (hover: hover) and (pointer: fine) {
+    .book-reader-edge {
+      pointer-events: none;
+    }
   }
 
   .book-reader-end {
