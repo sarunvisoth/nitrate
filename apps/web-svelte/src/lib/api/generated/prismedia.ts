@@ -22,6 +22,8 @@ import type {
   AcquisitionSummary,
   AcquisitionTransferView,
   AdminSetPasswordRequest,
+  AnnotationLibraryBooksResponse,
+  AnnotationLibraryResponse,
   ApiProblem,
   ApplyIdentifyProposalRequest,
   ApplyIdentifyQueueItemRequest,
@@ -100,6 +102,7 @@ import type {
   EntityThumbnailBatchRequest,
   EntityThumbnailBatchResponse,
   ExcludeFileParams,
+  ExportAnnotationLibraryParams,
   FileArchivePreparation,
   FileArchiveRequest,
   FileChildrenResponse,
@@ -165,6 +168,7 @@ import type {
   LibraryRootSummary,
   LibraryRootUpdateRequest,
   ListAcquisitionHistoryParams,
+  ListAnnotationLibraryParams,
   ListAudioLibrariesParams,
   ListAudioTracksParams,
   ListBookAuthorsParams,
@@ -4956,6 +4960,142 @@ export const getBookAuthorPatch = async (id: string,
     headers: { 'Content-Type': 'application/json', ...options?.headers },
     body: JSON.stringify(
       entityMetadataUpdateRequest,)
+  }
+);}
+
+
+
+export type listAnnotationLibraryResponse200 = {
+  data: AnnotationLibraryResponse
+  status: 200
+}
+
+export type listAnnotationLibraryResponse400 = {
+  data: ApiProblem
+  status: 400
+}
+
+export type listAnnotationLibraryResponseSuccess = (listAnnotationLibraryResponse200) & {
+  headers: Headers;
+};
+export type listAnnotationLibraryResponseError = (listAnnotationLibraryResponse400) & {
+  headers: Headers;
+};
+
+export type listAnnotationLibraryResponse = (listAnnotationLibraryResponseSuccess | listAnnotationLibraryResponseError)
+
+export const getListAnnotationLibraryUrl = (params?: ListAnnotationLibraryParams,) => {
+  const normalizedParams = new URLSearchParams();
+
+  Object.entries(params || {}).forEach(([key, value]) => {
+
+    if (value !== undefined) {
+      normalizedParams.append(key, value === null ? 'null' : value.toString())
+    }
+  });
+
+  const stringifiedParams = normalizedParams.toString();
+
+  return stringifiedParams.length > 0 ? `/api/annotations?${stringifiedParams}` : `/api/annotations`
+}
+
+/**
+ * @summary Search the current user's highlights and notes across every visible book.
+ */
+export const listAnnotationLibrary = async (params?: ListAnnotationLibraryParams, options?: RequestInit): Promise<listAnnotationLibraryResponse> => {
+
+  return orvalFetch<listAnnotationLibraryResponse>(getListAnnotationLibraryUrl(params),
+  {
+    ...options,
+    method: 'GET'
+
+
+  }
+);}
+
+
+
+export type listAnnotationLibraryBooksResponse200 = {
+  data: AnnotationLibraryBooksResponse
+  status: 200
+}
+
+export type listAnnotationLibraryBooksResponseSuccess = (listAnnotationLibraryBooksResponse200) & {
+  headers: Headers;
+};
+;
+
+export type listAnnotationLibraryBooksResponse = (listAnnotationLibraryBooksResponseSuccess)
+
+export const getListAnnotationLibraryBooksUrl = () => {
+
+
+
+
+  return `/api/annotations/books`
+}
+
+/**
+ * @summary List every book the current user has highlighted, with highlight and note counts.
+ */
+export const listAnnotationLibraryBooks = async ( options?: RequestInit): Promise<listAnnotationLibraryBooksResponse> => {
+
+  return orvalFetch<listAnnotationLibraryBooksResponse>(getListAnnotationLibraryBooksUrl(),
+  {
+    ...options,
+    method: 'GET'
+
+
+  }
+);}
+
+
+
+export type exportAnnotationLibraryResponse200 = {
+  data: void
+  status: 200
+}
+
+export type exportAnnotationLibraryResponse400 = {
+  data: ApiProblem
+  status: 400
+}
+
+export type exportAnnotationLibraryResponseSuccess = (exportAnnotationLibraryResponse200) & {
+  headers: Headers;
+};
+export type exportAnnotationLibraryResponseError = (exportAnnotationLibraryResponse400) & {
+  headers: Headers;
+};
+
+export type exportAnnotationLibraryResponse = (exportAnnotationLibraryResponseSuccess | exportAnnotationLibraryResponseError)
+
+export const getExportAnnotationLibraryUrl = (params: ExportAnnotationLibraryParams,) => {
+  const normalizedParams = new URLSearchParams();
+
+  Object.entries(params || {}).forEach(([key, value]) => {
+
+    if (value !== undefined) {
+      normalizedParams.append(key, value === null ? 'null' : value.toString())
+    }
+  });
+
+  const stringifiedParams = normalizedParams.toString();
+
+  return stringifiedParams.length > 0 ? `/api/annotations/export?${stringifiedParams}` : `/api/annotations/export`
+}
+
+/**
+ * @summary Download the current user's highlights and notes as Markdown, JSON, or CSV.
+ */
+export const exportAnnotationLibrary = async (params: ExportAnnotationLibraryParams, options?: RequestInit): Promise<exportAnnotationLibraryResponse> => {
+
+  return orvalFetch<exportAnnotationLibraryResponse>(getExportAnnotationLibraryUrl(params),
+  {
+    ...options,
+    method: 'GET'
+
+
   }
 );}
 

@@ -391,6 +391,15 @@ export const ANNOTATION_COLOR = {
 
 export type AnnotationColorCode = (typeof ANNOTATION_COLOR)[keyof typeof ANNOTATION_COLOR];
 
+// source: enum AnnotationExportFormat
+export const ANNOTATION_EXPORT_FORMAT = {
+  markdown: "markdown",
+  json: "json",
+  csv: "csv",
+} as const;
+
+export type AnnotationExportFormatCode = (typeof ANNOTATION_EXPORT_FORMAT)[keyof typeof ANNOTATION_EXPORT_FORMAT];
+
 // source: enum AnnotationLocatorKind
 export const ANNOTATION_LOCATOR_KIND = {
   epubCfi: "epub-cfi",

@@ -78,26 +78,26 @@
 - [x] **Step 3:** Write `EfBookBookmarkService` test-first, covering the same cases as `EfBookAnnotationServiceTests`:
   owner-only, superseded, tombstone, other user → NotFound, non-book or hidden → NotFound, anonymous, invalid.
 - [x] **Step 4:** Add `GET/PUT/DELETE /api/books/{id}/bookmarks[/{bookmarkId}]` with endpoint tests.
-- [ ] **Step 5:** Run `pnpm test:backend`, regenerate the client in the same commit, then commit.
+- [x] **Step 5:** Run `pnpm test:backend`, regenerate the client in the same commit, then commit.
 
 ### Task 2: Annotation library and export backend
-- [ ] **Step 1:** Add the `AnnotationExportFormat` `[Code]` enum (`markdown`, `json`, `csv`).
-- [ ] **Step 2:** Write `AnnotationExportWriter` test-first. It is pure: given a book-grouped list, it produces
+- [x] **Step 1:** Add the `AnnotationExportFormat` `[Code]` enum (`markdown`, `json`, `csv`).
+- [x] **Step 2:** Write `AnnotationExportWriter` test-first. It is pure: given a book-grouped list, it produces
   Markdown, JSON or CSV.
   - CSV follows RFC 4180 quoting and uses a UTF-8 BOM so Excel opens it correctly.
   - Markdown has one `##` heading per book, with each highlight as a quote and its note underneath.
   - JSON is a stable camelCase shape.
-- [ ] **Step 3:** Write `EfAnnotationLibraryService` test-first:
+- [x] **Step 3:** Write `EfAnnotationLibraryService` test-first:
   - `ListAsync(query)`: search, book, colour and has-note filters; non-deleted only; only books visible to the user;
     newest first; offset-cursor paging.
   - `BooksAsync()`: per-book highlight and note counts plus a stale count.
   - `ExportAsync(format, bookId?)`.
 
   Items carry `bookTitle` and `isStale`.
-- [ ] **Step 4:** Add the endpoints in a new `AnnotationLibraryEndpoints` group at `/api/annotations`: `GET /`,
+- [x] **Step 4:** Add the endpoints in a new `AnnotationLibraryEndpoints` group at `/api/annotations`: `GET /`,
   `GET /books`, and `GET /export`, which returns a file with `fileDownloadName`. An unknown code returns 400
   `RequestInvalid`. Add endpoint tests.
-- [ ] **Step 5:** Run `pnpm test:backend`, regenerate the client, then commit.
+- [x] **Step 5:** Run `pnpm test:backend`, regenerate the client, then commit.
 
 ### Task 3: Reader bookmarks
 - [ ] **Step 1:** Add `book-bookmark-store.svelte.ts`, the same shape as `BookAnnotationStore`, test-first.
