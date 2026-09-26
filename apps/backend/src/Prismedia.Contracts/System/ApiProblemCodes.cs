@@ -196,6 +196,12 @@ public static class ApiProblemCodes {
     /// <summary>Problem code <c>plugin_update_not_found</c>.</summary>
     public const string PluginUpdateNotFound = "plugin_update_not_found";
 
+    /// <summary>Problem code <c>reader_lookup_invalid</c>.</summary>
+    public const string ReaderLookupInvalid = "reader_lookup_invalid";
+
+    /// <summary>Problem code <c>reader_lookup_provider_unavailable</c>.</summary>
+    public const string ReaderLookupProviderUnavailable = "reader_lookup_provider_unavailable";
+
     /// <summary>Problem code <c>request_invalid</c>.</summary>
     public const string RequestInvalid = "request_invalid";
 

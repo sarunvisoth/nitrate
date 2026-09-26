@@ -329,6 +329,23 @@ public static class AppSettings {
             10, 10, min: 0, max: 1000, step: 1);
     }
 
+    public static class Reader {
+        public static readonly SettingGroupDefinition Group = new(
+            "reader", "Reader Lookups",
+            "Optional self-hosted translation provider for the EPUB reader's Translate action. " +
+            "Leave blank to use the default MyMemory API.", 76);
+
+        public static readonly SettingDefinition<string> TranslationLibreUrl = Text(
+            Group, "reader.translationLibreUrl", "LibreTranslate base URL",
+            "When set, the reader translates through this self-hosted LibreTranslate instance " +
+            "instead of the default MyMemory API, keeping translated text on the LAN.",
+            "", 10, inputKind: "url", emptyStringUsesDefault: true);
+        public static readonly SettingDefinition<string> TranslationLibreApiKey = Text(
+            Group, "reader.translationLibreApiKey", "LibreTranslate API key",
+            "Optional API key for the configured LibreTranslate instance.",
+            "", 20, emptyStringUsesDefault: true);
+    }
+
     public static class TranscodeCache {
         public static readonly SettingGroupDefinition Group = new(
             "transcodeCache", "Transcode Cache",
