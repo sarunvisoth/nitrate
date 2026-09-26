@@ -34,6 +34,7 @@
   import { ANNOTATION_COLOR_ORDER, annotationColorPaint } from "$lib/reader/annotation-colors";
   import { selectionAnchorRect, textQuoteFor } from "$lib/reader/epub-selection";
   import { bookmarkOnPage, pageStartLocator } from "$lib/reader/bookmark-page";
+  import { findTextQuote, sameQuotedText } from "$lib/reader/annotation-reanchor";
   import type { BookmarkPage } from "$lib/reader/book-bookmark-store.svelte";
 
   type ReaderFlow = "paginated" | "scrolled";
@@ -391,9 +392,61 @@
 
   function handleCreateOverlay(event: Event) {
     const index = (event as CustomEvent).detail?.index;
-    for (const item of annotations ?? []) {
-      if (Number(item.spineIndex) === index) void drawAnnotation(item.locator, item.color);
+    // foliate registers the new section's overlayer right after emitting this event; draw on the next tick.
+    setTimeout(() => {
+      for (const item of annotations ?? []) {
+        if (Number(item.spineIndex) === index) void drawVerified(item);
+      }
+    }, 0);
+  }
+
+  const repairedThisSession = new Set<string>();
+
+  function sectionDocument(index: number): Document | null {
+    try {
+      const contents = view?.renderer?.getContents?.() ?? [];
+      return contents.find((entry: { index?: number }) => entry.index === index)?.doc ?? null;
+    } catch {
+      return null;
     }
+  }
+
+  /**
+   * Draws a highlight only where its CFI still covers the highlighted text. If the book's file changed and the
+   * CFI now points elsewhere (or nowhere), re-find the text quote in that section; when found, draw it there and
+   * save the repaired CFI (once per session per highlight). When the text is gone, leave it undrawn.
+   */
+  async function drawVerified(annotation: BookAnnotation) {
+    const index = Number(annotation.spineIndex);
+    const doc = sectionDocument(index);
+    if (!doc) return; // section not loaded; `create-overlay` draws it when it is
+    let range: Range | null = null;
+    try {
+      const resolved = view?.resolveCFI?.(annotation.locator);
+      if (resolved?.index === index) range = resolved.anchor(doc) ?? null;
+    } catch {
+      range = null;
+    }
+    if (range && sameQuotedText(range.toString(), annotation.selectedText)) {
+      await drawAnnotation(annotation.locator, annotation.color);
+      return;
+    }
+    if (repairedThisSession.has(annotation.id)) return;
+    const found = findTextQuote(doc, annotation);
+    if (!found) return;
+    let repaired: string;
+    try {
+      repaired = view.getCFI(index, found);
+    } catch {
+      return;
+    }
+    repairedThisSession.add(annotation.id);
+    if (repaired === annotation.locator) {
+      await drawAnnotation(annotation.locator, annotation.color);
+      return;
+    }
+    // Saving the repaired locator updates `annotations`, which redraws it through `syncDrawnAnnotations`.
+    onUpdateAnnotation?.({ ...annotation, locator: repaired });
   }
 
   function handleShowAnnotation(event: Event) {
@@ -422,6 +475,7 @@
   }
 
   function syncDrawnAnnotations(items: readonly BookAnnotation[]) {
+    const byId = new Map(items.map((item) => [item.id, item]));
     const next = new Map(items.map((item) => [item.id, { locator: item.locator, color: item.color }]));
     for (const [id, previous] of drawn) {
       const current = next.get(id);
@@ -433,7 +487,7 @@
     for (const [id, current] of next) {
       const previous = drawn.get(id);
       if (!previous || previous.color !== current.color || previous.locator !== current.locator) {
-        void drawAnnotation(current.locator, current.color);
+        void drawVerified(byId.get(id)!);
         drawn.set(id, current);
       }
     }

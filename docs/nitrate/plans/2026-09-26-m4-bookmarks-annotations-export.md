@@ -115,13 +115,13 @@
 - [x] **Step 5:** Run the web tests and `pnpm check`, then commit.
 
 ### Task 4: Highlight re-anchoring
-- [ ] **Step 1:** Write `annotation-reanchor.ts` test-first (jsdom). `findTextQuote(doc, quote)` returns the best
+- [x] **Step 1:** Write `annotation-reanchor.ts` test-first (jsdom). `findTextQuote(doc, quote)` returns the best
   `Range` for `selectedText` in a document, scored by agreement with `textBefore`/`textAfter`, or `null`.
-- [ ] **Step 2:** `BookFileReader`: after `create-overlay`, check each annotation of that section.
+- [x] **Step 2:** `BookFileReader`: after `create-overlay`, check each annotation of that section.
   - If the CFI resolves and its text matches `selectedText`, draw it.
   - Otherwise, re-find the quote. If found, draw it and call `onUpdateAnnotation` with the new locator; if not, skip
     drawing.
-- [ ] **Step 3:** Run the tests, then commit.
+- [x] **Step 3:** Run the tests, then commit.
 
 ### Task 5: `/annotations` dashboard and export UI
 - [ ] **Step 1:** Add the `annotation-library.ts` API wrapper with tests, and an export-URL helper.
