@@ -480,9 +480,9 @@ git commit -m "docs: third-party license inventory"
 **Interfaces:**
 - Consumes: ARCHITECTURE_ANALYSIS §19 (env vars, blockers, web-asset path), BASELINE `## Running locally`.
 
-- [ ] **Step 1: Fix small blockers** from §19 one at a time, each with a unit test where the code is testable, each as its own commit (`fix(api): …`). Run `pnpm test:backend` after each.
+- [x] **Step 1: Fix small blockers** from §19 one at a time, each with a unit test where the code is testable, each as its own commit (`fix(api): …`). Run `pnpm test:backend` after each.
 
-- [ ] **Step 2: Write the guide** with these sections, using real commands and the env vars found in §19:
+- [x] **Step 2: Write the guide** with these sections, using real commands and the env vars found in §19:
   1. **Prerequisites (winget):** .NET 10 SDK, Node LTS + pnpm (via corepack), PostgreSQL 16, FFmpeg full build (the gyan.dev build includes `h264_amf`), Git. Give the `winget install` commands and tell the owner to confirm IDs with `winget search <name>` if one fails.
   2. **Library folders:** `D:\HomeServer\{Movies,TV,Music,Audiobooks,Books,Comics,Photos}` and how to add each as a library in the web UI.
   3. **Database:** create the Postgres user/database; the connection string format.
@@ -500,7 +500,7 @@ git commit -m "docs: third-party license inventory"
      text file unless Developer Mode + `core.symlinks=true` are on. This is harmless for running
      the server.
 
-- [ ] **Step 3: Owner verification checklist** — end the guide with this checklist (unticked; the owner fills it in):
+- [x] **Step 3: Owner verification checklist** — end the guide with this checklist (unticked; the owner fills it in):
 
 ```markdown
 ## Owner verification
@@ -516,9 +516,9 @@ git commit -m "docs: third-party license inventory"
 - [ ] PC stays usable (normal apps, light gaming) while one stream transcodes
 ```
 
-- [ ] **Step 4: Update roadmap** — M2 Status: `Built; awaiting owner verification`.
+- [x] **Step 4: Update roadmap** — M2 Status: `Built; awaiting owner verification`.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add -A
