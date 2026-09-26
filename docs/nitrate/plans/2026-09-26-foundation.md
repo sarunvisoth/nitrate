@@ -375,7 +375,10 @@ If the settings UI has a label/description map keyed by profile (the grep will s
 pnpm test:backend
 pnpm test:web-svelte
 pnpm check
+pnpm api:check
 ```
+
+If `pnpm api:check` reports drift in the generated client, run `pnpm api:generate` (it needs the dev API running — see BASELINE `## Running locally`) and include the regenerated files in the commit.
 
 Expected: same results as `BASELINE.md` plus the new passing AMF tests. Any new failure must be fixed before committing.
 
@@ -493,6 +496,9 @@ git commit -m "docs: third-party license inventory"
      ```
      Then open `http://<PC LAN IP>:8008` from other devices. Do **not** port-forward on the router.
   9. **Known blockers** (from §19 that were not fixed), each with a workaround if one exists.
+     Include the note: on Windows, git checks out the `CLAUDE.md → AGENTS.md` symlink as a small
+     text file unless Developer Mode + `core.symlinks=true` are on. This is harmless for running
+     the server.
 
 - [ ] **Step 3: Owner verification checklist** — end the guide with this checklist (unticked; the owner fills it in):
 
