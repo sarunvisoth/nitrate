@@ -1,5 +1,6 @@
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.DependencyInjection.Extensions;
 using Microsoft.Extensions.Logging;
 using Microsoft.EntityFrameworkCore;
 using Npgsql;
@@ -314,6 +315,8 @@ public static class DependencyInjection {
         services.AddSingleton<EpubBookContentsCache>();
         services.AddScoped<IBookContentsService, EpubBookContentsService>();
         services.AddScoped<IBookChapterMappingService, EfBookChapterMappingService>();
+        services.TryAddSingleton(TimeProvider.System);
+        services.AddScoped<IBookAnnotationService, EfBookAnnotationService>();
         services.AddScoped<IBookChapterMapService, EfBookChapterMapService>();
         services.AddScoped<IGridThumbnailService>(provider =>
             new GridThumbnailService(

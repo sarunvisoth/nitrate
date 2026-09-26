@@ -500,7 +500,7 @@ snapshot diff touches other tables, stop: the model has drifted and needs invest
 **Files:** create `Prismedia.Infrastructure/Media/Books/EfBookAnnotationService.cs` and its tests. Register it in
 `DependencyInjection.cs` next to `IBookChapterMappingService` (ARCHITECTURE_ANALYSIS §16a).
 
-- [ ] **Step 1: Write the failing tests** (`EfBookAnnotationServiceTests.cs`). Use EF InMemory, as in
+- [x] **Step 1: Write the failing tests** (`EfBookAnnotationServiceTests.cs`). Use EF InMemory, as in
   `EpubBookContentsServiceTests.CreateContext`, with `TestUserContext.MemberAs(userId)` / `Anonymous()` and an
   always-visible `IEntityVisibilityChecker` fake. Seed an `EntityRow` with `KindCode = EntityKind.Book.ToCode()`;
   look up an existing test that seeds an `EntityRow` for the required properties. Cover these cases:
@@ -514,7 +514,7 @@ snapshot diff touches other tables, stop: the model has drifted and needs invest
   8. `CreatedAt_is_kept_on_update_and_SourceSignature_is_copied_from_BookContentStates_on_create`
      (seed a `BookContentStateRow { BookId, SourceSignature = "epub:1:2:3" }`).
 
-- [ ] **Step 2: Run and confirm failure**, then implement:
+- [x] **Step 2: Run and confirm failure**, then implement:
 
 ```csharp
 using Microsoft.EntityFrameworkCore;
@@ -687,8 +687,8 @@ tiny test subclass of `TimeProvider` overriding `GetUtcNow()`.
 
 Register the service: `services.AddScoped<IBookAnnotationService, EfBookAnnotationService>();`
 
-- [ ] **Step 3: Run the new tests** and confirm they are green.
-- [ ] **Step 4: Commit.** `feat(api): persist book annotations with last-write-wins sync`
+- [x] **Step 3: Run the new tests** and confirm they are green.
+- [x] **Step 4: Commit.** `feat(api): persist book annotations with last-write-wins sync`
 
 ---
 
