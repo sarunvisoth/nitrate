@@ -1132,26 +1132,38 @@ describe("remoteProgressToAdopt", () => {
 
 ## Task 11: End-to-end test (Playwright)
 
+> **As built / how to run:** start the stack (BASELINE "Running locally"), then run
+> `PRISMEDIA_E2E_SVELTE_URL=http://localhost:5173 npx playwright test e2e/reader-annotations.spec.ts --workers=1`.
+> Both tests share one account and one book, so they must not run concurrently; the spec is marked serial, but
+> use `--workers=1` with `--repeat-each`. In the cloud sandbox, the repo's Playwright version did not match the
+> pre-installed browser, so the run used a local, uncommitted config that sets
+> `launchOptions.executablePath: "/opt/pw-browsers/chromium"`. Result on 2026-09-26: 6/6 passed (both tests, 3 repeats).
+> Findings while writing it:
+> - Synthetic drags at fractional pixel coordinates into the section iframe do not extend a selection in headless
+>   Chromium, so the test uses whole pixels. Real-device selection stays owner-verified.
+> - A single jump of the mouse out of the book iframe does not fire `pointerenter` in headless Chromium, so the
+>   test moves the mouse in steps.
+
 The repository has **no EPUB fixture** and **no reader e2e test** (§16c). The existing `e2e/smoke.spec.ts` does not
 authenticate: it predates multi-user auth. Build the minimum needed.
 
-- [ ] **Step 1: Fixture.** Generate a tiny reflowable EPUB of two chapters with a few paragraphs each, and commit
+- [x] **Step 1: Fixture.** Generate a tiny reflowable EPUB of two chapters with a few paragraphs each, and commit
   it at `tests/fixtures/media/books/nitrate-annotation-fixture.epub`. Keep the generator script in the plan
   commit message or in `e2e/fixtures/README.md`; there is no npm zip dependency. The Python standard library is
   enough: write `mimetype` first and uncompressed, then `META-INF/container.xml`, `OEBPS/content.opf`,
   `OEBPS/nav.xhtml` and `OEBPS/ch1.xhtml`/`ch2.xhtml`. Use `EpubBookContentsServiceTests.CreateEpubAsync` as the
   shape reference.
-- [ ] **Step 2: Auth helper** (`e2e/auth.ts`).
+- [x] **Step 2: Auth helper** (`e2e/auth.ts`).
   - `GET /api/auth/setup-status`. If `needsSetup`, `POST /api/auth/setup` with
     `{ username, password }` from `PRISMEDIA_E2E_USERNAME`/`PRISMEDIA_E2E_PASSWORD` (defaults `e2e-admin` /
     a fixed test password).
   - Then `POST /api/auth/login` with `{ username, password }`.
   - Return the `prismedia-session` cookie, and apply it with `context.addCookies`. The cookie name is
     `SessionCookieName` in `apps/backend/src/Prismedia.Api/Security/PrismediaAuthentication.cs`.
-- [ ] **Step 3: Book root helper** (`e2e/book-fixture.ts`). Mirror `ensureFixtureLibraryRoot` in
+- [x] **Step 3: Book root helper** (`e2e/book-fixture.ts`). Mirror `ensureFixtureLibraryRoot` in
   `e2e/fixture-library.ts`: create a watched root on `tests/fixtures/media/books` with the Books toggle, trigger a
   scan, and poll `GET /api/books` until the fixture's title appears. Return its id.
-- [ ] **Step 4: Spec** (`e2e/reader-annotations.spec.ts`).
+- [x] **Step 4: Spec** (`e2e/reader-annotations.spec.ts`).
   1. Log in. Open `/books/{id}/reader` and switch to **scrolled** flow, which makes selecting simpler; add a
      paged-mode case once scrolled passes.
   2. The foliate section iframe sits inside a **closed** shadow root, so locators cannot pierce it. Use
@@ -1169,10 +1181,10 @@ authenticate: it predates multi-user auth. Build the minimum needed.
   7. **Progress follows (Task 10A):** in context 2, turn two pages (the `next` edge strip, or `view.next()` via the
      frame). Wait for its `PATCH .../progress`. Bring context 1 to the front, and assert that context 1 jumps: its
      next `PATCH .../progress` carries context 2's `location`, and the notice is visible.
-- [ ] **Step 5: Run** `pnpm test:e2e -- reader-annotations` against a running stack (BASELINE "Running
+- [x] **Step 5: Run** `pnpm test:e2e -- reader-annotations` against a running stack (BASELINE "Running
   locally"; the API on :8008). Record real output. If the sandbox cannot run Chromium, say so; do not claim a
   pass.
-- [ ] **Step 6: Commit.** `test(e2e): cover highlight persistence and same-user cross-device sync`
+- [x] **Step 6: Commit.** `test(e2e): cover highlight persistence and same-user cross-device sync`
 
 ---
 
