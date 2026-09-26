@@ -219,14 +219,30 @@ public static class SettingsEndpoints {
             ? Results.NotFound(new ApiProblem(ex.ProblemCode, ex.Message))
             : Results.BadRequest(new ApiProblem(ex.ProblemCode, ex.Message));
 
-    private static bool ShouldRestoreInProcess(IHostEnvironment environment, IConfiguration configuration) {
-        var configured = configuration["PRISMEDIA_BACKUP_RESTORE_IN_PROCESS"] ??
-            configuration["Prismedia:Backups:RestoreInProcess"];
+    private static bool ShouldRestoreInProcess(IHostEnvironment environment, IConfiguration configuration) =>
+        ShouldRestoreInProcess(
+            configuration["PRISMEDIA_BACKUP_RESTORE_IN_PROCESS"] ??
+                configuration["Prismedia:Backups:RestoreInProcess"],
+            environment.IsDevelopment(),
+            OperatingSystem.IsWindows());
+
+    /// <summary>
+    /// Decides whether a scheduled database restore runs inside the live API process instead of
+    /// stopping the API so a supervisor restarts it and applies the restore at boot.
+    /// </summary>
+    /// <param name="configured">Explicit <c>PRISMEDIA_BACKUP_RESTORE_IN_PROCESS</c> value; wins when it parses as a boolean.</param>
+    /// <param name="isDevelopment">True when the host runs in the Development environment.</param>
+    /// <param name="isWindows">
+    /// True on native Windows hosts, where no container entrypoint restarts a cleanly stopped API,
+    /// so stop-and-restart would leave the server down with the restore never applied.
+    /// </param>
+    /// <returns>True when the restore should run in-process.</returns>
+    internal static bool ShouldRestoreInProcess(string? configured, bool isDevelopment, bool isWindows) {
         if (bool.TryParse(configured, out var restoreInProcess)) {
             return restoreInProcess;
         }
 
-        return environment.IsDevelopment();
+        return isDevelopment || isWindows;
     }
 
     private static async Task RunRestoreInProcessAsync(
