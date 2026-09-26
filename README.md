@@ -1,3 +1,15 @@
+# Nitrate
+
+Private, self-hosted, all-in-one media library with a serious reading experience.
+Nitrate is a personal fork of **[Prismedia](https://github.com/pauljoda/Prismedia)** by Paul Davis,
+based on commit `627958a` (v3.7.2), used under
+[CC BY-NC-SA 4.0](https://creativecommons.org/licenses/by-nc-sa/4.0/). Changes from Prismedia are
+tracked in this repository's git history. Nitrate is not affiliated with or endorsed by Prismedia.
+
+Project docs: [`docs/nitrate/`](docs/nitrate/).
+
+---
+
 <p align="center">
   <img src="docs/logo.png" width="96" alt="Prismedia prism mark" />
 </p>

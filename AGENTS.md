@@ -1,3 +1,32 @@
+# Nitrate Overrides (read first)
+
+This repository is **Nitrate**, a private, personal, non-commercial snapshot fork of
+[Prismedia](https://github.com/pauljoda/Prismedia) taken at `627958a` (v3.7.2). It is never
+synced with upstream. The Prismedia contract below still applies **except** where this section
+overrides it.
+
+- **Spec and plans:** `docs/nitrate/VISION.md` (spec + decisions log), `docs/nitrate/ROADMAP.md`,
+  `docs/nitrate/plans/`. Work from the active plan; tick its checkboxes as you go.
+- **Overridden — do not follow:** "Release Channels", "Docker" publishing, GHCR images, and the
+  SemVer/`CHANGELOG.md` bump rules in "Commit & Changelog Policy". Nitrate has no releases. Do not
+  bump package versions. Do not edit `CHANGELOG.md`.
+- **Still follow:** small conventional commits (`feat(api): …`, `fix(web): …`, `docs: …`),
+  backend architecture contract, identifier discipline, UI composition rules, quality bar,
+  repository privacy.
+- **Tracked planning docs are allowed** under `docs/nitrate/` (this overrides the "keep roadmaps
+  outside tracked documentation" rule for that folder only).
+- **Target host:** native Windows on an AMD CPU/GPU. Keep code portable (no Linux-only paths or
+  shell assumptions in runtime code). Docker remains supported but is not the Windows path.
+- **Compatibility:** existing HTTP endpoints are used by the closed-source Prismedia iPhone/iPad/
+  Apple TV apps. Do not change or remove them; add new endpoints instead.
+- **Licensing:** never copy code from Readest (AGPL) or BookOrbit. Record every new third-party
+  dependency in `docs/THIRD_PARTY_LICENSES.md`.
+- **Verification:** before claiming a task done, run the relevant test commands and report their
+  real output. Anything needing the Windows PC or a physical device is marked **Owner-verified**
+  and must be listed for the owner, not claimed.
+
+---
+
 # Prismedia Repository Contract
 
 ## Commit & Changelog Policy

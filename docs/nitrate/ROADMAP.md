@@ -9,7 +9,7 @@ Legend for who does the work: **Cloud** = a Claude cloud session can do it end t
 
 | # | Milestone | Who | Plan | Status |
 |---|-----------|-----|------|--------|
-| M0 | Import Prismedia snapshot, repo hygiene, Nitrate agent instructions | Cloud | [foundation](plans/2026-09-26-foundation.md) | Not started |
+| M0 | Import Prismedia snapshot, repo hygiene, Nitrate agent instructions | Cloud | [foundation](plans/2026-09-26-foundation.md) | Done |
 | M1 | `docs/nitrate/ARCHITECTURE_ANALYSIS.md` (18 questions) + `THIRD_PARTY_LICENSES.md` | Cloud | [foundation](plans/2026-09-26-foundation.md) | Not started |
 | M2 | Windows-native host: AMD AMF encoder profile + Windows install guide | Cloud builds, Owner verifies | [foundation](plans/2026-09-26-foundation.md) | Not started |
 | M3 | **Reader slice 1:** annotation model + API, text selection, highlights (5 colours), notes, cross-device sync | Cloud; Owner reads with it | written at end of M1 | Not started |

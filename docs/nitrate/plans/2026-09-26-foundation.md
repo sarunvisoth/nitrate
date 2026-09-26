@@ -106,13 +106,13 @@ git push origin main
 
 **Why:** `publish-dev.yml` runs on every push to `main` and tries to publish to Prismedia's GHCR; `ci.yml` runs on every push and would burn the private repo's Actions minutes. Prismedia's `AGENTS.md` also contains release/versioning/publishing rules that do not apply to Nitrate and would mislead agents.
 
-- [ ] **Step 1: Remove publishing workflows**
+- [x] **Step 1: Remove publishing workflows**
 
 ```bash
 git rm .github/workflows/publish-dev.yml .github/workflows/publish-channel.yml .github/workflows/documentation-site.yml
 ```
 
-- [ ] **Step 2: Make CI manual-only.** In `.github/workflows/ci.yml` replace exactly this block:
+- [x] **Step 2: Make CI manual-only.** In `.github/workflows/ci.yml` replace exactly this block:
 
 ```yaml
 on:
@@ -130,7 +130,7 @@ on:
 
 Verify: `ls .github/workflows` → `ci.yml  validate.yml`; `grep -n "^on:" -A 2 .github/workflows/*.yml` shows only `workflow_dispatch`.
 
-- [ ] **Step 3: Prepend Nitrate overrides to `AGENTS.md`.** Insert this block at the very top of `AGENTS.md`, above `# Prismedia Repository Contract`:
+- [x] **Step 3: Prepend Nitrate overrides to `AGENTS.md`.** Insert this block at the very top of `AGENTS.md`, above `# Prismedia Repository Contract`:
 
 ```markdown
 # Nitrate Overrides (read first)
@@ -166,7 +166,7 @@ overrides it.
 
 Verify: `head -3 CLAUDE.md` prints `# Nitrate Overrides (read first)` (proves the symlink still works).
 
-- [ ] **Step 4: Prepend Nitrate header to `README.md`.** Insert at the very top:
+- [x] **Step 4: Prepend Nitrate header to `README.md`.** Insert at the very top:
 
 ```markdown
 # Nitrate
@@ -183,9 +183,9 @@ Project docs: [`docs/nitrate/`](docs/nitrate/).
 
 ```
 
-- [ ] **Step 5: Update roadmap** — set M0 Status to `Done` in `docs/nitrate/ROADMAP.md`.
+- [x] **Step 5: Update roadmap** — set M0 Status to `Done` in `docs/nitrate/ROADMAP.md`.
 
-- [ ] **Step 6: Commit and push**
+- [x] **Step 6: Commit and push**
 
 ```bash
 git add -A
