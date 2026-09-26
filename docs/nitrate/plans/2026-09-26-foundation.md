@@ -407,7 +407,7 @@ Real-hardware verification of AMF is **Owner-verified** in Task 7's checklist �
 **Interfaces:**
 - Produces: the section headings below, in this order. Task 7 depends on §19; Task 8 depends on §10–§14 and §16.
 
-- [ ] **Step 1: Write sections 1–18** (the owner's list), with these starting points:
+- [x] **Step 1: Write sections 1–18** (the owner's list), with these starting points:
 
 | § | Topic | Start here |
 |---|-------|-----------|
@@ -430,7 +430,7 @@ Real-hardware verification of AMF is **Owner-verified** in Task 7's checklist �
 | 17 | Relevant licenses | Prismedia, vendored foliate-js, pdfjs-dist; Readest/BookOrbit (reference only) — link to `docs/THIRD_PARTY_LICENSES.md` |
 | 18 | Risks / limitations | include: foliate-js being vendored (upgrade path), CFI stability across re-scans/file changes, multi-user assumptions, anything that blocks native Windows |
 
-- [ ] **Step 2: Add §19 "Native Windows readiness".** Evidence-based checklist of anything that assumes Linux/Docker in runtime code or startup:
+- [x] **Step 2: Add §19 "Native Windows readiness".** Evidence-based checklist of anything that assumes Linux/Docker in runtime code or startup:
 
 ```bash
 grep -rnE "OperatingSystem\.IsLinux|/dev/|/tmp|/data\b|chmod|\"bash\"|\"sh\"|Path\.Combine\(\"/|inotify|Mono\.Unix" apps/backend/src --include='*.cs' | grep -v /Migrations/
@@ -439,9 +439,9 @@ grep -rnE "PRISMEDIA_[A-Z_]+" apps/backend/src --include='*.cs' -o | sort -u
 
 For each hit, say whether it breaks on Windows and the minimal fix. Also list every `PRISMEDIA_*` env var with its default and meaning (Task 7 needs this), and how the API finds the built web assets.
 
-- [ ] **Step 3: Add §20 "Proposed annotation system (summary)"** — one page: data model, EPUB locator choice, PDF locator choice, sync semantics, endpoints, frontend integration points. This is the summary Task 8 expands into a full plan.
+- [x] **Step 3: Add §20 "Proposed annotation system (summary)"** — one page: data model, EPUB locator choice, PDF locator choice, sync semantics, endpoints, frontend integration points. This is the summary Task 8 expands into a full plan.
 
-- [ ] **Step 4: Commit**
+- [x] **Step 4: Commit**
 
 ```bash
 git add docs/nitrate/ARCHITECTURE_ANALYSIS.md
