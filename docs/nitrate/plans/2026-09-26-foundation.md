@@ -537,7 +537,7 @@ git push origin main
 **Interfaces:**
 - Consumes: ARCHITECTURE_ANALYSIS §10–§14, §16, §20; VISION "Highlights", "Notes", "Progress Synchronization".
 
-- [ ] **Step 1: Write the plan** using the superpowers:writing-plans skill format (header, Global Constraints, file map, TDD tasks with real code). Scope is **exactly**:
+- [x] **Step 1: Write the plan** using the superpowers:writing-plans skill format (header, Global Constraints, file map, TDD tasks with real code). Scope is **exactly**:
   - Server: `Annotation` entity + EF migration (fields from VISION's `Annotation` shape: id, userId, bookId, locator, selectedText, surroundingText, type, color, note, createdAt, updatedAt; plus soft-delete `deletedAt` for sync), CRUD endpoints under a new route group, per-user authorization, OpenAPI + regenerated web client (`pnpm api:generate`).
   - Sync semantics: server is the source of truth; client fetches all annotations for a book on open and after focus/visibility change; last-write-wins on `updatedAt`; deletes are tombstones.
   - EPUB locator: CFI via the vendored foliate-js `epubcfi.js` unless §11/§16 found a better foliate-js mechanism; store a text-quote fallback (`selectedText` + `surroundingText`) to re-anchor if the CFI fails.
@@ -546,9 +546,9 @@ git push origin main
   - A Playwright e2e test: open an EPUB fixture, highlight, reload, highlight still there; second browser context (same user) sees it.
   - Owner-verified acceptance: highlight on Mac browser, see it on iPad.
 
-- [ ] **Step 2: Update roadmap** — M1 Status: `Done`; M3 Plan column: link to the new file; M3 Status: `Plan ready — awaiting owner review`.
+- [x] **Step 2: Update roadmap** — M1 Status: `Done`; M3 Plan column: link to the new file; M3 Status: `Plan ready — awaiting owner review`.
 
-- [ ] **Step 3: Commit, push, and stop**
+- [x] **Step 3: Commit, push, and stop**
 
 ```bash
 git add docs/nitrate
