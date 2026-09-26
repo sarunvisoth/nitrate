@@ -219,7 +219,8 @@
       rgba(7, 8, 11, 0.48) 68%,
       transparent
     );
-    padding: max(0.5rem, env(safe-area-inset-top)) 0.75rem 1.25rem;
+    padding: max(0.5rem, env(safe-area-inset-top)) max(0.75rem, env(safe-area-inset-right)) 1.25rem
+      max(0.75rem, env(safe-area-inset-left));
     backdrop-filter: blur(var(--glass-blur-sm));
     transition:
       opacity var(--duration-normal) var(--ease-mechanical),
@@ -242,7 +243,9 @@
     .reader-top-layer {
       border-bottom: 1px solid var(--color-border-default);
       background: var(--color-overlay-glass);
-      padding: 0.5rem 0.75rem;
+      /* Keep the notch/home-indicator margin on tablets too — this breakpoint only used to drop it. */
+      padding: max(0.5rem, env(safe-area-inset-top)) max(0.75rem, env(safe-area-inset-right)) 0.5rem
+        max(0.75rem, env(safe-area-inset-left));
     }
   }
 </style>
