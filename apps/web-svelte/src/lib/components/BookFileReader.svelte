@@ -106,9 +106,7 @@
     onRenameBookmark,
     onDeleteBookmark,
   }: Props = $props();
-
   const MIN_FONT = 80, MAX_FONT = 200;
-
   let shell = $state<ReturnType<typeof ReaderShell>>();
   let stageEl = $state<HTMLDivElement>();
   // The foliate `<foliate-view>` custom element has no published types; treat as a loose handle.
