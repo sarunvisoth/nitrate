@@ -49,6 +49,7 @@ export const appShellSections = [
       { label: "Books", href: "/books", icon: "book-open" },
       { label: "Comics", href: "/comics", icon: "book-copy" },
       { label: "eBooks", href: "/ebooks", icon: "book-marked" },
+      { label: "Annotations", href: "/annotations", icon: "highlighter" },
     ],
   },
   {

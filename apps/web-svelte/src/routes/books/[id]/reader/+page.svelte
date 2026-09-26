@@ -20,6 +20,7 @@
   import { ConsumptionActivityClock } from "$lib/entities/consumption-activity-clock";
   import { createUuid } from "$lib/utils/uuid";
   import { BookAnnotationStore } from "$lib/reader/book-annotation-store.svelte";
+  import { BookBookmarkStore } from "$lib/reader/book-bookmark-store.svelte";
   import { pdfPositionKey, remoteProgressToAdopt, type ProgressTarget } from "$lib/reader/progress-catch-up";
   import type { ReaderNotice } from "$lib/components/reader/reader-notice";
   import {
@@ -62,6 +63,7 @@
   let pdfLastCount = 0;
   let progressSaveQueue: Promise<void> = Promise.resolve();
   let annotationStore = $state.raw<BookAnnotationStore | null>(null);
+  let bookmarkStore = $state.raw<BookBookmarkStore | null>(null);
   let epubReader = $state<ReturnType<typeof BookFileReader>>();
   let pdfReader = $state<ReturnType<typeof PdfReader>>();
   let readerNotice = $state.raw<ReaderNotice | null>(null);
@@ -70,6 +72,7 @@
   // it saved itself, so a focus refresh only follows *other* devices (see progress-catch-up.ts).
   let progressSeenAt: string | null = null;
   const ownProgressPositions: string[] = [];
+  let lastSavedPositionKey: string | null = null;
   const OWN_POSITION_MEMORY = 64;
   let lastRemoteRefreshAt = 0;
   const REMOTE_REFRESH_THROTTLE_MS = 5_000;
@@ -126,6 +129,7 @@
     if (!force && now - lastRemoteRefreshAt < REMOTE_REFRESH_THROTTLE_MS) return;
     lastRemoteRefreshAt = now;
     void annotationStore?.refresh().catch(() => undefined);
+    void bookmarkStore?.refresh().catch(() => undefined);
     if (!force) void catchUpProgress().catch(() => undefined);
   }
 
@@ -135,11 +139,11 @@
   }
 
   /** Follows reading progress saved on another device while this reader was in the background. */
-  async function catchUpProgress() {
-    if (loadState !== "ready" || !book || !surface) return;
+  async function catchUpProgress(): Promise<boolean> {
+    if (loadState !== "ready" || !book || !surface) return false;
     const latest = await fetchEntity(book.id);
     const progress = getCapability(latest.capabilities, CAPABILITY_KIND.progress);
-    if (!progress) return;
+    if (!progress) return false;
     const isPdf = surface === "pdf";
     const target = remoteProgressToAdopt(
       { updatedAt: progress.updatedAt, location: progress.location, index: progress.index, total: progress.total },
@@ -152,7 +156,7 @@
       },
     );
     if (progress.updatedAt) progressSeenAt = progress.updatedAt;
-    if (!target) return;
+    if (!target) return false;
 
     const previous: ProgressTarget = isPdf
       ? { kind: "page", page: pdfLastPage }
@@ -169,6 +173,7 @@
       },
       onDismiss: dismissReaderNotice,
     });
+    return true;
   }
 
   async function moveReaderTo(target: ProgressTarget) {
@@ -196,11 +201,25 @@
   function queueReaderActivityHeartbeat(stop: boolean) {
     const activitySeconds = stop ? readerActivityClock.stop() : readerActivityClock.take();
     if (!activitySeconds || loadState !== "ready") return;
-    if (surface === "epub") {
-      void queueEpubSave(false, activitySeconds).catch(() => undefined);
-    } else if (surface === "pdf") {
-      void queuePdfSave(pdfLastPage, pdfLastCount, false, activitySeconds).catch(() => undefined);
+    const send = () => {
+      if (surface === "epub") {
+        void queueEpubSave(false, activitySeconds).catch(() => undefined);
+      } else if (surface === "pdf") {
+        void queuePdfSave(pdfLastPage, pdfLastCount, false, activitySeconds).catch(() => undefined);
+      }
+    };
+    // A heartbeat re-saves the current position. If this reader has not moved since its last save, another
+    // device may have saved a newer position meanwhile; follow it first instead of overwriting it with ours.
+    if (currentPositionKey() !== null && currentPositionKey() === lastSavedPositionKey) {
+      void catchUpProgress().catch(() => false).finally(send);
+      return;
     }
+    send();
+  }
+
+  function currentPositionKey(): string | null {
+    if (surface === "pdf") return pdfPositionKey(pdfLastPage);
+    return surface === "epub" ? epubSaveLocation : null;
   }
 
   async function loadReader(url: URL) {
@@ -229,6 +248,7 @@
       if (format === BOOK_FORMAT.epub) {
         loadEpubState(nextBook, nextContext);
         annotationStore = new BookAnnotationStore(nextBook.id);
+        bookmarkStore = new BookBookmarkStore(nextBook.id);
       } else loadPdfState(nextBook, nextContext);
       loadState = "ready";
       refreshRemoteState(true);
@@ -285,7 +305,8 @@
     activitySeconds = readerActivityClock.take(),
   ) {
     if (!book) return;
-    if (epubSaveLocation) rememberOwnPosition(epubSaveLocation);
+    const savedLocation = epubSaveLocation;
+    if (savedLocation) rememberOwnPosition(savedLocation);
     const index = Math.max(0, Math.min(10_000, Math.round(epubSaveFraction * 10_000)));
     await updateEntityProgress(book.id, {
       currentEntityId: book.id,
@@ -293,11 +314,12 @@
       index,
       total: 10_000,
       mode: epubFlowMode === "scrolled" ? READER_MODE.scrolled : READER_MODE.paged,
-      location: epubSaveLocation,
+      location: savedLocation,
       completed: completed ? true : null,
       activitySeconds,
       activityKind: activitySeconds ? CONSUMPTION_ACTIVITY_KIND.reading : undefined,
     });
+    lastSavedPositionKey = savedLocation;
   }
 
   function queueEpubSave(completed = false, activitySeconds?: number | null) {
@@ -315,7 +337,8 @@
     activitySeconds = readerActivityClock.take(),
   ) {
     if (!book || pageCount <= 0) return;
-    rememberOwnPosition(pdfPositionKey(clampPageIndex(pageIndex, pageCount)));
+    const savedKey = pdfPositionKey(clampPageIndex(pageIndex, pageCount));
+    rememberOwnPosition(savedKey);
     await updateEntityProgress(book.id, {
       currentEntityId: book.id,
       unit: PROGRESS_UNIT.page,
@@ -326,6 +349,7 @@
       activitySeconds,
       activityKind: activitySeconds ? CONSUMPTION_ACTIVITY_KIND.reading : undefined,
     });
+    lastSavedPositionKey = savedKey;
   }
 
   function queuePdfSave(
@@ -430,6 +454,10 @@
     onCreateAnnotation={annotationStore ? (draft) => annotationStore?.create(draft) : undefined}
     onUpdateAnnotation={(annotation) => annotationStore?.update(annotation)}
     onDeleteAnnotation={(annotation) => annotationStore?.remove(annotation)}
+    bookmarks={bookmarkStore?.visible}
+    onAddBookmark={bookmarkStore ? (page) => bookmarkStore?.add(page) : undefined}
+    onRenameBookmark={(bookmark, label) => bookmarkStore?.rename(bookmark, label)}
+    onDeleteBookmark={(bookmark) => bookmarkStore?.remove(bookmark)}
     onClose={() => void closeReader()}
   />
 {:else}

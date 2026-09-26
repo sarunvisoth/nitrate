@@ -22,6 +22,8 @@ import type {
   AcquisitionSummary,
   AcquisitionTransferView,
   AdminSetPasswordRequest,
+  AnnotationLibraryBooksResponse,
+  AnnotationLibraryResponse,
   ApiProblem,
   ApplyIdentifyProposalRequest,
   ApplyIdentifyQueueItemRequest,
@@ -30,6 +32,8 @@ import type {
   BookAcquisitionProfileView,
   BookAnnotation,
   BookAnnotationsResponse,
+  BookBookmark,
+  BookBookmarksResponse,
   BookChapterMappingsResponse,
   BookContentsResponse,
   BrowseLibraryPathParams,
@@ -66,6 +70,7 @@ import type {
   DatabaseRestoreScheduledResponse,
   DatabaseRestoreStatusResponse,
   DeleteBookAnnotationParams,
+  DeleteBookBookmarkParams,
   DeleteEntityParams,
   DeleteFileParams,
   DownloadClientSaveRequest,
@@ -97,6 +102,7 @@ import type {
   EntityThumbnailBatchRequest,
   EntityThumbnailBatchResponse,
   ExcludeFileParams,
+  ExportAnnotationLibraryParams,
   FileArchivePreparation,
   FileArchiveRequest,
   FileChildrenResponse,
@@ -162,6 +168,7 @@ import type {
   LibraryRootSummary,
   LibraryRootUpdateRequest,
   ListAcquisitionHistoryParams,
+  ListAnnotationLibraryParams,
   ListAudioLibrariesParams,
   ListAudioTracksParams,
   ListBookAuthorsParams,
@@ -256,6 +263,7 @@ import type {
   UpdateOwnProfileRequest,
   UploadAcquisitionTorrentBody,
   UpsertBookAnnotationRequest,
+  UpsertBookBookmarkRequest,
   UserCreateRequest,
   UserLibraryAccessUpdateRequest,
   UserResponse,
@@ -4703,6 +4711,160 @@ export const deleteBookAnnotation = async (id: string,
 
 
 
+export type listBookBookmarksResponse200 = {
+  data: BookBookmarksResponse
+  status: 200
+}
+
+export type listBookBookmarksResponse404 = {
+  data: ApiProblem
+  status: 404
+}
+
+export type listBookBookmarksResponseSuccess = (listBookBookmarksResponse200) & {
+  headers: Headers;
+};
+export type listBookBookmarksResponseError = (listBookBookmarksResponse404) & {
+  headers: Headers;
+};
+
+export type listBookBookmarksResponse = (listBookBookmarksResponseSuccess | listBookBookmarksResponseError)
+
+export const getListBookBookmarksUrl = (id: string,) => {
+
+
+
+
+  return `/api/books/${id}/bookmarks`
+}
+
+/**
+ * @summary List the current user's bookmarks for a Book, including deleted tombstones.
+ */
+export const listBookBookmarks = async (id: string, options?: RequestInit): Promise<listBookBookmarksResponse> => {
+
+  return orvalFetch<listBookBookmarksResponse>(getListBookBookmarksUrl(id),
+  {
+    ...options,
+    method: 'GET'
+
+
+  }
+);}
+
+
+
+export type upsertBookBookmarkResponse200 = {
+  data: BookBookmark
+  status: 200
+}
+
+export type upsertBookBookmarkResponse400 = {
+  data: ApiProblem
+  status: 400
+}
+
+export type upsertBookBookmarkResponse404 = {
+  data: ApiProblem
+  status: 404
+}
+
+export type upsertBookBookmarkResponseSuccess = (upsertBookBookmarkResponse200) & {
+  headers: Headers;
+};
+export type upsertBookBookmarkResponseError = (upsertBookBookmarkResponse400 | upsertBookBookmarkResponse404) & {
+  headers: Headers;
+};
+
+export type upsertBookBookmarkResponse = (upsertBookBookmarkResponseSuccess | upsertBookBookmarkResponseError)
+
+export const getUpsertBookBookmarkUrl = (id: string,
+    bookmarkId: string,) => {
+
+
+
+
+  return `/api/books/${id}/bookmarks/${bookmarkId}`
+}
+
+/**
+ * @summary Create or update one bookmark; the write with the newest updatedAt wins.
+ */
+export const upsertBookBookmark = async (id: string,
+    bookmarkId: string,
+    upsertBookBookmarkRequest: UpsertBookBookmarkRequest, options?: RequestInit): Promise<upsertBookBookmarkResponse> => {
+
+  return orvalFetch<upsertBookBookmarkResponse>(getUpsertBookBookmarkUrl(id,bookmarkId),
+  {
+    ...options,
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json', ...options?.headers },
+    body: JSON.stringify(
+      upsertBookBookmarkRequest,)
+  }
+);}
+
+
+
+export type deleteBookBookmarkResponse200 = {
+  data: BookBookmark
+  status: 200
+}
+
+export type deleteBookBookmarkResponse400 = {
+  data: ApiProblem
+  status: 400
+}
+
+export type deleteBookBookmarkResponse404 = {
+  data: ApiProblem
+  status: 404
+}
+
+export type deleteBookBookmarkResponseSuccess = (deleteBookBookmarkResponse200) & {
+  headers: Headers;
+};
+export type deleteBookBookmarkResponseError = (deleteBookBookmarkResponse400 | deleteBookBookmarkResponse404) & {
+  headers: Headers;
+};
+
+export type deleteBookBookmarkResponse = (deleteBookBookmarkResponseSuccess | deleteBookBookmarkResponseError)
+
+export const getDeleteBookBookmarkUrl = (id: string,
+    bookmarkId: string,
+    params: DeleteBookBookmarkParams,) => {
+  const normalizedParams = new URLSearchParams();
+
+  Object.entries(params || {}).forEach(([key, value]) => {
+
+    if (value !== undefined) {
+      normalizedParams.append(key, value === null ? 'null' : value.toString())
+    }
+  });
+
+  const stringifiedParams = normalizedParams.toString();
+
+  return stringifiedParams.length > 0 ? `/api/books/${id}/bookmarks/${bookmarkId}?${stringifiedParams}` : `/api/books/${id}/bookmarks/${bookmarkId}`
+}
+
+/**
+ * @summary Tombstone one bookmark; the write with the newest updatedAt wins.
+ */
+export const deleteBookBookmark = async (id: string,
+    bookmarkId: string,
+    params: DeleteBookBookmarkParams, options?: RequestInit): Promise<deleteBookBookmarkResponse> => {
+
+  return orvalFetch<deleteBookBookmarkResponse>(getDeleteBookBookmarkUrl(id,bookmarkId,params),
+  {
+    ...options,
+    method: 'DELETE'
+
+
+  }
+);}
+
+
+
 export type listBookAuthorsResponse200 = {
   data: EntityListResponse
   status: 200
@@ -4798,6 +4960,142 @@ export const getBookAuthorPatch = async (id: string,
     headers: { 'Content-Type': 'application/json', ...options?.headers },
     body: JSON.stringify(
       entityMetadataUpdateRequest,)
+  }
+);}
+
+
+
+export type listAnnotationLibraryResponse200 = {
+  data: AnnotationLibraryResponse
+  status: 200
+}
+
+export type listAnnotationLibraryResponse400 = {
+  data: ApiProblem
+  status: 400
+}
+
+export type listAnnotationLibraryResponseSuccess = (listAnnotationLibraryResponse200) & {
+  headers: Headers;
+};
+export type listAnnotationLibraryResponseError = (listAnnotationLibraryResponse400) & {
+  headers: Headers;
+};
+
+export type listAnnotationLibraryResponse = (listAnnotationLibraryResponseSuccess | listAnnotationLibraryResponseError)
+
+export const getListAnnotationLibraryUrl = (params?: ListAnnotationLibraryParams,) => {
+  const normalizedParams = new URLSearchParams();
+
+  Object.entries(params || {}).forEach(([key, value]) => {
+
+    if (value !== undefined) {
+      normalizedParams.append(key, value === null ? 'null' : value.toString())
+    }
+  });
+
+  const stringifiedParams = normalizedParams.toString();
+
+  return stringifiedParams.length > 0 ? `/api/annotations?${stringifiedParams}` : `/api/annotations`
+}
+
+/**
+ * @summary Search the current user's highlights and notes across every visible book.
+ */
+export const listAnnotationLibrary = async (params?: ListAnnotationLibraryParams, options?: RequestInit): Promise<listAnnotationLibraryResponse> => {
+
+  return orvalFetch<listAnnotationLibraryResponse>(getListAnnotationLibraryUrl(params),
+  {
+    ...options,
+    method: 'GET'
+
+
+  }
+);}
+
+
+
+export type listAnnotationLibraryBooksResponse200 = {
+  data: AnnotationLibraryBooksResponse
+  status: 200
+}
+
+export type listAnnotationLibraryBooksResponseSuccess = (listAnnotationLibraryBooksResponse200) & {
+  headers: Headers;
+};
+;
+
+export type listAnnotationLibraryBooksResponse = (listAnnotationLibraryBooksResponseSuccess)
+
+export const getListAnnotationLibraryBooksUrl = () => {
+
+
+
+
+  return `/api/annotations/books`
+}
+
+/**
+ * @summary List every book the current user has highlighted, with highlight and note counts.
+ */
+export const listAnnotationLibraryBooks = async ( options?: RequestInit): Promise<listAnnotationLibraryBooksResponse> => {
+
+  return orvalFetch<listAnnotationLibraryBooksResponse>(getListAnnotationLibraryBooksUrl(),
+  {
+    ...options,
+    method: 'GET'
+
+
+  }
+);}
+
+
+
+export type exportAnnotationLibraryResponse200 = {
+  data: void
+  status: 200
+}
+
+export type exportAnnotationLibraryResponse400 = {
+  data: ApiProblem
+  status: 400
+}
+
+export type exportAnnotationLibraryResponseSuccess = (exportAnnotationLibraryResponse200) & {
+  headers: Headers;
+};
+export type exportAnnotationLibraryResponseError = (exportAnnotationLibraryResponse400) & {
+  headers: Headers;
+};
+
+export type exportAnnotationLibraryResponse = (exportAnnotationLibraryResponseSuccess | exportAnnotationLibraryResponseError)
+
+export const getExportAnnotationLibraryUrl = (params: ExportAnnotationLibraryParams,) => {
+  const normalizedParams = new URLSearchParams();
+
+  Object.entries(params || {}).forEach(([key, value]) => {
+
+    if (value !== undefined) {
+      normalizedParams.append(key, value === null ? 'null' : value.toString())
+    }
+  });
+
+  const stringifiedParams = normalizedParams.toString();
+
+  return stringifiedParams.length > 0 ? `/api/annotations/export?${stringifiedParams}` : `/api/annotations/export`
+}
+
+/**
+ * @summary Download the current user's highlights and notes as Markdown, JSON, or CSV.
+ */
+export const exportAnnotationLibrary = async (params: ExportAnnotationLibraryParams, options?: RequestInit): Promise<exportAnnotationLibraryResponse> => {
+
+  return orvalFetch<exportAnnotationLibraryResponse>(getExportAnnotationLibraryUrl(params),
+  {
+    ...options,
+    method: 'GET'
+
+
   }
 );}
 

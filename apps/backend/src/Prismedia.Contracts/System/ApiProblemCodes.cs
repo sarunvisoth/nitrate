@@ -142,6 +142,9 @@ public static class ApiProblemCodes {
     /// <summary>Problem code <c>invalid_book_annotation</c>.</summary>
     public const string InvalidBookAnnotation = "invalid_book_annotation";
 
+    /// <summary>Problem code <c>invalid_book_bookmark</c>.</summary>
+    public const string InvalidBookBookmark = "invalid_book_bookmark";
+
     /// <summary>Problem code <c>invalid_entity</c>.</summary>
     public const string InvalidEntity = "invalid_entity";
 

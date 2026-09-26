@@ -6,6 +6,8 @@
   import {
     AlertTriangle,
     BookOpen,
+    Bookmark,
+    BookmarkCheck,
     ChevronLeft,
     ChevronRight,
     List,
@@ -22,12 +24,16 @@
     type ReaderSelectionAction,
   } from "$lib/components/reader/ReaderSelectionMenu.svelte";
   import AnnotationEditor from "$lib/components/reader/AnnotationEditor.svelte";
+  import ReaderBookmarkList from "$lib/components/reader/ReaderBookmarkList.svelte";
   import type { ReaderNotice } from "$lib/components/reader/reader-notice";
   import { ANNOTATION_COLOR, type AnnotationColorCode } from "$lib/api/generated/codes";
-  import type { BookAnnotation } from "$lib/api/generated/model";
+  import type { BookAnnotation, BookBookmark } from "$lib/api/generated/model";
   import type { AnnotationDraft } from "$lib/reader/annotation-sync";
   import { ANNOTATION_COLOR_ORDER, annotationColorPaint } from "$lib/reader/annotation-colors";
   import { selectionAnchorRect, textQuoteFor } from "$lib/reader/epub-selection";
+  import { bookmarkOnPage, pageStartLocator } from "$lib/reader/bookmark-page";
+  import { findTextQuote, sameQuotedText } from "$lib/reader/annotation-reanchor";
+  import type { BookmarkPage } from "$lib/reader/book-bookmark-store.svelte";
 
   type ReaderFlow = "paginated" | "scrolled";
 
@@ -65,6 +71,11 @@
     onDeleteAnnotation?: (annotation: BookAnnotation) => void;
     /** Non-blocking notice shown over the reader. */
     notice?: ReaderNotice | null;
+    /** Bookmarks to list (already filtered to non-deleted). Omit to disable bookmarks. */
+    bookmarks?: readonly BookBookmark[];
+    onAddBookmark?: (page: BookmarkPage) => void;
+    onRenameBookmark?: (bookmark: BookBookmark, label: string) => void;
+    onDeleteBookmark?: (bookmark: BookBookmark) => void;
   }
 
   let {
@@ -85,6 +96,10 @@
     onUpdateAnnotation,
     onDeleteAnnotation,
     notice = null,
+    bookmarks,
+    onAddBookmark,
+    onRenameBookmark,
+    onDeleteBookmark,
   }: Props = $props();
 
   const MIN_FONT = 80;
@@ -195,6 +210,7 @@
     const fraction = typeof detail.fraction === "number" ? detail.fraction : 0;
     const cfi = typeof detail.cfi === "string" ? detail.cfi : null;
     const label = detail.tocItem?.label?.trim() || null;
+    currentPage = { cfi, fraction, label, index: currentSectionIndex() };
     lastFraction = fraction;
     atEnd = fraction >= 0.999;
     counterLabel = `${Math.round(fraction * 100)}%${label ? ` · ${label}` : ""}`;
@@ -374,9 +390,61 @@
 
   function handleCreateOverlay(event: Event) {
     const index = (event as CustomEvent).detail?.index;
-    for (const item of annotations ?? []) {
-      if (Number(item.spineIndex) === index) void drawAnnotation(item.locator, item.color);
+    // foliate registers the new section's overlayer right after emitting this event; draw on the next tick.
+    setTimeout(() => {
+      for (const item of annotations ?? []) {
+        if (Number(item.spineIndex) === index) void drawVerified(item);
+      }
+    }, 0);
+  }
+
+  const repairedThisSession = new Set<string>();
+
+  function sectionDocument(index: number): Document | null {
+    try {
+      const contents = view?.renderer?.getContents?.() ?? [];
+      return contents.find((entry: { index?: number }) => entry.index === index)?.doc ?? null;
+    } catch {
+      return null;
     }
+  }
+
+  /**
+   * Draws a highlight only where its CFI still covers the highlighted text. If the book's file changed and the
+   * CFI now points elsewhere (or nowhere), re-find the text quote in that section; when found, draw it there and
+   * save the repaired CFI (once per session per highlight). When the text is gone, leave it undrawn.
+   */
+  async function drawVerified(annotation: BookAnnotation) {
+    const index = Number(annotation.spineIndex);
+    const doc = sectionDocument(index);
+    if (!doc) return; // section not loaded; `create-overlay` draws it when it is
+    let range: Range | null = null;
+    try {
+      const resolved = view?.resolveCFI?.(annotation.locator);
+      if (resolved?.index === index) range = resolved.anchor(doc) ?? null;
+    } catch {
+      range = null;
+    }
+    if (range && sameQuotedText(range.toString(), annotation.selectedText)) {
+      await drawAnnotation(annotation.locator, annotation.color);
+      return;
+    }
+    if (repairedThisSession.has(annotation.id)) return;
+    const found = findTextQuote(doc, annotation);
+    if (!found) return;
+    let repaired: string;
+    try {
+      repaired = view.getCFI(index, found);
+    } catch {
+      return;
+    }
+    repairedThisSession.add(annotation.id);
+    if (repaired === annotation.locator) {
+      await drawAnnotation(annotation.locator, annotation.color);
+      return;
+    }
+    // Saving the repaired locator updates `annotations`, which redraws it through `syncDrawnAnnotations`.
+    onUpdateAnnotation?.({ ...annotation, locator: repaired });
   }
 
   function handleShowAnnotation(event: Event) {
@@ -405,6 +473,7 @@
   }
 
   function syncDrawnAnnotations(items: readonly BookAnnotation[]) {
+    const byId = new Map(items.map((item) => [item.id, item]));
     const next = new Map(items.map((item) => [item.id, { locator: item.locator, color: item.color }]));
     for (const [id, previous] of drawn) {
       const current = next.get(id);
@@ -416,7 +485,7 @@
     for (const [id, current] of next) {
       const previous = drawn.get(id);
       if (!previous || previous.color !== current.color || previous.locator !== current.locator) {
-        void drawAnnotation(current.locator, current.color);
+        void drawVerified(byId.get(id)!);
         drawn.set(id, current);
       }
     }
@@ -429,6 +498,49 @@
 
   function closeEditor() {
     editing = null;
+  }
+
+  // ── Bookmarks ───────────────────────────────────────────────────────────────
+  let currentPage = $state<{ cfi: string | null; fraction: number; label: string | null; index: number | null }>({
+    cfi: null,
+    fraction: 0,
+    label: null,
+    index: null,
+  });
+  const bookmarksEnabled = $derived(Boolean(bookmarks && onAddBookmark) && !isFixedLayout);
+  const pageBookmark = $derived(bookmarkOnPage(bookmarks ?? [], currentPage.cfi));
+
+  function currentSectionIndex(): number | null {
+    try {
+      const index = view?.renderer?.getContents?.()?.[0]?.index;
+      return typeof index === "number" ? index : null;
+    } catch {
+      return null;
+    }
+  }
+
+  function toggleBookmark() {
+    if (pageBookmark) {
+      onDeleteBookmark?.(pageBookmark);
+      return;
+    }
+    const locator = pageStartLocator(currentPage.cfi);
+    if (!locator) return;
+    onAddBookmark?.({
+      locator,
+      spineIndex: currentPage.index ?? 0,
+      position: Math.max(0, Math.min(1, currentPage.fraction)),
+      chapterLabel: currentPage.label,
+    });
+  }
+
+  function openBookmark(bookmark: BookBookmark) {
+    tocOpen = false;
+    try {
+      void view?.goTo?.(bookmark.locator);
+    } catch {
+      // unresolvable locator (file changed): stay put
+    }
   }
 
   // Comic-style gesture overlay (paged mode only). foliate columnizes the page into a single
@@ -591,7 +703,23 @@
     {#if companionControls}
       {@render companionControls()}
     {/if}
-    {#if hasToc}
+    {#if bookmarksEnabled}
+      <Button variant="outline" size="sm"
+        type="button"
+        onclick={toggleBookmark}
+        aria-pressed={Boolean(pageBookmark)}
+        class="aria-pressed:bg-accent aria-pressed:text-accent-foreground"
+        aria-label={pageBookmark ? "Remove bookmark" : "Bookmark this page"}
+        title={pageBookmark ? "Remove bookmark" : "Bookmark this page"}
+      >
+        {#if pageBookmark}
+          <BookmarkCheck class="h-4 w-4" />
+        {:else}
+          <Bookmark class="h-4 w-4" />
+        {/if}
+      </Button>
+    {/if}
+    {#if hasToc || bookmarksEnabled}
       <Button variant="outline" size="sm"
         type="button"
         onclick={() => (tocOpen = true)}
@@ -741,9 +869,23 @@
   </div>
 </ReaderShell>
 
-<ReaderContentsSheet open={tocOpen} onClose={() => tocOpen = false}>
+<ReaderContentsSheet
+  open={tocOpen}
+  onClose={() => tocOpen = false}
+  bookmarks={bookmarksEnabled ? bookmarkItems : undefined}
+  bookmarkCount={bookmarks?.length ?? 0}
+>
   {@render tocItems(toc, 0)}
 </ReaderContentsSheet>
+
+{#snippet bookmarkItems()}
+  <ReaderBookmarkList
+    bookmarks={bookmarks ?? []}
+    onOpen={openBookmark}
+    onRename={(bookmark, label) => onRenameBookmark?.(bookmark, label)}
+    onDelete={(bookmark) => onDeleteBookmark?.(bookmark)}
+  />
+{/snippet}
 
 {#snippet tocItems(items: TocEntry[], depth: number)}
   {#each items as entry (entry.label + (entry.href ?? ""))}

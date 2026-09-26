@@ -391,6 +391,15 @@ export const ANNOTATION_COLOR = {
 
 export type AnnotationColorCode = (typeof ANNOTATION_COLOR)[keyof typeof ANNOTATION_COLOR];
 
+// source: enum AnnotationExportFormat
+export const ANNOTATION_EXPORT_FORMAT = {
+  markdown: "markdown",
+  json: "json",
+  csv: "csv",
+} as const;
+
+export type AnnotationExportFormatCode = (typeof ANNOTATION_EXPORT_FORMAT)[keyof typeof ANNOTATION_EXPORT_FORMAT];
+
 // source: enum AnnotationLocatorKind
 export const ANNOTATION_LOCATOR_KIND = {
   epubCfi: "epub-cfi",
@@ -1639,6 +1648,7 @@ export const PROBLEM_CODE = {
   indexerInvalid: "indexer_invalid",
   indexerUnreachable: "indexer_unreachable",
   invalidBookAnnotation: "invalid_book_annotation",
+  invalidBookBookmark: "invalid_book_bookmark",
   invalidBookChapterMapping: "invalid_book_chapter_mapping",
   invalidCollection: "invalid_collection",
   invalidCollectionItems: "invalid_collection_items",

@@ -3,3 +3,4 @@
 // resolves; the `<foliate-view>` element is used through a loose runtime handle.
 declare module "$lib/vendor/foliate-js/view.js";
 declare module "$lib/vendor/foliate-js/overlayer.js";
+declare module "$lib/vendor/foliate-js/epubcfi.js";

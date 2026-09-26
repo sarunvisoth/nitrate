@@ -1062,6 +1062,14 @@ The Prismedia config keys can also be set in the standard .NET env form (e.g. `P
 >   `components/reader/ReaderSelectionMenu.svelte` + `AnnotationEditor.svelte`, `BookFileReader.svelte`, and
 >   `routes/books/[id]/reader/+page.svelte`.
 > - E2E: `e2e/reader-annotations.spec.ts`.
+>
+> **Extended in M4 (2026-09-26):**
+> - Bookmarks (`book_bookmarks`, `/api/books/{id}/bookmarks`, `EfBookBookmarkService`).
+> - The cross-library read side, `/api/annotations` (list, books, export; `EfAnnotationLibraryService`,
+>   `AnnotationExportWriter`).
+> - Client-side highlight re-anchoring (`lib/reader/annotation-reanchor.ts`).
+> - The `/annotations` page (`components/annotations/AnnotationLibrary.svelte`).
+> - Heartbeat-safe progress sync. See `plans/2026-09-26-m4-bookmarks-annotations-export.md`.
 
 This summarises the design that `docs/nitrate/plans/2026-09-26-m3-reader-slice-1.md` expands into tasks. It rests on
 §11, §13, §14 and §16, and on the product intent in `docs/nitrate/VISION.md` ("Highlights", "Notes", "Progress
