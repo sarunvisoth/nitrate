@@ -202,7 +202,7 @@ git push origin main
 **Interfaces:**
 - Produces: `BASELINE.md` with sections `## Toolchain`, `## Test baseline`, `## Running locally`. Tasks 4–7 compare against the test baseline; a test that already failed here is not a regression.
 
-- [ ] **Step 1: Toolchain.** Install whatever is missing and record versions:
+- [x] **Step 1: Toolchain.** Install whatever is missing and record versions:
 
 ```bash
 dotnet --version || (curl -sSL https://dot.net/v1/dotnet-install.sh | bash -s -- --channel 10.0 && export PATH="$HOME/.dotnet:$PATH")
@@ -212,7 +212,7 @@ ffmpeg -version | head -1    # install via apt if missing: sudo apt-get install 
 psql --version               # PostgreSQL 16 if integration tests or a local run need it
 ```
 
-- [ ] **Step 2: Install and run the suites**
+- [x] **Step 2: Install and run the suites**
 
 ```bash
 pnpm install --frozen-lockfile
@@ -223,9 +223,9 @@ pnpm test:backend
 
 Record pass/fail counts for each in `BASELINE.md`. If a suite fails before any Nitrate code change, record the failing test names and the error — **do not fix them** in this task.
 
-- [ ] **Step 3: Try a local run** (API + worker + web). Read `docs/nix-development.md`, `infra/docker/docker-compose.yml`, and `apps/backend/src/Prismedia.Api/appsettings*.json` to find the required config (database connection string, `PRISMEDIA_DATA_DIR`, `PRISMEDIA_CACHE_DIR`, ffmpeg paths, port — README says `8008`). Start Postgres, then `pnpm dev:api`, `pnpm dev:worker`, `pnpm dev`. Record in `## Running locally` the exact env vars and commands that worked, or exactly where it failed. A failed local run in the cloud sandbox is acceptable; record it and continue.
+- [x] **Step 3: Try a local run** (API + worker + web). Read `docs/nix-development.md`, `infra/docker/docker-compose.yml`, and `apps/backend/src/Prismedia.Api/appsettings*.json` to find the required config (database connection string, `PRISMEDIA_DATA_DIR`, `PRISMEDIA_CACHE_DIR`, ffmpeg paths, port — README says `8008`). Start Postgres, then `pnpm dev:api`, `pnpm dev:worker`, `pnpm dev`. Record in `## Running locally` the exact env vars and commands that worked, or exactly where it failed. A failed local run in the cloud sandbox is acceptable; record it and continue.
 
-- [ ] **Step 4: Commit**
+- [x] **Step 4: Commit**
 
 ```bash
 git add docs/nitrate/BASELINE.md
