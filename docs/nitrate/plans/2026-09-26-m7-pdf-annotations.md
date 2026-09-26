@@ -73,12 +73,11 @@ Spec: [VISION.md](../VISION.md) "PDF Reader".
       declarative rect-positioning wrapper over `parsePdfLocator` (already unit-tested) and
       `annotationColorPaint` (already covered by existing annotation-colors tests); a mount test was not
       added given time spent on the higher-value gap below. Not ticked as fully covered for that reason.
-- [ ] Playwright e2e: `e2e/fixtures/make-annotation-pdf.py` (deterministic tiny multi-page PDF fixture,
+- [x] Playwright e2e: `e2e/fixtures/make-annotation-pdf.py` (deterministic tiny multi-page PDF fixture,
       hand-built PDF bytes, stdlib only) + `reader-pdf-annotations.spec.ts` (4 tests: highlight/reload,
-      bookmark, search-and-navigate, dashboard page number) are written, and the fixture itself is verified
-      (parses with pdf.js in Node: 3 pages, real extractable text, correct title). **Left unticked: the spec
-      cannot be run to a pass/fail verdict in this sandbox** — see "Gaps" below for why (a `pdfjs-dist`
-      6.0.227 vs. this Chromium build incompatibility, not an M7 code defect).
+      bookmark, search-and-navigate, dashboard page number). Passes 4/4 with `--workers=1` after switching
+      `PdfReader.svelte` to pdf.js's legacy build (see "Gaps" below) and fixing a text-layer-render race in
+      the `selectOnPage` test helper.
 - [x] `docs/nitrate/ROADMAP.md` M7 row updated.
 
 ## Files
@@ -102,7 +101,7 @@ Spec: [VISION.md](../VISION.md) "PDF Reader".
 - `pnpm api:check` (orval drift check)
 - Playwright: `reader-annotations`, `reader-bookmarks-and-library`, `reader-lookups`,
   `reader-settings-vocabulary` (existing EPUB specs, regression check — all pass) and
-  `reader-pdf-annotations` (new; blocked in this sandbox, see Gaps).
+  `reader-pdf-annotations` (new; 4/4 pass, see Gaps for the legacy-build fix that made it possible).
 
 ## Owner-verified checklist
 
@@ -111,10 +110,6 @@ Spec: [VISION.md](../VISION.md) "PDF Reader".
       highlight interplay was not exercised beyond code review).
 - [ ] Manual check that `pnpm api:generate`'s regenerated `codes.ts`/orval client matches what ships (regenerated
       here against a local dev API instance; verify no drift against the owner's copy).
-- [ ] Run `reader-pdf-annotations.spec.ts` on a real Chromium/machine (this sandbox's pinned Playwright
-      Chromium 141.0.7390.37 cannot render any PDF via `pdfjs-dist@6.0.227` — `Map.prototype.getOrInsertComputed`
-      is missing from its V8, unrelated to this milestone's code) and confirm the 4 PDF reader flows actually
-      pass end to end.
 
 ## As-built notes / gaps
 
@@ -124,23 +119,34 @@ Spec: [VISION.md](../VISION.md) "PDF Reader".
   search UI was removed and replaced by `PdfSearchPanel.svelte` + `pdf-text-search.ts`, offsetting most of
   the new annotation/bookmark/theme wiring). `BookFileReader.svelte`: 999 → 979 lines (net *smaller*, from
   deduplicating the highlight-colour helpers into `annotation-colors.ts`).
-- **Gap — PDF e2e spec cannot be run to a verdict in this sandbox.** `reader-pdf-annotations.spec.ts` and its
-  fixture (`e2e/fixtures/make-annotation-pdf.py` → `tests/fixtures/media/books-pdf/nitrate-pdf-annotation-fixture.pdf`,
-  its own library root so it gets a fresh scan) are written and the fixture itself is verified (parses with
-  pdf.js in Node: 3 pages, real extractable text, correct `/Info` title). Running the spec against the real
-  app in this session's Playwright Chromium build (`/opt/pw-browsers/chromium`, Chromium 141.0.7390.37)
-  fails *before any of this milestone's code runs*: `pdfjs-dist@6.0.227`'s own `WorkerTransport.render()` path
-  calls `Map.prototype.getOrInsertComputed`, which does not exist in this Chromium build's V8 (confirmed via
-  `--js-flags=--help`: no such flag exists to enable it, harmony or otherwise) — so `page.render()` throws for
-  every page, no canvas or text layer ever appears, in this environment, for *any* PDF, not just this
-  feature's. This blocks e2e verification of PDF rendering generally (the milestone's own new code — locator
-  build/parse, rect selection math, search, dashboard "p. N" — is separately covered by backend/vitest unit
-  tests, which do not depend on real PDF rendering). The 4 pre-existing EPUB reader specs
-  (`reader-annotations`, `reader-bookmarks-and-library`, `reader-lookups`, `reader-settings-vocabulary`) were
-  re-run in full and all 8 tests pass, so this is isolated to PDF rendering, not a general browser or app
-  regression. **Owner-verified item**: run `reader-pdf-annotations.spec.ts` on a real machine/Chromium (or an
-  updated Playwright browser revision) to get an actual pass/fail; if it still fails there, it points at a
-  genuine `pdfjs-dist` compatibility gap worth its own investigation rather than an M7 code defect.
+- **Fixed — real product bug, not just a sandbox quirk.** The first pass of this milestone found
+  `reader-pdf-annotations.spec.ts` couldn't render any PDF in this session's Playwright Chromium (141.0.7390.37):
+  `pdfjs-dist@6.0.227`'s own `WorkerTransport.render()` path calls `Map.prototype.getOrInsertComputed`, which
+  that Chromium's V8 doesn't have. That is not sandbox-only — it affects *any* browser (older iPad Safari,
+  a not-yet-updated Chrome/Edge) that hasn't shipped this very new `Map` method, so real users could hit a
+  silently-broken PDF reader. Fix: `PdfReader.svelte` now imports `pdfjs-dist/legacy/build/pdf.mjs` and
+  `pdfjs-dist/legacy/build/pdf.worker.min.mjs?url` instead of the non-legacy build — the legacy build bundles
+  a core-js polyfill for `getOrInsertComputed` (and other very-recent JS features pdf.js's own code assumes),
+  so it renders correctly regardless of the runtime's native support. `pdfjs-dist.d.ts`'s ambient module
+  declarations were updated to the new import paths. No vitest mocks referenced the old path (PdfReader's pdf.js
+  usage isn't unit-tested directly; the extracted `pdf-locator`/`pdf-selection`/`pdf-text-search` modules don't
+  import pdfjs-dist at all), so nothing else needed to change.
+- **`reader-pdf-annotations.spec.ts` now passes end to end** against the legacy build (4/4, `--workers=1`,
+  ~27s total): highlight-and-reload, bookmark, search-and-navigate, and the annotations dashboard showing
+  "p. 1". Fixing it also surfaced one real test-helper bug: `selectOnPage` in `e2e/reader-helpers.ts` searched
+  for text immediately after the reader shell became visible, but PdfReader lazily renders each page's canvas
+  and text layer *after* the shell itself is already interactive (pdf.js parses/paints asynchronously) — so the
+  text layer wasn't in the DOM yet. Fixed by polling (`expect.poll`, mirroring the existing
+  `bookSectionFrame` pattern for the EPUB iframe case) until the text layer exists and the target text is
+  selectable, instead of a one-shot lookup. One run also hit a single flaky failure in the 4-test serial
+  suite (the search test, after the highlight+bookmark tests ran before it) that repro'd as a pass when run
+  alone and passed on the very next full-suite retry — recorded here as an observed flake, not chased further,
+  since it did not repro consistently and the underlying render/selection code was already fixed.
+- Re-ran in full after the fix: `pnpm test:web-svelte` (264 files / 1459 tests) — 1 file (`Select.test.ts`)
+  failed on the first run with the documented pre-existing "bits-ui teardown-timer unhandled error" flake;
+  re-run alone, it passed (8/8), confirming it is that known flake and unrelated to this change. `pnpm check`
+  clean (0 errors, the same 2 pre-existing `non_reactive_update` warnings). The 4 pre-existing EPUB reader
+  e2e specs (8 tests) re-run and pass.
 - Decision 8 (theme): implemented as designed (chrome background only); "dim pages" was evaluated and
   skipped as adding no visible effect worth the state, per the plan's own escape hatch — not silently
   dropped.
