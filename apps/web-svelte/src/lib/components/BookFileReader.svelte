@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { Button, TextInput } from "@prismedia/ui-svelte";
+  import { Button } from "@prismedia/ui-svelte";
   import ReaderContentsSheet from "./reader/ReaderContentsSheet.svelte";
   import type { Snippet } from "svelte";
   import { onMount, untrack } from "svelte";
@@ -8,9 +8,6 @@
     BookOpen,
     Bookmark,
     BookmarkCheck,
-    Check,
-    Pencil,
-    Trash2,
     ChevronLeft,
     ChevronRight,
     List,
@@ -27,6 +24,7 @@
     type ReaderSelectionAction,
   } from "$lib/components/reader/ReaderSelectionMenu.svelte";
   import AnnotationEditor from "$lib/components/reader/AnnotationEditor.svelte";
+  import ReaderBookmarkList from "$lib/components/reader/ReaderBookmarkList.svelte";
   import type { ReaderNotice } from "$lib/components/reader/reader-notice";
   import { ANNOTATION_COLOR, type AnnotationColorCode } from "$lib/api/generated/codes";
   import type { BookAnnotation, BookBookmark } from "$lib/api/generated/model";
@@ -509,7 +507,6 @@
     label: null,
     index: null,
   });
-  let renaming = $state<{ id: string; label: string } | null>(null);
   const bookmarksEnabled = $derived(Boolean(bookmarks && onAddBookmark) && !isFixedLayout);
   const pageBookmark = $derived(bookmarkOnPage(bookmarks ?? [], currentPage.cfi));
 
@@ -544,12 +541,6 @@
     } catch {
       // unresolvable locator (file changed): stay put
     }
-  }
-
-  function saveRename(bookmark: BookBookmark) {
-    if (!renaming) return;
-    onRenameBookmark?.(bookmark, renaming.label);
-    renaming = null;
   }
 
   // Comic-style gesture overlay (paged mode only). foliate columnizes the page into a single
@@ -888,49 +879,12 @@
 </ReaderContentsSheet>
 
 {#snippet bookmarkItems()}
-  {#if !bookmarks?.length}
-    <p class="px-3 py-4 text-sm text-text-muted">No bookmarks yet. Use the bookmark button in the top bar to mark a page.</p>
-  {:else}
-    <ul class="flex flex-col gap-1">
-      {#each bookmarks as bookmark (bookmark.id)}
-        <li class="flex items-center gap-1">
-          {#if renaming?.id === bookmark.id}
-            <TextInput
-              size="sm"
-              class="min-w-0 flex-1"
-              aria-label="Bookmark label"
-              placeholder={bookmark.chapterLabel ?? "Bookmark"}
-              bind:value={renaming.label}
-              onkeydown={(event: KeyboardEvent) => { if (event.key === "Enter") saveRename(bookmark); }}
-            />
-            <Button variant="ghost" size="icon-sm" type="button" aria-label="Save label" onclick={() => saveRename(bookmark)}>
-              <Check class="h-4 w-4" />
-            </Button>
-          {:else}
-            <Button variant="ghost"
-              class="h-auto min-w-0 flex-1 justify-start whitespace-normal py-2 text-left"
-              onclick={() => openBookmark(bookmark)}
-            >
-              <span class="flex min-w-0 flex-col">
-                <span>{bookmark.label ?? bookmark.chapterLabel ?? "Bookmark"}</span>
-                <span class="font-mono text-[0.6rem] uppercase tracking-[0.14em] text-text-muted">
-                  {Math.round(Number(bookmark.position) * 100)}%{bookmark.label && bookmark.chapterLabel ? ` · ${bookmark.chapterLabel}` : ""}
-                </span>
-              </span>
-            </Button>
-            <Button variant="ghost" size="icon-sm" type="button" aria-label="Rename bookmark"
-              onclick={() => (renaming = { id: bookmark.id, label: bookmark.label ?? "" })}
-            >
-              <Pencil class="h-4 w-4" />
-            </Button>
-          {/if}
-          <Button variant="ghost" size="icon-sm" type="button" aria-label="Delete bookmark" onclick={() => onDeleteBookmark?.(bookmark)}>
-            <Trash2 class="h-4 w-4" />
-          </Button>
-        </li>
-      {/each}
-    </ul>
-  {/if}
+  <ReaderBookmarkList
+    bookmarks={bookmarks ?? []}
+    onOpen={openBookmark}
+    onRename={(bookmark, label) => onRenameBookmark?.(bookmark, label)}
+    onDelete={(bookmark) => onDeleteBookmark?.(bookmark)}
+  />
 {/snippet}
 
 {#snippet tocItems(items: TocEntry[], depth: number)}

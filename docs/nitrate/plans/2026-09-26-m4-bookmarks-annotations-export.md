@@ -124,8 +124,8 @@
 - [x] **Step 3:** Run the tests, then commit.
 
 ### Task 5: `/annotations` dashboard and export UI
-- [ ] **Step 1:** Add the `annotation-library.ts` API wrapper with tests, and an export-URL helper.
-- [ ] **Step 2:** Add `routes/annotations/+page.svelte`, following the calendar and search page patterns:
+- [x] **Step 1:** Add the `annotation-library.ts` API wrapper with tests, and an export-URL helper.
+- [x] **Step 2:** Add `routes/annotations/+page.svelte`, following the calendar and search page patterns:
   - a header rail;
   - a `SearchInput`, with `Select` filters for book and colour, and a "Notes only" toggle;
   - an Export menu (Markdown / JSON / CSV, scoped to the current book filter);
@@ -133,11 +133,11 @@
     changed" badge when stale;
   - clicking an item opens the reader at that highlight;
   - `Empty` states.
-- [ ] **Step 3:** Nav: add `{ label: "Annotations", href: "/annotations", icon: "highlighter" }` to Books, and map the
+- [x] **Step 3:** Nav: add `{ label: "Annotations", href: "/annotations", icon: "highlighter" }` to Books, and map the
   `highlighter` icon. Update `nav-catalog.test.ts`.
-- [ ] **Step 4:** Add a component test for the page, covering grouping, filters and empty states, using mocked API
+- [x] **Step 4:** Add a component test for the page, covering grouping, filters and empty states, using mocked API
   wrappers.
-- [ ] **Step 5:** Run the web tests and `pnpm check`, then commit.
+- [x] **Step 5:** Run the web tests and `pnpm check`, then commit.
 
 ### Task 6: E2E, verification, docs
 - [ ] **Step 1:** `e2e/reader-bookmarks-and-library.spec.ts`:
