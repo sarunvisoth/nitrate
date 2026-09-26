@@ -780,7 +780,7 @@ the test. Do **not** add `.RequireAdmin()`: the `/api` authentication middleware
   names come from `.WithName`). Commit the generated files on their own:
   `chore(web): regenerate API client for book annotations`.
 
-- [ ] **Step 2: Write the failing tests** for `apps/web-svelte/src/lib/reader/annotation-sync.ts`, which is pure
+- [x] **Step 2: Write the failing tests** for `apps/web-svelte/src/lib/reader/annotation-sync.ts`, which is pure
   and unit-testable:
 
 ```ts
@@ -811,7 +811,7 @@ describe("annotation-sync", () => {
 (Replace the `"epub-cfi"`, `"highlight"` and `"yellow"` literals in the fixture with the generated `codes.ts`
 constants.)
 
-- [ ] **Step 3: Implement** `annotation-sync.ts`, using the generated `BookAnnotation` model type:
+- [x] **Step 3: Implement** `annotation-sync.ts`, using the generated `BookAnnotation` model type:
 
 ```ts
 import type { BookAnnotation } from "$lib/api/generated/model";
@@ -840,12 +840,12 @@ export function visibleAnnotations(items: Iterable<BookAnnotation>): BookAnnotat
 }
 ```
 
-- [ ] **Step 4: Implement** `apps/web-svelte/src/lib/api/annotations.ts`, following the `books.ts` pattern
+- [x] **Step 4: Implement** `apps/web-svelte/src/lib/api/annotations.ts`, following the `books.ts` pattern
   (generated function → `requestInit` → `unwrapGenerated`), with tests that mock `fetch` as in `files.test.ts`.
   Export `fetchBookAnnotations(bookId)`, `saveBookAnnotation(bookId, annotation)` (a PUT built from the
   annotation's fields) and `deleteBookAnnotation(bookId, id, updatedAt)`.
-- [ ] **Step 5: Run** `pnpm test:web-svelte` and `pnpm check`, and confirm they are green.
-- [ ] **Step 6: Commit.** `feat(web): add book annotation API wrapper and sync helpers`
+- [x] **Step 5: Run** `pnpm test:web-svelte` and `pnpm check`, and confirm they are green.
+- [x] **Step 6: Commit.** `feat(web): add book annotation API wrapper and sync helpers`
 
 ---
 
