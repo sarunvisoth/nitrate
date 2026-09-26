@@ -47,8 +47,7 @@ Spec: [VISION.md](../VISION.md) "Reader Settings", "Progress Synchronization", "
 - [x] Frontend: `vocabulary` synced store, `/vocabulary` page, nav entry, "Add to Vocabulary" in
       `LookupPopover.svelte`.
 - [x] Sepia contrast unit test.
-- [ ] Playwright e2e spec for settings-persist + define-to-vocabulary flow (not completed this
-      session — see as-built notes).
+- [x] Playwright e2e spec for settings-persist + define-to-vocabulary flow.
 
 ## Owner-verified checklist
 
@@ -84,8 +83,25 @@ Spec: [VISION.md](../VISION.md) "Reader Settings", "Progress Synchronization", "
   follow-up. Vocabulary entries added this way have no book link and "jump to source location"
   does nothing for them (the UI simply shows the word as plain text, no link, when there is no
   book/locator). Entries added via a future full wiring, or via direct API use, work correctly.
-- **Not done:** the Playwright e2e spec for settings-persist-after-reload and
-  Define→Add-to-Vocabulary→status-change. Existing reader e2e specs were re-run instead to check
-  for regressions (see final report for numbers).
+- **e2e:** `e2e/reader-settings-vocabulary.spec.ts` covers theme+font-size persisting after reload
+  and Define → Add to Vocabulary → `/vocabulary` → status change persisting (mocks
+  `/api/reader/define` with `page.route`). Bits-ui's `Select` trigger has accessible role
+  `button` (with an `aria-label`), not `combobox` — interact via `getByRole("button", {name})`
+  then `getByRole("option", {name})`, not `.selectOption()`.
+  **As-built run command** (matches M3's pattern — the .NET API's dev SPA proxy hardcodes
+  `http://localhost:5173` in `Program.cs`, so Vite must run on 5173, not the config's 8009
+  default):
+  ```bash
+  ASPNETCORE_ENVIRONMENT=Development dotnet run --project apps/backend/src/Prismedia.Api/Prismedia.Api.csproj &
+  pnpm --filter @prismedia/web-svelte dev &
+  # local, uncommitted playwright.config.local.ts overriding launchOptions.executablePath
+  # to /opt/pw-browsers/chromium (never `playwright install` in this sandbox)
+  PRISMEDIA_E2E_SVELTE_URL=http://localhost:5173 npx playwright test \
+    --config=playwright.config.local.ts \
+    e2e/reader-annotations.spec.ts e2e/reader-bookmarks-and-library.spec.ts \
+    e2e/reader-lookups.spec.ts e2e/reader-settings-vocabulary.spec.ts --workers=1
+  ```
+  Result on 2026-09-26: **8/8 passed** (1.5m) — the 3 pre-existing reader specs (6 tests) plus
+  the new M6 spec (2 tests); no regressions.
 - Real test output, exact commands, and owner-verified items are in the final session report
   handed back to the user.
