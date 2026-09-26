@@ -452,7 +452,7 @@ git commit -m "docs(nitrate): architecture analysis of Prismedia base"
 
 **Files:** Create `docs/THIRD_PARTY_LICENSES.md`.
 
-- [ ] **Step 1: Gather**
+- [x] **Step 1: Gather**
 
 ```bash
 pnpm licenses list --prod --json > /tmp/js-licenses.json
@@ -460,9 +460,9 @@ dotnet list apps/backend/Prismedia.slnx package --include-transitive > /tmp/dotn
 head -40 apps/web-svelte/src/lib/vendor/foliate-js/*.js | grep -iE "license|copyright" | sort -u
 ```
 
-- [ ] **Step 2: Write the file** with sections: `## Base project` (Prismedia, CC BY-NC-SA 4.0, commit `627958a`), `## Vendored code` (foliate-js: license + upstream URL + vendored version if determinable), `## JavaScript dependencies (production)` (table: package, version, license — group by license), `## .NET dependencies` (table: package, version, license — look up license from NuGet metadata where the tool does not report it), `## Reference-only projects (no code used)` (Readest, BookOrbit, KOReader — with their licenses). Flag any GPL/AGPL/SSPL/non-commercial license in production dependencies at the top under `## Attention`.
+- [x] **Step 2: Write the file** with sections: `## Base project` (Prismedia, CC BY-NC-SA 4.0, commit `627958a`), `## Vendored code` (foliate-js: license + upstream URL + vendored version if determinable), `## JavaScript dependencies (production)` (table: package, version, license — group by license), `## .NET dependencies` (table: package, version, license — look up license from NuGet metadata where the tool does not report it), `## Reference-only projects (no code used)` (Readest, BookOrbit, KOReader — with their licenses). Flag any GPL/AGPL/SSPL/non-commercial license in production dependencies at the top under `## Attention`.
 
-- [ ] **Step 3: Commit**
+- [x] **Step 3: Commit**
 
 ```bash
 git add docs/THIRD_PARTY_LICENSES.md
