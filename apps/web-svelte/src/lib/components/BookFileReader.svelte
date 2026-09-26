@@ -22,6 +22,7 @@
     type ReaderSelectionAction,
   } from "$lib/components/reader/ReaderSelectionMenu.svelte";
   import AnnotationEditor from "$lib/components/reader/AnnotationEditor.svelte";
+  import type { ReaderNotice } from "$lib/components/reader/reader-notice";
   import { ANNOTATION_COLOR, type AnnotationColorCode } from "$lib/api/generated/codes";
   import type { BookAnnotation } from "$lib/api/generated/model";
   import type { AnnotationDraft } from "$lib/reader/annotation-sync";
@@ -62,6 +63,8 @@
     onCreateAnnotation?: (draft: AnnotationDraft) => BookAnnotation | undefined;
     onUpdateAnnotation?: (annotation: BookAnnotation) => void;
     onDeleteAnnotation?: (annotation: BookAnnotation) => void;
+    /** Non-blocking notice shown over the reader. */
+    notice?: ReaderNotice | null;
   }
 
   let {
@@ -81,6 +84,7 @@
     onCreateAnnotation,
     onUpdateAnnotation,
     onDeleteAnnotation,
+    notice = null,
   }: Props = $props();
 
   const MIN_FONT = 80;
@@ -141,6 +145,16 @@
     if (next === fontPercent) return;
     fontPercent = next;
     applyStyles();
+  }
+
+  /** Moves the open book to a CFI or a fraction (used to follow progress from another device). */
+  export async function goToLocation(target: { cfi: string } | { fraction: number }) {
+    try {
+      if ("cfi" in target) await view?.goTo?.(target.cfi);
+      else await view?.goToFraction?.(Math.max(0, Math.min(1, target.fraction)));
+    } catch {
+      // unresolvable target: stay where we are
+    }
   }
 
   function goPrev() {
@@ -569,6 +583,7 @@
   onPrev={goPrev}
   onNext={goNext}
   onActivate={goNext}
+  {notice}
 >
   {#snippet counter()}{counterLabel}{/snippet}
 

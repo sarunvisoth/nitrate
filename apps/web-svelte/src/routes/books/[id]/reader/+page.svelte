@@ -20,6 +20,8 @@
   import { ConsumptionActivityClock } from "$lib/entities/consumption-activity-clock";
   import { createUuid } from "$lib/utils/uuid";
   import { BookAnnotationStore } from "$lib/reader/book-annotation-store.svelte";
+  import { pdfPositionKey, remoteProgressToAdopt, type ProgressTarget } from "$lib/reader/progress-catch-up";
+  import type { ReaderNotice } from "$lib/components/reader/reader-notice";
   import {
     exactWebEpubResumeLocation,
     webEpubLaunchLocation,
@@ -60,6 +62,15 @@
   let pdfLastCount = 0;
   let progressSaveQueue: Promise<void> = Promise.resolve();
   let annotationStore = $state.raw<BookAnnotationStore | null>(null);
+  let epubReader = $state<ReturnType<typeof BookFileReader>>();
+  let pdfReader = $state<ReturnType<typeof PdfReader>>();
+  let readerNotice = $state.raw<ReaderNotice | null>(null);
+  let readerNoticeTimer: ReturnType<typeof setTimeout> | null = null;
+  // Server-clock time of the newest progress this device has already handled, and the positions
+  // it saved itself, so a focus refresh only follows *other* devices (see progress-catch-up.ts).
+  let progressSeenAt: string | null = null;
+  const ownProgressPositions: string[] = [];
+  const OWN_POSITION_MEMORY = 64;
   let lastRemoteRefreshAt = 0;
   const REMOTE_REFRESH_THROTTLE_MS = 5_000;
   const readerActivityClock = new ConsumptionActivityClock();
@@ -104,6 +115,7 @@
       window.clearInterval(heartbeat);
       document.removeEventListener("visibilitychange", handleVisibilityChange);
       window.removeEventListener("focus", handleWindowFocus);
+      dismissReaderNotice();
       queueReaderActivityHeartbeat(true);
     };
   });
@@ -114,6 +126,67 @@
     if (!force && now - lastRemoteRefreshAt < REMOTE_REFRESH_THROTTLE_MS) return;
     lastRemoteRefreshAt = now;
     void annotationStore?.refresh().catch(() => undefined);
+    if (!force) void catchUpProgress().catch(() => undefined);
+  }
+
+  function rememberOwnPosition(position: string) {
+    ownProgressPositions.push(position);
+    if (ownProgressPositions.length > OWN_POSITION_MEMORY) ownProgressPositions.shift();
+  }
+
+  /** Follows reading progress saved on another device while this reader was in the background. */
+  async function catchUpProgress() {
+    if (loadState !== "ready" || !book || !surface) return;
+    const latest = await fetchEntity(book.id);
+    const progress = getCapability(latest.capabilities, CAPABILITY_KIND.progress);
+    if (!progress) return;
+    const isPdf = surface === "pdf";
+    const target = remoteProgressToAdopt(
+      { updatedAt: progress.updatedAt, location: progress.location, index: progress.index, total: progress.total },
+      {
+        lastSeenAt: progressSeenAt,
+        ownPositions: new Set(ownProgressPositions),
+        currentLocation: isPdf ? null : epubSaveLocation,
+        currentPage: isPdf ? pdfLastPage : null,
+        pdf: isPdf,
+      },
+    );
+    if (progress.updatedAt) progressSeenAt = progress.updatedAt;
+    if (!target) return;
+
+    const previous: ProgressTarget = isPdf
+      ? { kind: "page", page: pdfLastPage }
+      : epubSaveLocation
+        ? { kind: "cfi", cfi: epubSaveLocation }
+        : { kind: "fraction", fraction: epubSaveFraction };
+    await moveReaderTo(target);
+    showReaderNotice({
+      message: "Moved to where you left off on another device.",
+      actionLabel: "Go back",
+      onAction: () => {
+        void moveReaderTo(previous);
+        dismissReaderNotice();
+      },
+      onDismiss: dismissReaderNotice,
+    });
+  }
+
+  async function moveReaderTo(target: ProgressTarget) {
+    if (target.kind === "page") pdfReader?.goToPage(target.page);
+    else if (target.kind === "cfi") await epubReader?.goToLocation({ cfi: target.cfi });
+    else await epubReader?.goToLocation({ fraction: target.fraction });
+  }
+
+  function showReaderNotice(notice: ReaderNotice) {
+    if (readerNoticeTimer) clearTimeout(readerNoticeTimer);
+    readerNotice = notice;
+    readerNoticeTimer = setTimeout(dismissReaderNotice, 10_000);
+  }
+
+  function dismissReaderNotice() {
+    if (readerNoticeTimer) clearTimeout(readerNoticeTimer);
+    readerNoticeTimer = null;
+    readerNotice = null;
   }
 
   function createReaderSessionId(): string {
@@ -149,6 +222,7 @@
 
       book = nextBook;
       context = nextContext;
+      progressSeenAt = getCapability(nextBook.capabilities, CAPABILITY_KIND.progress)?.updatedAt ?? null;
       readerTitle = nextBook.title;
       returnHref = await resolveReaderReturnHref(nextBook.id, nextContext);
       sourceUrl = `/entities/${nextBook.id}/files/source`;
@@ -211,6 +285,7 @@
     activitySeconds = readerActivityClock.take(),
   ) {
     if (!book) return;
+    if (epubSaveLocation) rememberOwnPosition(epubSaveLocation);
     const index = Math.max(0, Math.min(10_000, Math.round(epubSaveFraction * 10_000)));
     await updateEntityProgress(book.id, {
       currentEntityId: book.id,
@@ -240,6 +315,7 @@
     activitySeconds = readerActivityClock.take(),
   ) {
     if (!book || pageCount <= 0) return;
+    rememberOwnPosition(pdfPositionKey(clampPageIndex(pageIndex, pageCount)));
     await updateEntityProgress(book.id, {
       currentEntityId: book.id,
       unit: PROGRESS_UNIT.page,
@@ -325,6 +401,8 @@
 
 {#if loadState === "ready" && surface === "pdf"}
   <PdfReader
+    bind:this={pdfReader}
+    notice={readerNotice}
     sourceUrl={sourceUrl}
     title={readerTitle}
     presentation="page"
@@ -335,6 +413,8 @@
   />
 {:else if loadState === "ready" && surface === "epub"}
   <BookFileReader
+    bind:this={epubReader}
+    notice={readerNotice}
     sourceUrl={sourceUrl}
     contentType="application/epub+zip"
     title={readerTitle}

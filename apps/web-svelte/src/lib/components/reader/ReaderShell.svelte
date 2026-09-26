@@ -4,6 +4,7 @@
   import { ArrowLeft, X } from "@lucide/svelte";
   import { Button, Dialog } from "@prismedia/ui-svelte";
   import { createNavigationKeyHandler } from "$lib/keyboard/navigation-keyboard";
+  import type { ReaderNotice } from "./reader-notice";
 
   interface Props {
     title?: string;
@@ -20,6 +21,8 @@
     controls?: Snippet;
     /** The reader stage. Fills the overlay beneath the floating chrome. */
     children: Snippet;
+    /** Optional non-blocking notice (e.g. "moved to your latest page") shown above the stage. */
+    notice?: ReaderNotice | null;
   }
 
   let {
@@ -33,6 +36,7 @@
     counter,
     controls,
     children,
+    notice = null,
   }: Props = $props();
 
   let closeButton = $state<HTMLButtonElement | null>(null);
@@ -137,10 +141,42 @@
   </div>
 
   {@render children()}
+
+  {#if notice}
+    <div class="reader-notice" role="status" aria-live="polite" data-reader-control>
+      <span class="min-w-0 flex-1">{notice.message}</span>
+      {#if notice.actionLabel && notice.onAction}
+        <Button variant="outline" size="sm" type="button" onclick={() => notice?.onAction?.()}>
+          {notice.actionLabel}
+        </Button>
+      {/if}
+      <Button variant="ghost" size="icon-sm" type="button" aria-label="Dismiss" onclick={() => notice?.onDismiss()}>
+        <X class="h-4 w-4" />
+      </Button>
+    </div>
+  {/if}
 </div>
 </Dialog>
 
 <style>
+  .reader-notice {
+    position: absolute;
+    left: 50%;
+    bottom: max(1.25rem, env(safe-area-inset-bottom));
+    z-index: 20;
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    width: min(28rem, calc(100vw - 2rem));
+    transform: translateX(-50%);
+    border: 1px solid var(--color-border-subtle);
+    border-radius: var(--radius-md);
+    background: var(--color-overlay-heavy);
+    padding: 0.4rem 0.4rem 0.4rem 0.8rem;
+    color: var(--color-text-primary);
+    font-size: 0.8rem;
+    backdrop-filter: blur(var(--glass-blur-sm));
+  }
 
 
   .reader-overlay {

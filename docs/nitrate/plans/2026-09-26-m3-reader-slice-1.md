@@ -1045,6 +1045,12 @@ Here `draft` is `{ locator, spineIndex, position, selectedText, textBefore, text
 
 ## Task 10A: Reading position follows you between devices
 
+> **As built:** the adopt rule compares **server** timestamps only. It uses `lastSeenAt`, the newest progress
+> `updatedAt` already handled, instead of this device's own save time. It also ignores positions this device saved
+> itself (`ownPositions`). Without that, clock drift, or a save still in flight, could jump the reader back to a
+> page it had just left. The notice lives in `ReaderShell` (`notice` prop), because anything outside the
+> fullscreen reader dialog is covered and cannot be clicked.
+
 **Owner request (2026-09-26):** "it should sync my book page progress whenever i switch page."
 
 **What already works:**
@@ -1057,7 +1063,7 @@ Here `draft` is `{ locator, spineIndex, position, selectedText, textBefore, text
 book, never picks up the newer position. This task adds that catch-up, and reuses the existing progress endpoint
 and fields. No backend change and no contract change is needed.
 
-- [ ] **Step 1: Write the failing tests** for `apps/web-svelte/src/lib/reader/progress-catch-up.ts`:
+- [x] **Step 1: Write the failing tests** for `apps/web-svelte/src/lib/reader/progress-catch-up.ts`:
 
 ```ts
 import { describe, expect, it } from "vitest";
@@ -1097,18 +1103,18 @@ describe("remoteProgressToAdopt", () => {
 });
 ```
 
-- [ ] **Step 2: Implement** `remoteProgressToAdopt`.
+- [x] **Step 2: Implement** `remoteProgressToAdopt`.
   - Use `epub-contents.ts`'s existing CFI check (the function behind `epub-contents.ts:66-79`, which accepts
     `epubcfi(` and rejects the native-app `{`/`[`/`#prismedia-progress=` formats). Do not retype that logic.
     Import it, exporting it first if it is private.
   - Return `null` when `updatedAt` is missing, not newer than `lastSavedAt`, or the location is unchanged.
-- [ ] **Step 3: Make both readers able to jump.**
+- [x] **Step 3: Make both readers able to jump.**
   - `BookFileReader.svelte`: add `export function goToLocation(target: { cfi: string } | { fraction: number })`,
     which calls `view.goTo(cfi)` or `view.goToFraction(fraction)`. Check the name in `view.js`; `init` already
     accepts `{ fraction }`, see `BookFileReader.svelte:301-310`.
   - `PdfReader.svelte`: add `export function goToPage(page: number)`, reusing its existing page-navigation code.
   - Bind both instances in `+page.svelte` with `bind:this`.
-- [ ] **Step 4: Catch up on focus.** In `+page.svelte`:
+- [x] **Step 4: Catch up on focus.** In `+page.svelte`:
   - Record `lastProgressSavedAt = new Date().toISOString()` after every successful `saveEpubProgress` and
     `savePdfProgress`.
   - On `visibilitychange`→visible and window `focus`, throttled to once per 5 s and run in the same handler as
@@ -1120,7 +1126,7 @@ describe("remoteProgressToAdopt", () => {
     toast/notice component (grep `toast` in `apps/web-svelte/src/lib`), not a hand-rolled one.
   - The jump fires `relocate`/page change, which saves as usual. The newest position therefore stays consistent
     on every device.
-- [ ] **Step 5: Run** the tests and `pnpm check`, then commit: `feat(web): catch up to reading progress from other devices on focus`
+- [x] **Step 5: Run** the tests and `pnpm check`, then commit: `feat(web): catch up to reading progress from other devices on focus`
 
 ---
 

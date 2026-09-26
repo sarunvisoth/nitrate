@@ -21,6 +21,7 @@
   import { apiAssetUrl as toApiUrl } from "$lib/api/orval-fetch";
   import { comicTapZone } from "$lib/components/comic-reader";
   import ReaderShell from "$lib/components/reader/ReaderShell.svelte";
+  import type { ReaderNotice } from "$lib/components/reader/reader-notice";
 
   type ReaderFlow = "scrolled" | "paged";
 
@@ -38,6 +39,8 @@
     initialPage?: number;
     onClose: () => void;
     onPageChange?: (page: number, pageCount: number) => void;
+    /** Non-blocking notice shown over the reader. */
+    notice?: ReaderNotice | null;
   }
 
   let {
@@ -48,6 +51,7 @@
     initialPage = 0,
     onClose,
     onPageChange,
+    notice = null,
   }: Props = $props();
 
   let shell = $state<ReturnType<typeof ReaderShell>>();
@@ -377,6 +381,11 @@
     }
   }
 
+  /** Moves to a zero-based page (used to follow progress from another device). */
+  export function goToPage(page: number) {
+    scrollToPage(page, "auto");
+  }
+
   function goPrev() {
     scrollToPage(currentPage - 1);
   }
@@ -571,6 +580,7 @@
   onPrev={goPrev}
   onNext={goNext}
   onActivate={goNext}
+  {notice}
 >
   {#snippet counter()}{pageCount > 0 ? `Page ${currentPage + 1} / ${pageCount}` : ""}{/snippet}
 
