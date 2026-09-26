@@ -25,7 +25,13 @@ public sealed class FileWorkerHeartbeatStore : IWorkerHeartbeatStore {
                 return null;
             }
 
-            await using var stream = File.OpenRead(_path);
+            // Share write and delete so the worker's atomic replace is not blocked by this read on
+            // Windows, where a plain OpenRead makes File.Move(..., overwrite: true) fail.
+            await using var stream = new FileStream(
+                _path,
+                FileMode.Open,
+                FileAccess.Read,
+                FileShare.ReadWrite | FileShare.Delete);
             var payload = await JsonSerializer.DeserializeAsync<HeartbeatPayload>(
                 stream,
                 JsonOptions,
@@ -64,7 +70,20 @@ public sealed class FileWorkerHeartbeatStore : IWorkerHeartbeatStore {
                 cancellationToken);
         }
 
-        File.Move(tempPath, _path, overwrite: true);
+        try {
+            File.Move(tempPath, _path, overwrite: true);
+        } catch {
+            TryDelete(tempPath);
+            throw;
+        }
+    }
+
+    private static void TryDelete(string path) {
+        try {
+            File.Delete(path);
+        } catch (IOException) {
+        } catch (UnauthorizedAccessException) {
+        }
     }
 
     private sealed record HeartbeatPayload(string WorkerId, DateTimeOffset ObservedAt);
