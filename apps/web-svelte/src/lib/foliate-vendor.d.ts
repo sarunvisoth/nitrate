@@ -2,3 +2,4 @@
 // type-checking. Declare its entry module so the dynamic import in BookFileReader
 // resolves; the `<foliate-view>` element is used through a loose runtime handle.
 declare module "$lib/vendor/foliate-js/view.js";
+declare module "$lib/vendor/foliate-js/overlayer.js";

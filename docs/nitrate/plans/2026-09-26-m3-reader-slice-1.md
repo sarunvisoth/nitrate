@@ -854,7 +854,7 @@ export function visibleAnnotations(items: Iterable<BookAnnotation>): BookAnnotat
 **Files:** `apps/web-svelte/src/lib/reader/epub-selection.ts` (+ test), `annotation-colors.ts`, and
 `foliate-vendor.d.ts`.
 
-- [ ] **Step 1: Write the failing tests** (jsdom):
+- [x] **Step 1: Write the failing tests** (jsdom):
 
 ```ts
 import { describe, expect, it } from "vitest";
@@ -882,7 +882,7 @@ describe("selectionAnchorRect", () => {
 });
 ```
 
-- [ ] **Step 2: Implement:**
+- [x] **Step 2: Implement:**
 
 ```ts
 /** Exact text plus up to `contextLength` characters of surrounding text within the same document. */
@@ -915,13 +915,13 @@ export function selectionAnchorRect(
 }
 ```
 
-- [ ] **Step 3: Colours.** Create `annotation-colors.ts`, which maps each `ANNOTATION_COLOR` code to a CSS colour
+- [x] **Step 3: Colours.** Create `annotation-colors.ts`, which maps each `ANNOTATION_COLOR` code to a CSS colour
   for the overlay and the swatches. Keep the values in this one module. Highlight colours are user content, not
   entity-spectrum UI, so they sit outside the design-system accent rules. Check the contrast of the text under
   `--overlayer-highlight-opacity: .3` against the reader's dark theme (`BookFileReader.svelte` `contentStyles`).
-- [ ] **Step 4: Types.** Add `declare module "$lib/vendor/foliate-js/overlayer.js";` to `foliate-vendor.d.ts`
+- [x] **Step 4: Types.** Add `declare module "$lib/vendor/foliate-js/overlayer.js";` to `foliate-vendor.d.ts`
   (§16c: `Overlayer` is exported from `overlayer.js:4`).
-- [ ] **Step 5: Run** the tests and `pnpm check`, then commit: `feat(web): add EPUB selection and text-quote helpers`
+- [x] **Step 5: Run** the tests and `pnpm check`, then commit: `feat(web): add EPUB selection and text-quote helpers`
 
 ---
 
