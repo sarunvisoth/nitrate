@@ -1,6 +1,7 @@
 import { fireEvent, render, screen, waitFor } from "@testing-library/svelte";
 import { describe, expect, it, vi } from "vitest";
 import Harness from "./ReaderContentsSheet.test-harness.svelte";
+import BookmarksHarness from "./ReaderContentsSheet.bookmarks-harness.svelte";
 
 describe("reader overlay composition", () => {
   it("keeps contents keys out of the reader and closes only the top layer", async () => {
@@ -21,5 +22,12 @@ describe("reader overlay composition", () => {
     await waitFor(() => expect(trigger).toHaveFocus());
     await fireEvent.keyDown(trigger, { key: "Escape" });
     expect(onClose).toHaveBeenCalledTimes(1);
+  });
+
+  it("shows Chapters | Bookmarks tabs when a bookmarks list is given", async () => {
+    render(BookmarksHarness);
+    expect(await screen.findByRole("button", { name: "Chapter one" })).toBeInTheDocument();
+    await fireEvent.click(screen.getByRole("tab", { name: "Bookmarks (1)" }));
+    expect(await screen.findByRole("button", { name: "Bookmark one" })).toBeInTheDocument();
   });
 });

@@ -1,11 +1,16 @@
 <script lang="ts">
-  import { Button } from "@prismedia/ui-svelte";
+  import { Button, TextInput } from "@prismedia/ui-svelte";
   import ReaderContentsSheet from "./reader/ReaderContentsSheet.svelte";
   import type { Snippet } from "svelte";
   import { onMount, untrack } from "svelte";
   import {
     AlertTriangle,
     BookOpen,
+    Bookmark,
+    BookmarkCheck,
+    Check,
+    Pencil,
+    Trash2,
     ChevronLeft,
     ChevronRight,
     List,
@@ -24,10 +29,12 @@
   import AnnotationEditor from "$lib/components/reader/AnnotationEditor.svelte";
   import type { ReaderNotice } from "$lib/components/reader/reader-notice";
   import { ANNOTATION_COLOR, type AnnotationColorCode } from "$lib/api/generated/codes";
-  import type { BookAnnotation } from "$lib/api/generated/model";
+  import type { BookAnnotation, BookBookmark } from "$lib/api/generated/model";
   import type { AnnotationDraft } from "$lib/reader/annotation-sync";
   import { ANNOTATION_COLOR_ORDER, annotationColorPaint } from "$lib/reader/annotation-colors";
   import { selectionAnchorRect, textQuoteFor } from "$lib/reader/epub-selection";
+  import { bookmarkOnPage, pageStartLocator } from "$lib/reader/bookmark-page";
+  import type { BookmarkPage } from "$lib/reader/book-bookmark-store.svelte";
 
   type ReaderFlow = "paginated" | "scrolled";
 
@@ -65,6 +72,11 @@
     onDeleteAnnotation?: (annotation: BookAnnotation) => void;
     /** Non-blocking notice shown over the reader. */
     notice?: ReaderNotice | null;
+    /** Bookmarks to list (already filtered to non-deleted). Omit to disable bookmarks. */
+    bookmarks?: readonly BookBookmark[];
+    onAddBookmark?: (page: BookmarkPage) => void;
+    onRenameBookmark?: (bookmark: BookBookmark, label: string) => void;
+    onDeleteBookmark?: (bookmark: BookBookmark) => void;
   }
 
   let {
@@ -85,6 +97,10 @@
     onUpdateAnnotation,
     onDeleteAnnotation,
     notice = null,
+    bookmarks,
+    onAddBookmark,
+    onRenameBookmark,
+    onDeleteBookmark,
   }: Props = $props();
 
   const MIN_FONT = 80;
@@ -195,6 +211,7 @@
     const fraction = typeof detail.fraction === "number" ? detail.fraction : 0;
     const cfi = typeof detail.cfi === "string" ? detail.cfi : null;
     const label = detail.tocItem?.label?.trim() || null;
+    currentPage = { cfi, fraction, label, index: currentSectionIndex() };
     lastFraction = fraction;
     atEnd = fraction >= 0.999;
     counterLabel = `${Math.round(fraction * 100)}%${label ? ` · ${label}` : ""}`;
@@ -431,6 +448,56 @@
     editing = null;
   }
 
+  // ── Bookmarks ───────────────────────────────────────────────────────────────
+  let currentPage = $state<{ cfi: string | null; fraction: number; label: string | null; index: number | null }>({
+    cfi: null,
+    fraction: 0,
+    label: null,
+    index: null,
+  });
+  let renaming = $state<{ id: string; label: string } | null>(null);
+  const bookmarksEnabled = $derived(Boolean(bookmarks && onAddBookmark) && !isFixedLayout);
+  const pageBookmark = $derived(bookmarkOnPage(bookmarks ?? [], currentPage.cfi));
+
+  function currentSectionIndex(): number | null {
+    try {
+      const index = view?.renderer?.getContents?.()?.[0]?.index;
+      return typeof index === "number" ? index : null;
+    } catch {
+      return null;
+    }
+  }
+
+  function toggleBookmark() {
+    if (pageBookmark) {
+      onDeleteBookmark?.(pageBookmark);
+      return;
+    }
+    const locator = pageStartLocator(currentPage.cfi);
+    if (!locator) return;
+    onAddBookmark?.({
+      locator,
+      spineIndex: currentPage.index ?? 0,
+      position: Math.max(0, Math.min(1, currentPage.fraction)),
+      chapterLabel: currentPage.label,
+    });
+  }
+
+  function openBookmark(bookmark: BookBookmark) {
+    tocOpen = false;
+    try {
+      void view?.goTo?.(bookmark.locator);
+    } catch {
+      // unresolvable locator (file changed): stay put
+    }
+  }
+
+  function saveRename(bookmark: BookBookmark) {
+    if (!renaming) return;
+    onRenameBookmark?.(bookmark, renaming.label);
+    renaming = null;
+  }
+
   // Comic-style gesture overlay (paged mode only). foliate columnizes the page into a single
   // wide iframe inside an inaccessible (closed shadow DOM) scroller, so tap coordinates can't be
   // read reliably from inside the content. Instead we capture pointer gestures on an overlay in
@@ -591,7 +658,23 @@
     {#if companionControls}
       {@render companionControls()}
     {/if}
-    {#if hasToc}
+    {#if bookmarksEnabled}
+      <Button variant="outline" size="sm"
+        type="button"
+        onclick={toggleBookmark}
+        aria-pressed={Boolean(pageBookmark)}
+        class="aria-pressed:bg-accent aria-pressed:text-accent-foreground"
+        aria-label={pageBookmark ? "Remove bookmark" : "Bookmark this page"}
+        title={pageBookmark ? "Remove bookmark" : "Bookmark this page"}
+      >
+        {#if pageBookmark}
+          <BookmarkCheck class="h-4 w-4" />
+        {:else}
+          <Bookmark class="h-4 w-4" />
+        {/if}
+      </Button>
+    {/if}
+    {#if hasToc || bookmarksEnabled}
       <Button variant="outline" size="sm"
         type="button"
         onclick={() => (tocOpen = true)}
@@ -741,9 +824,60 @@
   </div>
 </ReaderShell>
 
-<ReaderContentsSheet open={tocOpen} onClose={() => tocOpen = false}>
+<ReaderContentsSheet
+  open={tocOpen}
+  onClose={() => tocOpen = false}
+  bookmarks={bookmarksEnabled ? bookmarkItems : undefined}
+  bookmarkCount={bookmarks?.length ?? 0}
+>
   {@render tocItems(toc, 0)}
 </ReaderContentsSheet>
+
+{#snippet bookmarkItems()}
+  {#if !bookmarks?.length}
+    <p class="px-3 py-4 text-sm text-text-muted">No bookmarks yet. Use the bookmark button in the top bar to mark a page.</p>
+  {:else}
+    <ul class="flex flex-col gap-1">
+      {#each bookmarks as bookmark (bookmark.id)}
+        <li class="flex items-center gap-1">
+          {#if renaming?.id === bookmark.id}
+            <TextInput
+              size="sm"
+              class="min-w-0 flex-1"
+              aria-label="Bookmark label"
+              placeholder={bookmark.chapterLabel ?? "Bookmark"}
+              bind:value={renaming.label}
+              onkeydown={(event: KeyboardEvent) => { if (event.key === "Enter") saveRename(bookmark); }}
+            />
+            <Button variant="ghost" size="icon-sm" type="button" aria-label="Save label" onclick={() => saveRename(bookmark)}>
+              <Check class="h-4 w-4" />
+            </Button>
+          {:else}
+            <Button variant="ghost"
+              class="h-auto min-w-0 flex-1 justify-start whitespace-normal py-2 text-left"
+              onclick={() => openBookmark(bookmark)}
+            >
+              <span class="flex min-w-0 flex-col">
+                <span>{bookmark.label ?? bookmark.chapterLabel ?? "Bookmark"}</span>
+                <span class="font-mono text-[0.6rem] uppercase tracking-[0.14em] text-text-muted">
+                  {Math.round(Number(bookmark.position) * 100)}%{bookmark.label && bookmark.chapterLabel ? ` · ${bookmark.chapterLabel}` : ""}
+                </span>
+              </span>
+            </Button>
+            <Button variant="ghost" size="icon-sm" type="button" aria-label="Rename bookmark"
+              onclick={() => (renaming = { id: bookmark.id, label: bookmark.label ?? "" })}
+            >
+              <Pencil class="h-4 w-4" />
+            </Button>
+          {/if}
+          <Button variant="ghost" size="icon-sm" type="button" aria-label="Delete bookmark" onclick={() => onDeleteBookmark?.(bookmark)}>
+            <Trash2 class="h-4 w-4" />
+          </Button>
+        </li>
+      {/each}
+    </ul>
+  {/if}
+{/snippet}
 
 {#snippet tocItems(items: TocEntry[], depth: number)}
   {#each items as entry (entry.label + (entry.href ?? ""))}

@@ -100,10 +100,10 @@
 - [x] **Step 5:** Run `pnpm test:backend`, regenerate the client, then commit.
 
 ### Task 3: Reader bookmarks
-- [ ] **Step 1:** Add `book-bookmark-store.svelte.ts`, the same shape as `BookAnnotationStore`, test-first.
-- [ ] **Step 2:** Give `ReaderContentsSheet` an optional `bookmarks` snippet. When present it renders
+- [x] **Step 1:** Add `book-bookmark-store.svelte.ts`, the same shape as `BookAnnotationStore`, test-first.
+- [x] **Step 2:** Give `ReaderContentsSheet` an optional `bookmarks` snippet. When present it renders
   `Tabs` with Contents | Bookmarks. Keep the existing sheet test green and add a tab test.
-- [ ] **Step 3:** `BookFileReader`:
+- [x] **Step 3:** `BookFileReader`:
   - props `bookmarks`, `onAddBookmark`, `onUpdateBookmark`, `onDeleteBookmark`;
   - a bookmark toggle in the controls, for reflowable books only;
   - a bookmarks list with jump, inline label edit, and delete.
@@ -111,8 +111,8 @@
   The "current page" is the latest `relocate` CFI, which is the start of the visible range. A page counts as
   bookmarked when a bookmark's CFI falls within the visible range: foliate's relocate `range` plus `CFI.compare`,
   with an exact-locator match as the fallback.
-- [ ] **Step 4:** Wire the store into the reader route: create it, refresh on open and on focus, and pass the props.
-- [ ] **Step 5:** Run the web tests and `pnpm check`, then commit.
+- [x] **Step 4:** Wire the store into the reader route: create it, refresh on open and on focus, and pass the props.
+- [x] **Step 5:** Run the web tests and `pnpm check`, then commit.
 
 ### Task 4: Highlight re-anchoring
 - [ ] **Step 1:** Write `annotation-reanchor.ts` test-first (jsdom). `findTextQuote(doc, quote)` returns the best

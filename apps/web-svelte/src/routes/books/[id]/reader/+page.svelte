@@ -20,6 +20,7 @@
   import { ConsumptionActivityClock } from "$lib/entities/consumption-activity-clock";
   import { createUuid } from "$lib/utils/uuid";
   import { BookAnnotationStore } from "$lib/reader/book-annotation-store.svelte";
+  import { BookBookmarkStore } from "$lib/reader/book-bookmark-store.svelte";
   import { pdfPositionKey, remoteProgressToAdopt, type ProgressTarget } from "$lib/reader/progress-catch-up";
   import type { ReaderNotice } from "$lib/components/reader/reader-notice";
   import {
@@ -62,6 +63,7 @@
   let pdfLastCount = 0;
   let progressSaveQueue: Promise<void> = Promise.resolve();
   let annotationStore = $state.raw<BookAnnotationStore | null>(null);
+  let bookmarkStore = $state.raw<BookBookmarkStore | null>(null);
   let epubReader = $state<ReturnType<typeof BookFileReader>>();
   let pdfReader = $state<ReturnType<typeof PdfReader>>();
   let readerNotice = $state.raw<ReaderNotice | null>(null);
@@ -126,6 +128,7 @@
     if (!force && now - lastRemoteRefreshAt < REMOTE_REFRESH_THROTTLE_MS) return;
     lastRemoteRefreshAt = now;
     void annotationStore?.refresh().catch(() => undefined);
+    void bookmarkStore?.refresh().catch(() => undefined);
     if (!force) void catchUpProgress().catch(() => undefined);
   }
 
@@ -229,6 +232,7 @@
       if (format === BOOK_FORMAT.epub) {
         loadEpubState(nextBook, nextContext);
         annotationStore = new BookAnnotationStore(nextBook.id);
+        bookmarkStore = new BookBookmarkStore(nextBook.id);
       } else loadPdfState(nextBook, nextContext);
       loadState = "ready";
       refreshRemoteState(true);
@@ -430,6 +434,10 @@
     onCreateAnnotation={annotationStore ? (draft) => annotationStore?.create(draft) : undefined}
     onUpdateAnnotation={(annotation) => annotationStore?.update(annotation)}
     onDeleteAnnotation={(annotation) => annotationStore?.remove(annotation)}
+    bookmarks={bookmarkStore?.visible}
+    onAddBookmark={bookmarkStore ? (page) => bookmarkStore?.add(page) : undefined}
+    onRenameBookmark={(bookmark, label) => bookmarkStore?.rename(bookmark, label)}
+    onDeleteBookmark={(bookmark) => bookmarkStore?.remove(bookmark)}
     onClose={() => void closeReader()}
   />
 {:else}
