@@ -74,6 +74,7 @@ import type {
   DeleteBookBookmarkParams,
   DeleteEntityParams,
   DeleteFileParams,
+  DeleteVocabularyEntryParams,
   DictionaryDefinitionResponse,
   DownloadClientSaveRequest,
   DownloadClientSummary,
@@ -105,6 +106,7 @@ import type {
   EntityThumbnailBatchResponse,
   ExcludeFileParams,
   ExportAnnotationLibraryParams,
+  ExportVocabularyParams,
   FileArchivePreparation,
   FileArchiveRequest,
   FileChildrenResponse,
@@ -199,6 +201,7 @@ import type {
   ListTagsParams,
   ListVideoSeriesParams,
   ListVideosParams,
+  ListVocabularyParams,
   LoginRequest,
   LoginResponse,
   ManualReplacementQueueRequest,
@@ -224,6 +227,7 @@ import type {
   PreviewCollectionRulesParams,
   ProblemDetails,
   RatingUpdateRequest,
+  ReaderPreferencesResponse,
   ReleaseCalendarEvent,
   RemotePathMappingSaveRequest,
   RemotePathMappingView,
@@ -269,6 +273,8 @@ import type {
   UploadAcquisitionTorrentBody,
   UpsertBookAnnotationRequest,
   UpsertBookBookmarkRequest,
+  UpsertReaderPreferencesRequest,
+  UpsertVocabularyEntryRequest,
   UserCreateRequest,
   UserLibraryAccessUpdateRequest,
   UserResponse,
@@ -278,6 +284,8 @@ import type {
   VideoPlaybackPlanRequest,
   VideoPlaybackPlanResponse,
   VideoPlaybackSessionRequest,
+  VocabularyEntry,
+  VocabularyListResponse,
   WantedPageView,
   WantedRemovalRequest,
   WantedRemovalResponse,
@@ -5266,6 +5274,293 @@ export const getExportAnnotationLibraryUrl = (params: ExportAnnotationLibraryPar
 export const exportAnnotationLibrary = async (params: ExportAnnotationLibraryParams, options?: RequestInit): Promise<exportAnnotationLibraryResponse> => {
 
   return orvalFetch<exportAnnotationLibraryResponse>(getExportAnnotationLibraryUrl(params),
+  {
+    ...options,
+    method: 'GET'
+
+
+  }
+);}
+
+
+
+export type getReaderPreferencesResponse200 = {
+  data: ReaderPreferencesResponse
+  status: 200
+}
+
+export type getReaderPreferencesResponseSuccess = (getReaderPreferencesResponse200) & {
+  headers: Headers;
+};
+;
+
+export type getReaderPreferencesResponse = (getReaderPreferencesResponseSuccess)
+
+export const getGetReaderPreferencesUrl = () => {
+
+
+
+
+  return `/api/reader/preferences`
+}
+
+/**
+ * @summary Get the current user's reader preferences, or defaults when none are saved.
+ */
+export const getReaderPreferences = async ( options?: RequestInit): Promise<getReaderPreferencesResponse> => {
+
+  return orvalFetch<getReaderPreferencesResponse>(getGetReaderPreferencesUrl(),
+  {
+    ...options,
+    method: 'GET'
+
+
+  }
+);}
+
+
+
+export type putReaderPreferencesResponse200 = {
+  data: ReaderPreferencesResponse
+  status: 200
+}
+
+export type putReaderPreferencesResponse400 = {
+  data: ApiProblem
+  status: 400
+}
+
+export type putReaderPreferencesResponseSuccess = (putReaderPreferencesResponse200) & {
+  headers: Headers;
+};
+export type putReaderPreferencesResponseError = (putReaderPreferencesResponse400) & {
+  headers: Headers;
+};
+
+export type putReaderPreferencesResponse = (putReaderPreferencesResponseSuccess | putReaderPreferencesResponseError)
+
+export const getPutReaderPreferencesUrl = () => {
+
+
+
+
+  return `/api/reader/preferences`
+}
+
+/**
+ * @summary Create or update the current user's reader preferences (last-write-wins).
+ */
+export const putReaderPreferences = async (upsertReaderPreferencesRequest: UpsertReaderPreferencesRequest, options?: RequestInit): Promise<putReaderPreferencesResponse> => {
+
+  return orvalFetch<putReaderPreferencesResponse>(getPutReaderPreferencesUrl(),
+  {
+    ...options,
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json', ...options?.headers },
+    body: JSON.stringify(
+      upsertReaderPreferencesRequest,)
+  }
+);}
+
+
+
+export type listVocabularyResponse200 = {
+  data: VocabularyListResponse
+  status: 200
+}
+
+export type listVocabularyResponse400 = {
+  data: ApiProblem
+  status: 400
+}
+
+export type listVocabularyResponseSuccess = (listVocabularyResponse200) & {
+  headers: Headers;
+};
+export type listVocabularyResponseError = (listVocabularyResponse400) & {
+  headers: Headers;
+};
+
+export type listVocabularyResponse = (listVocabularyResponseSuccess | listVocabularyResponseError)
+
+export const getListVocabularyUrl = (params?: ListVocabularyParams,) => {
+  const normalizedParams = new URLSearchParams();
+
+  Object.entries(params || {}).forEach(([key, value]) => {
+
+    if (value !== undefined) {
+      normalizedParams.append(key, value === null ? 'null' : value.toString())
+    }
+  });
+
+  const stringifiedParams = normalizedParams.toString();
+
+  return stringifiedParams.length > 0 ? `/api/vocabulary?${stringifiedParams}` : `/api/vocabulary`
+}
+
+/**
+ * @summary Search the current user's saved vocabulary words.
+ */
+export const listVocabulary = async (params?: ListVocabularyParams, options?: RequestInit): Promise<listVocabularyResponse> => {
+
+  return orvalFetch<listVocabularyResponse>(getListVocabularyUrl(params),
+  {
+    ...options,
+    method: 'GET'
+
+
+  }
+);}
+
+
+
+export type putVocabularyEntryResponse200 = {
+  data: VocabularyEntry
+  status: 200
+}
+
+export type putVocabularyEntryResponse400 = {
+  data: ApiProblem
+  status: 400
+}
+
+export type putVocabularyEntryResponse404 = {
+  data: ApiProblem
+  status: 404
+}
+
+export type putVocabularyEntryResponseSuccess = (putVocabularyEntryResponse200) & {
+  headers: Headers;
+};
+export type putVocabularyEntryResponseError = (putVocabularyEntryResponse400 | putVocabularyEntryResponse404) & {
+  headers: Headers;
+};
+
+export type putVocabularyEntryResponse = (putVocabularyEntryResponseSuccess | putVocabularyEntryResponseError)
+
+export const getPutVocabularyEntryUrl = (entryId: string,) => {
+
+
+
+
+  return `/api/vocabulary/${entryId}`
+}
+
+/**
+ * @summary Create or update one saved word (last-write-wins); a duplicate word+language updates the existing entry.
+ */
+export const putVocabularyEntry = async (entryId: string,
+    upsertVocabularyEntryRequest: UpsertVocabularyEntryRequest, options?: RequestInit): Promise<putVocabularyEntryResponse> => {
+
+  return orvalFetch<putVocabularyEntryResponse>(getPutVocabularyEntryUrl(entryId),
+  {
+    ...options,
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json', ...options?.headers },
+    body: JSON.stringify(
+      upsertVocabularyEntryRequest,)
+  }
+);}
+
+
+
+export type deleteVocabularyEntryResponse200 = {
+  data: VocabularyEntry
+  status: 200
+}
+
+export type deleteVocabularyEntryResponse400 = {
+  data: ApiProblem
+  status: 400
+}
+
+export type deleteVocabularyEntryResponse404 = {
+  data: ApiProblem
+  status: 404
+}
+
+export type deleteVocabularyEntryResponseSuccess = (deleteVocabularyEntryResponse200) & {
+  headers: Headers;
+};
+export type deleteVocabularyEntryResponseError = (deleteVocabularyEntryResponse400 | deleteVocabularyEntryResponse404) & {
+  headers: Headers;
+};
+
+export type deleteVocabularyEntryResponse = (deleteVocabularyEntryResponseSuccess | deleteVocabularyEntryResponseError)
+
+export const getDeleteVocabularyEntryUrl = (entryId: string,
+    params: DeleteVocabularyEntryParams,) => {
+  const normalizedParams = new URLSearchParams();
+
+  Object.entries(params || {}).forEach(([key, value]) => {
+
+    if (value !== undefined) {
+      normalizedParams.append(key, value === null ? 'null' : value.toString())
+    }
+  });
+
+  const stringifiedParams = normalizedParams.toString();
+
+  return stringifiedParams.length > 0 ? `/api/vocabulary/${entryId}?${stringifiedParams}` : `/api/vocabulary/${entryId}`
+}
+
+/**
+ * @summary Tombstone one saved word (last-write-wins).
+ */
+export const deleteVocabularyEntry = async (entryId: string,
+    params: DeleteVocabularyEntryParams, options?: RequestInit): Promise<deleteVocabularyEntryResponse> => {
+
+  return orvalFetch<deleteVocabularyEntryResponse>(getDeleteVocabularyEntryUrl(entryId,params),
+  {
+    ...options,
+    method: 'DELETE'
+
+
+  }
+);}
+
+
+
+export type exportVocabularyResponse200 = {
+  data: void
+  status: 200
+}
+
+export type exportVocabularyResponse400 = {
+  data: ApiProblem
+  status: 400
+}
+
+export type exportVocabularyResponseSuccess = (exportVocabularyResponse200) & {
+  headers: Headers;
+};
+export type exportVocabularyResponseError = (exportVocabularyResponse400) & {
+  headers: Headers;
+};
+
+export type exportVocabularyResponse = (exportVocabularyResponseSuccess | exportVocabularyResponseError)
+
+export const getExportVocabularyUrl = (params: ExportVocabularyParams,) => {
+  const normalizedParams = new URLSearchParams();
+
+  Object.entries(params || {}).forEach(([key, value]) => {
+
+    if (value !== undefined) {
+      normalizedParams.append(key, value === null ? 'null' : value.toString())
+    }
+  });
+
+  const stringifiedParams = normalizedParams.toString();
+
+  return stringifiedParams.length > 0 ? `/api/vocabulary/export?${stringifiedParams}` : `/api/vocabulary/export`
+}
+
+/**
+ * @summary Download the current user's saved vocabulary as Markdown, JSON, or CSV.
+ */
+export const exportVocabulary = async (params: ExportVocabularyParams, options?: RequestInit): Promise<exportVocabularyResponse> => {
+
+  return orvalFetch<exportVocabularyResponse>(getExportVocabularyUrl(params),
   {
     ...options,
     method: 'GET'

@@ -64,6 +64,10 @@ public sealed class PrismediaDbContext : DbContext {
     public DbSet<BookAnnotationRow> BookAnnotations => Set<BookAnnotationRow>();
     public DbSet<BookBookmarkRow> BookBookmarks => Set<BookBookmarkRow>();
 
+    public DbSet<UserReaderPreferencesRow> UserReaderPreferences => Set<UserReaderPreferencesRow>();
+
+    public DbSet<VocabularyEntryRow> VocabularyEntries => Set<VocabularyEntryRow>();
+
     public DbSet<EntityConsumptionDayRow> EntityConsumptionDays => Set<EntityConsumptionDayRow>();
 
     public DbSet<EntityStatRow> EntityStats => Set<EntityStatRow>();

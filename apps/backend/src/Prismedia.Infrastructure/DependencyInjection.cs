@@ -19,6 +19,8 @@ using Prismedia.Application.Health;
 using Prismedia.Application.Audio;
 using Prismedia.Application.Backups;
 using Prismedia.Application.Books;
+using Prismedia.Application.Reader;
+using Prismedia.Application.Vocabulary;
 using Prismedia.Application.Plugins;
 using Prismedia.Application.Playback;
 using Prismedia.Application.Acquisition;
@@ -36,6 +38,7 @@ using Prismedia.Infrastructure.Files;
 using Prismedia.Infrastructure.Jobs;
 using Prismedia.Infrastructure.Media.Adapters;
 using Prismedia.Infrastructure.Media.Books;
+using Prismedia.Infrastructure.Media.Reader;
 using Prismedia.Infrastructure.Media.Comics;
 using Prismedia.Infrastructure.Media.Persistence;
 using Prismedia.Infrastructure.Media.Processing;
@@ -354,6 +357,8 @@ public static class DependencyInjection {
         services.AddScoped<IBookAnnotationService, EfBookAnnotationService>();
         services.AddScoped<IBookBookmarkService, EfBookBookmarkService>();
         services.AddScoped<IAnnotationLibraryService, EfAnnotationLibraryService>();
+        services.AddScoped<IReaderPreferencesService, EfReaderPreferencesService>();
+        services.AddScoped<IVocabularyService, EfVocabularyService>();
         services.AddScoped<IBookChapterMapService, EfBookChapterMapService>();
         services.AddScoped<IGridThumbnailService>(provider =>
             new GridThumbnailService(
