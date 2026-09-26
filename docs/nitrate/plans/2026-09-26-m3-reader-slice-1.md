@@ -697,7 +697,7 @@ Register the service: `services.AddScoped<IBookAnnotationService, EfBookAnnotati
 **Files:** modify `BookEndpoints.cs`; create `BookAnnotationEndpointTests.cs`, copying the fake-service and
 factory pattern from `BookChapterMappingEndpointTests.cs`.
 
-- [ ] **Step 1: Write the failing endpoint tests.** Use a `FakeBookAnnotationService`, `WithTestAuth()` and
+- [x] **Step 1: Write the failing endpoint tests.** Use a `FakeBookAnnotationService`, `WithTestAuth()` and
   `CreateAuthenticatedClient()`. Cover:
   - GET gives 200 with the list, and 404 when the service returns null.
   - PUT: `Applied` gives 200 with the body; `Superseded` gives 200 with the stored version; `Invalid` gives 400
@@ -705,7 +705,7 @@ factory pattern from `BookChapterMappingEndpointTests.cs`.
   - DELETE `?updatedAt=` gives 200 with the tombstone. DELETE with no `updatedAt` gives 400.
   - Unauthenticated GET gives 401. Build a client without auth, following an existing 401 test; grep
     `Status401Unauthorized` in `Prismedia.Api.Tests`.
-- [ ] **Step 2: Implement.** Add the routes inside `MapBookEndpoints`, before `return group;`:
+- [x] **Step 2: Implement.** Add the routes inside `MapBookEndpoints`, before `return group;`:
 
 ```csharp
         group.MapGet("/{id:guid}/annotations", async (
@@ -766,14 +766,14 @@ Add this private helper to `BookEndpoints`:
 Minimal APIs bind `DateTimeOffset updatedAt` from the query string, and a missing value gives 400. Confirm this in
 the test. Do **not** add `.RequireAdmin()`: the `/api` authentication middleware already requires a user.
 
-- [ ] **Step 3: Run** `pnpm test:backend` and compare with the baseline. Only the new tests change.
-- [ ] **Step 4: Commit.** `feat(api): add book annotation routes`
+- [x] **Step 3: Run** `pnpm test:backend` and compare with the baseline. Only the new tests change.
+- [x] **Step 4: Commit.** `feat(api): add book annotation routes`
 
 ---
 
 ## Task 6: Regenerated client, API wrapper and sync helper
 
-- [ ] **Step 1: Regenerate.** Start the dev API (BASELINE "Running locally"), then run `pnpm api:generate` and
+- [x] **Step 1: Regenerate.** Start the dev API (BASELINE "Running locally"), then run `pnpm api:generate` and
   `pnpm api:check`. Confirm that `codes.ts` now has `ANNOTATION_COLOR`, `ANNOTATION_STYLE` and
   `ANNOTATION_LOCATOR_KIND`, and note the exact names. Confirm that `generated/prismedia.ts` has
   `listBookAnnotations`, `upsertBookAnnotation` and `deleteBookAnnotation`, and note their exact signatures (orval

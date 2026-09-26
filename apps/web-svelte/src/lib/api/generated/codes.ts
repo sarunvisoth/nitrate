@@ -380,6 +380,31 @@ export const ACQUISITION_TEARDOWN_INTENT = {
 
 export type AcquisitionTeardownIntentCode = (typeof ACQUISITION_TEARDOWN_INTENT)[keyof typeof ACQUISITION_TEARDOWN_INTENT];
 
+// source: enum AnnotationColor
+export const ANNOTATION_COLOR = {
+  yellow: "yellow",
+  blue: "blue",
+  green: "green",
+  red: "red",
+  purple: "purple",
+} as const;
+
+export type AnnotationColorCode = (typeof ANNOTATION_COLOR)[keyof typeof ANNOTATION_COLOR];
+
+// source: enum AnnotationLocatorKind
+export const ANNOTATION_LOCATOR_KIND = {
+  epubCfi: "epub-cfi",
+} as const;
+
+export type AnnotationLocatorKindCode = (typeof ANNOTATION_LOCATOR_KIND)[keyof typeof ANNOTATION_LOCATOR_KIND];
+
+// source: enum AnnotationStyle
+export const ANNOTATION_STYLE = {
+  highlight: "highlight",
+} as const;
+
+export type AnnotationStyleCode = (typeof ANNOTATION_STYLE)[keyof typeof ANNOTATION_STYLE];
+
 // source: enum AudioPlaybackDiagnosticEvent
 export const AUDIO_PLAYBACK_DIAGNOSTIC_EVENT = {
   playing: "playing",
@@ -1613,6 +1638,7 @@ export const PROBLEM_CODE = {
   identifyTargetNotEligible: "identify_target_not_eligible",
   indexerInvalid: "indexer_invalid",
   indexerUnreachable: "indexer_unreachable",
+  invalidBookAnnotation: "invalid_book_annotation",
   invalidBookChapterMapping: "invalid_book_chapter_mapping",
   invalidCollection: "invalid_collection",
   invalidCollectionItems: "invalid_collection_items",

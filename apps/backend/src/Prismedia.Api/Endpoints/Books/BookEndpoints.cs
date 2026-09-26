@@ -70,6 +70,60 @@ public static class BookEndpoints {
             .Produces<ApiProblem>(StatusCodes.Status400BadRequest)
             .Produces<ApiProblem>(StatusCodes.Status404NotFound);
 
+        group.MapGet("/{id:guid}/annotations", async (
+            Guid id,
+            IBookAnnotationService annotations,
+            CancellationToken cancellationToken) => {
+                var result = await annotations.ListAsync(id, cancellationToken);
+                return result is null
+                    ? Results.NotFound(new ApiProblem(
+                        ApiProblemCodes.EntityNotFound,
+                        $"Book '{id}' was not found."))
+                    : Results.Ok(result);
+            })
+            .WithName("ListBookAnnotations")
+            .WithSummary("List the current user's highlights and notes for a Book, including deleted tombstones.")
+            .Produces<BookAnnotationsResponse>()
+            .Produces<ApiProblem>(StatusCodes.Status404NotFound);
+
+        group.MapPut("/{id:guid}/annotations/{annotationId:guid}", async (
+            Guid id,
+            Guid annotationId,
+            UpsertBookAnnotationRequest request,
+            IBookAnnotationService annotations,
+            CancellationToken cancellationToken) =>
+                ToAnnotationResult(id, await annotations.UpsertAsync(id, annotationId, request, cancellationToken)))
+            .WithName("UpsertBookAnnotation")
+            .WithSummary("Create or update one annotation; the write with the newest updatedAt wins.")
+            .Produces<BookAnnotation>()
+            .Produces<ApiProblem>(StatusCodes.Status400BadRequest)
+            .Produces<ApiProblem>(StatusCodes.Status404NotFound);
+
+        group.MapDelete("/{id:guid}/annotations/{annotationId:guid}", async (
+            Guid id,
+            Guid annotationId,
+            DateTimeOffset updatedAt,
+            IBookAnnotationService annotations,
+            CancellationToken cancellationToken) =>
+                ToAnnotationResult(id, await annotations.DeleteAsync(id, annotationId, updatedAt, cancellationToken)))
+            .WithName("DeleteBookAnnotation")
+            .WithSummary("Tombstone one annotation; the write with the newest updatedAt wins.")
+            .Produces<BookAnnotation>()
+            .Produces<ApiProblem>(StatusCodes.Status400BadRequest)
+            .Produces<ApiProblem>(StatusCodes.Status404NotFound);
+
         return group;
     }
+
+    private static IResult ToAnnotationResult(Guid bookId, BookAnnotationWriteResult result) =>
+        result.Status switch {
+            BookAnnotationWriteStatus.Applied or BookAnnotationWriteStatus.Superseded => Results.Ok(result.Annotation),
+            BookAnnotationWriteStatus.NotFound => Results.NotFound(new ApiProblem(
+                ApiProblemCodes.EntityNotFound,
+                $"Annotation on book '{bookId}' was not found.")),
+            BookAnnotationWriteStatus.Invalid => Results.BadRequest(new ApiProblem(
+                ApiProblemCodes.InvalidBookAnnotation,
+                result.Error ?? "The annotation is invalid.")),
+            _ => throw new ArgumentOutOfRangeException(nameof(result))
+        };
 }

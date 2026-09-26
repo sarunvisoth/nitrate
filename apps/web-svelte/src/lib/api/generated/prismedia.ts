@@ -28,6 +28,8 @@ import type {
   AudioPlaybackDiagnosticRequest,
   BookAcquisitionProfileSaveRequest,
   BookAcquisitionProfileView,
+  BookAnnotation,
+  BookAnnotationsResponse,
   BookChapterMappingsResponse,
   BookContentsResponse,
   BrowseLibraryPathParams,
@@ -63,6 +65,7 @@ import type {
   DatabaseRestoreRequest,
   DatabaseRestoreScheduledResponse,
   DatabaseRestoreStatusResponse,
+  DeleteBookAnnotationParams,
   DeleteEntityParams,
   DeleteFileParams,
   DownloadClientSaveRequest,
@@ -252,6 +255,7 @@ import type {
   UpdateOpenSubtitlesConfigurationRequest,
   UpdateOwnProfileRequest,
   UploadAcquisitionTorrentBody,
+  UpsertBookAnnotationRequest,
   UserCreateRequest,
   UserLibraryAccessUpdateRequest,
   UserResponse,
@@ -4540,6 +4544,160 @@ export const replaceBookChapterMappings = async (id: string,
     headers: { 'Content-Type': 'application/json', ...options?.headers },
     body: JSON.stringify(
       replaceBookChapterMappingsRequest,)
+  }
+);}
+
+
+
+export type listBookAnnotationsResponse200 = {
+  data: BookAnnotationsResponse
+  status: 200
+}
+
+export type listBookAnnotationsResponse404 = {
+  data: ApiProblem
+  status: 404
+}
+
+export type listBookAnnotationsResponseSuccess = (listBookAnnotationsResponse200) & {
+  headers: Headers;
+};
+export type listBookAnnotationsResponseError = (listBookAnnotationsResponse404) & {
+  headers: Headers;
+};
+
+export type listBookAnnotationsResponse = (listBookAnnotationsResponseSuccess | listBookAnnotationsResponseError)
+
+export const getListBookAnnotationsUrl = (id: string,) => {
+
+
+
+
+  return `/api/books/${id}/annotations`
+}
+
+/**
+ * @summary List the current user's highlights and notes for a Book, including deleted tombstones.
+ */
+export const listBookAnnotations = async (id: string, options?: RequestInit): Promise<listBookAnnotationsResponse> => {
+
+  return orvalFetch<listBookAnnotationsResponse>(getListBookAnnotationsUrl(id),
+  {
+    ...options,
+    method: 'GET'
+
+
+  }
+);}
+
+
+
+export type upsertBookAnnotationResponse200 = {
+  data: BookAnnotation
+  status: 200
+}
+
+export type upsertBookAnnotationResponse400 = {
+  data: ApiProblem
+  status: 400
+}
+
+export type upsertBookAnnotationResponse404 = {
+  data: ApiProblem
+  status: 404
+}
+
+export type upsertBookAnnotationResponseSuccess = (upsertBookAnnotationResponse200) & {
+  headers: Headers;
+};
+export type upsertBookAnnotationResponseError = (upsertBookAnnotationResponse400 | upsertBookAnnotationResponse404) & {
+  headers: Headers;
+};
+
+export type upsertBookAnnotationResponse = (upsertBookAnnotationResponseSuccess | upsertBookAnnotationResponseError)
+
+export const getUpsertBookAnnotationUrl = (id: string,
+    annotationId: string,) => {
+
+
+
+
+  return `/api/books/${id}/annotations/${annotationId}`
+}
+
+/**
+ * @summary Create or update one annotation; the write with the newest updatedAt wins.
+ */
+export const upsertBookAnnotation = async (id: string,
+    annotationId: string,
+    upsertBookAnnotationRequest: UpsertBookAnnotationRequest, options?: RequestInit): Promise<upsertBookAnnotationResponse> => {
+
+  return orvalFetch<upsertBookAnnotationResponse>(getUpsertBookAnnotationUrl(id,annotationId),
+  {
+    ...options,
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json', ...options?.headers },
+    body: JSON.stringify(
+      upsertBookAnnotationRequest,)
+  }
+);}
+
+
+
+export type deleteBookAnnotationResponse200 = {
+  data: BookAnnotation
+  status: 200
+}
+
+export type deleteBookAnnotationResponse400 = {
+  data: ApiProblem
+  status: 400
+}
+
+export type deleteBookAnnotationResponse404 = {
+  data: ApiProblem
+  status: 404
+}
+
+export type deleteBookAnnotationResponseSuccess = (deleteBookAnnotationResponse200) & {
+  headers: Headers;
+};
+export type deleteBookAnnotationResponseError = (deleteBookAnnotationResponse400 | deleteBookAnnotationResponse404) & {
+  headers: Headers;
+};
+
+export type deleteBookAnnotationResponse = (deleteBookAnnotationResponseSuccess | deleteBookAnnotationResponseError)
+
+export const getDeleteBookAnnotationUrl = (id: string,
+    annotationId: string,
+    params: DeleteBookAnnotationParams,) => {
+  const normalizedParams = new URLSearchParams();
+
+  Object.entries(params || {}).forEach(([key, value]) => {
+
+    if (value !== undefined) {
+      normalizedParams.append(key, value === null ? 'null' : value.toString())
+    }
+  });
+
+  const stringifiedParams = normalizedParams.toString();
+
+  return stringifiedParams.length > 0 ? `/api/books/${id}/annotations/${annotationId}?${stringifiedParams}` : `/api/books/${id}/annotations/${annotationId}`
+}
+
+/**
+ * @summary Tombstone one annotation; the write with the newest updatedAt wins.
+ */
+export const deleteBookAnnotation = async (id: string,
+    annotationId: string,
+    params: DeleteBookAnnotationParams, options?: RequestInit): Promise<deleteBookAnnotationResponse> => {
+
+  return orvalFetch<deleteBookAnnotationResponse>(getDeleteBookAnnotationUrl(id,annotationId,params),
+  {
+    ...options,
+    method: 'DELETE'
+
+
   }
 );}
 
