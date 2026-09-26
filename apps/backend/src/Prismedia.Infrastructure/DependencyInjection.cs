@@ -1,0 +1,691 @@
+using Microsoft.Extensions.Configuration;
+using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.DependencyInjection.Extensions;
+using Microsoft.Extensions.Logging;
+using Microsoft.EntityFrameworkCore;
+using Npgsql;
+using Prismedia.Infrastructure.Diagnostics;
+using Prismedia.Application.Collections;
+using Prismedia.Application.Consumption;
+using Prismedia.Domain.Entities;
+using Prismedia.Application.Entities;
+using Prismedia.Application.Files;
+using Prismedia.Application.Jobs;
+using Prismedia.Application.Jobs.Ports;
+using Prismedia.Application.Organization;
+using Prismedia.Application.Opds;
+using Prismedia.Application.Settings;
+using Prismedia.Application.Health;
+using Prismedia.Application.Audio;
+using Prismedia.Application.Backups;
+using Prismedia.Application.Books;
+using Prismedia.Application.Plugins;
+using Prismedia.Application.Playback;
+using Prismedia.Application.Acquisition;
+using Prismedia.Application.Requests;
+using Prismedia.Application.Security;
+using Prismedia.Application.Videos;
+using Prismedia.Application.Subtitles;
+using Prismedia.Infrastructure.Audio;
+using Prismedia.Infrastructure.Collections;
+using Prismedia.Infrastructure.Consumption;
+using Prismedia.Infrastructure.Database;
+using Prismedia.Infrastructure.Entities;
+using Prismedia.Infrastructure.Entities.Mappers;
+using Prismedia.Infrastructure.Files;
+using Prismedia.Infrastructure.Jobs;
+using Prismedia.Infrastructure.Media.Adapters;
+using Prismedia.Infrastructure.Media.Books;
+using Prismedia.Infrastructure.Media.Comics;
+using Prismedia.Infrastructure.Media.Persistence;
+using Prismedia.Infrastructure.Media.Processing;
+using Prismedia.Infrastructure.Media.Sidecars;
+using Prismedia.Infrastructure.Organization;
+using Prismedia.Infrastructure.Opds;
+using Prismedia.Infrastructure.Persistence;
+using Prismedia.Infrastructure.Plugins;
+using Prismedia.Infrastructure.Playback;
+using Prismedia.Infrastructure.Processes;
+using Prismedia.Infrastructure.Queue;
+using Prismedia.Infrastructure.Acquisition;
+using Prismedia.Infrastructure.Requests;
+using Prismedia.Infrastructure.Settings;
+using Prismedia.Infrastructure.Security;
+using Prismedia.Infrastructure.StashCompat;
+using Prismedia.Infrastructure.Health;
+using Prismedia.Infrastructure.Videos;
+using Prismedia.Infrastructure.Subtitles;
+
+namespace Prismedia.Infrastructure;
+
+public static class DependencyInjection {
+    public static IServiceCollection AddPrismediaInfrastructure(
+        this IServiceCollection services,
+        IConfiguration configuration,
+        string? contentRootPath = null) {
+        var configuredConnectionString =
+            configuration["DATABASE_URL"] ??
+            configuration.GetConnectionString("Prismedia") ??
+            throw new InvalidOperationException("Prismedia requires DATABASE_URL or ConnectionStrings:Prismedia.");
+
+        var connectionString = PostgresConnectionString.Normalize(configuredConnectionString);
+        var pathBase = contentRootPath ?? Directory.GetCurrentDirectory();
+        var dataDir = NormalizePath(configuration["PRISMEDIA_DATA_DIR"] ??
+            configuration["Prismedia:DataDir"] ??
+            "/data", pathBase);
+        var cacheDir = NormalizePath(configuration["PRISMEDIA_CACHE_DIR"] ??
+            configuration["Prismedia:CacheDir"] ??
+            Path.Combine(dataDir, "cache"), pathBase);
+        var mediaToolOptions = MediaToolOptions.FromConfiguration(
+            configuration["PRISMEDIA_FFMPEG_PATH"] ?? configuration["Prismedia:Hls:FfmpegPath"],
+            configuration["PRISMEDIA_FFPROBE_PATH"] ?? configuration["Prismedia:Hls:FfprobePath"]);
+        if (int.TryParse(
+                configuration["PRISMEDIA_ASSETGEN_THREADS"] ?? configuration["Prismedia:AssetGenerationThreads"],
+                out var assetGenThreads) && assetGenThreads >= 1) {
+            mediaToolOptions = mediaToolOptions with { AssetGenerationThreads = assetGenThreads };
+        }
+
+        RegisterPersistence(services, connectionString);
+        services.AddSingleton(new ManagedGeneratedSourceRoot(dataDir));
+        RegisterMediaProcessing(services, mediaToolOptions, dataDir, cacheDir);
+        RegisterPluginsAndIdentify(services, configuration, pathBase, cacheDir);
+        RegisterLibraryScanning(services, dataDir);
+        RegisterEntities(services, cacheDir);
+        RegisterFilesAndOrganization(services);
+        RegisterPlayback(services, configuration, cacheDir, mediaToolOptions);
+        RegisterRequests(services);
+        RegisterAcquisition(services, dataDir);
+        RegisterJobsSettingsAndState(services, configuration, dataDir, connectionString, pathBase);
+
+        return services;
+    }
+
+    private static void RegisterPersistence(IServiceCollection services, string connectionString) {
+        services.AddSingleton(_ => NpgsqlDataSource.Create(connectionString));
+        // Pooled contexts avoid per-request context + change-tracker allocation. The context's
+        // only constructor dependency is its options, which is what pooling requires.
+        services.AddDbContextPool<PrismediaDbContext>((provider, options) =>
+            options
+                .UseNpgsql(provider.GetRequiredService<NpgsqlDataSource>())
+                .AddInterceptors(DbCommandCountingInterceptor.Instance));
+    }
+
+    private static void RegisterMediaProcessing(
+        IServiceCollection services,
+        MediaToolOptions mediaToolOptions,
+        string dataDir,
+        string cacheDir) {
+        services.AddSingleton<IHostLoadProbe, HostLoadProbe>();
+        services.AddSingleton<IMediaProcessLeaseStore, PostgresMediaProcessLeaseStore>();
+        services.AddSingleton<IMediaProcessAdmission>(provider =>
+            new MediaProcessAdmission(
+                provider.GetRequiredService<IMediaProcessLeaseStore>(),
+                provider.GetRequiredService<IHostLoadProbe>(),
+                AdaptiveJobCapacity.BackgroundMediaProcessLimit(Environment.ProcessorCount),
+                logger: provider.GetRequiredService<ILogger<MediaProcessAdmission>>()));
+        services.AddSingleton<ProcessExecutor>();
+        services.AddSingleton(mediaToolOptions);
+        services.AddSingleton<MediaToolService>();
+        services.AddSingleton<FileDiscoveryService>();
+        services.AddSingleton(new AssetPathService(dataDir, cacheDir));
+        services.AddSingleton<EntityAssetCleanupService>();
+        services.AddSingleton(provider => new MediaProbeService(
+            provider.GetRequiredService<ProcessExecutor>(),
+            provider.GetRequiredService<MediaToolOptions>()));
+        services.AddSingleton(provider => new ThumbnailService(
+            provider.GetRequiredService<ProcessExecutor>(),
+            provider.GetRequiredService<MediaProbeService>(),
+            provider.GetRequiredService<MediaToolOptions>()));
+        services.AddSingleton(provider => new SubtitleAssetImportService(
+            provider.GetRequiredService<ProcessExecutor>(),
+            provider.GetRequiredService<AssetPathService>(),
+            provider.GetRequiredService<MediaToolOptions>()));
+        services.AddSingleton<HashingService>();
+        services.AddSingleton<SkiaImageDownscaler>();
+        services.AddSingleton<SkiaThumbnailCollageComposer>();
+        services.AddSingleton<IImageThumbnailGenerator>(provider =>
+            new ImageThumbnailGenerator(
+                provider.GetRequiredService<SkiaImageDownscaler>(),
+                provider.GetRequiredService<ThumbnailService>()));
+        services.AddSingleton<IFileDiscovery>(provider =>
+            new FileDiscoveryAdapter(provider.GetRequiredService<FileDiscoveryService>()));
+        services.AddSingleton<ISubtitleSidecarDiscovery, SubtitleSidecarDiscovery>();
+        services.AddSingleton<IMediaProbe>(provider =>
+            new MediaProbeAdapter(provider.GetRequiredService<MediaProbeService>()));
+        services.AddSingleton<IMediaHashing>(provider =>
+            new MediaHashingAdapter(provider.GetRequiredService<HashingService>()));
+    }
+
+    private static void RegisterPluginsAndIdentify(
+        IServiceCollection services,
+        IConfiguration configuration,
+        string pathBase,
+        string cacheDir) {
+        services.AddSingleton(new PluginCatalogOptions(
+            ResolvePluginDevPaths(configuration, pathBase),
+            cacheDir,
+            ResolveCurrentVersion(configuration, pathBase),
+            ResolvePluginIndexUrl(configuration),
+            ResolveStashScraperIndexUrl(configuration)));
+        services.AddSingleton<DotnetPluginProcessRunner>();
+        services.AddSingleton<IIdentifyRunner>(provider =>
+            provider.GetRequiredService<DotnetPluginProcessRunner>());
+        services.AddSingleton<IIdentifyRunner>(provider => new StashCompatRunner(
+            new HttpClient { Timeout = TimeSpan.FromSeconds(30) },
+            new StashScriptExecutor(provider.GetRequiredService<ProcessExecutor>())));
+        services.AddSingleton<IdentifyRunnerSelector>();
+        services.AddSingleton<PluginIndexCache>();
+        services.AddScoped(provider => new PluginCatalogService(
+            provider.GetRequiredService<PrismediaDbContext>(),
+            provider.GetRequiredService<PluginCatalogOptions>(),
+            indexCache: provider.GetRequiredService<PluginIndexCache>()));
+        services.AddScoped<IPluginCatalogService>(provider =>
+            new ScopedPluginCatalogCache(provider.GetRequiredService<PluginCatalogService>()));
+        services.AddScoped<IPluginIdentityRouter, PluginIdentityRouter>();
+        services.AddScoped<IPluginIdentityUrlResolver, PluginIdentityUrlResolver>();
+        services.AddScoped<IdentifyMatchHintResolver>();
+        services.AddScoped(provider => new EntityMetadataApplyService(
+            provider.GetRequiredService<PrismediaDbContext>(),
+            new PluginArtworkServiceOptions(cacheDir),
+            gridThumbnails: provider.GetRequiredService<IGridThumbnailService>(),
+            externalIdentities: provider.GetRequiredService<IEntityExternalIdentityStore>(),
+            providerIdentities: provider.GetRequiredService<IEntityProviderIdentityStore>(),
+            identityRouter: provider.GetRequiredService<IPluginIdentityRouter>(),
+            lifecycle: provider.GetRequiredService<IEntityLifecycleMutationLease>(),
+            currentUser: provider.GetRequiredService<Prismedia.Application.Security.ICurrentUserContext>(),
+            releaseDateChanges: provider.GetRequiredService<IAcquisitionReleaseDateChangeHandler>(),
+            settings: provider.GetRequiredService<Prismedia.Application.Settings.SettingsService>()));
+        services.AddScoped<IEntityMetadataPatchService>(provider =>
+            provider.GetRequiredService<EntityMetadataApplyService>());
+        services.AddScoped<IEntityPositionEnricher>(provider =>
+            provider.GetRequiredService<EntityMetadataApplyService>());
+        services.AddScoped<IEntityManagementService, EntityManagementService>();
+        services.AddScoped<IMediaEntityDeletionService, MediaEntityDeletionService>();
+        services.AddScoped<IIdentifyTargetEligibilityService, EfIdentifyTargetEligibilityService>();
+        services.AddScoped<IdentifyPluginService>();
+        services.AddScoped<IIdentifyProviderService>(provider =>
+            provider.GetRequiredService<IdentifyPluginService>());
+        services.AddScoped<IdentifyQueueService>();
+        services.AddScoped<IIdentifyQueueService>(provider =>
+            provider.GetRequiredService<IdentifyQueueService>());
+        services.AddScoped<IIdentifySearchRunner, IdentifySearchRunnerAdapter>();
+        services.AddScoped<IIdentifyApplyRunner, IdentifyApplyRunnerAdapter>();
+        services.AddScoped<IAutoIdentifyRunner, AutoIdentifyRunner>();
+        services.AddScoped<IIdentifyProviderCallRunner, IdentifyProviderCallRunnerAdapter>();
+        services.AddScoped<IIdentifyCascadeRunner, IdentifyCascadeRunnerAdapter>();
+    }
+
+    private static void RegisterLibraryScanning(IServiceCollection services, string dataDir) {
+        services.AddScoped(provider =>
+            new MediaAssetGeneratorAdapter(
+                provider.GetRequiredService<ThumbnailService>(),
+                provider.GetRequiredService<AssetPathService>(),
+                provider.GetRequiredService<SubtitleAssetImportService>(),
+                provider.GetRequiredService<SettingsService>(),
+                provider.GetRequiredService<MediaToolOptions>()));
+        services.AddScoped<IMediaAssetGenerator>(provider =>
+            provider.GetRequiredService<MediaAssetGeneratorAdapter>());
+        services.AddScoped<ISubtitleAssetService>(provider =>
+            provider.GetRequiredService<MediaAssetGeneratorAdapter>());
+        services.AddScoped(provider =>
+            new LibraryScanPersistenceService(
+                provider.GetRequiredService<PrismediaDbContext>(),
+                provider.GetRequiredService<AssetPathService>(),
+                provider.GetRequiredService<IEntityLifecycleMutationLease>()));
+        services.AddScoped<ILibraryScanRootPersistence>(provider =>
+            provider.GetRequiredService<LibraryScanPersistenceService>());
+        services.AddScoped<IVideoScanPersistence>(provider =>
+            provider.GetRequiredService<LibraryScanPersistenceService>());
+        services.AddScoped<IImageGalleryScanPersistence>(provider =>
+            provider.GetRequiredService<LibraryScanPersistenceService>());
+        services.AddScoped<IAudioScanPersistence>(provider =>
+            provider.GetRequiredService<LibraryScanPersistenceService>());
+        services.AddScoped<IBookScanPersistence>(provider =>
+            provider.GetRequiredService<LibraryScanPersistenceService>());
+        services.AddScoped<IComicScanPersistence>(provider =>
+            provider.GetRequiredService<LibraryScanPersistenceService>());
+        services.AddScoped<IDownstreamNeedsPersistence>(provider =>
+            provider.GetRequiredService<LibraryScanPersistenceService>());
+        services.AddScoped<IImportedEntityReadinessPersistence, EfImportedEntityReadinessPersistence>();
+        services.AddScoped<IMediaProcessingStatePersistence>(provider =>
+            provider.GetRequiredService<LibraryScanPersistenceService>());
+        services.AddScoped<IEntityRefreshTreePersistence>(provider =>
+            provider.GetRequiredService<LibraryScanPersistenceService>());
+        services.AddScoped<IScanMetadataPersistence>(provider =>
+            provider.GetRequiredService<LibraryScanPersistenceService>());
+        services.AddScoped<IScanSnapshotStore, EfScanSnapshotStore>();
+        services.AddScoped<ILibraryFileChangeIntake, EfLibraryFileChangeIntake>();
+        services.AddSingleton<IVideoSidecarMetadataReader, VideoSidecarMetadataReader>();
+        services.AddSingleton<IComicInfoMetadataReader, ComicInfoMetadataReader>();
+        services.AddSingleton<IComicFolderNormalizer>(provider =>
+            new ComicFolderNormalizer(
+                provider.GetRequiredService<ManagedGeneratedSourceRoot>(),
+                provider.GetRequiredService<ILogger<ComicFolderNormalizer>>()));
+        services.AddSingleton<IBookFileMetadataReader, Media.Books.BookFileMetadataReader>();
+        services.AddSingleton<IBookCoverImageExtractor, Media.Books.BookCoverImageExtractor>();
+        services.AddScoped<IMaintenancePersistence>(provider =>
+            new MaintenancePersistenceService(
+                provider.GetRequiredService<PrismediaDbContext>(),
+                provider.GetRequiredService<AssetPathService>()));
+        services.AddScoped<ICollectionRuleEngine, CollectionRuleEngine>();
+        services.AddScoped<ICollectionRefreshPersistence, CollectionRefreshPersistenceService>();
+        services.AddScoped<ICollectionItemReadService, CollectionItemReadService>();
+        services.AddScoped<ICollectionCommandPersistence, CollectionCommandPersistence>();
+        services.AddScoped<ICollectionCommandService, Prismedia.Application.Collections.CollectionCommandService>();
+    }
+
+    private static void RegisterEntities(IServiceCollection services, string cacheDir) {
+        RegisterEntityMappers(services);
+        RegisterThumbnailContributors(services);
+        services.AddScoped<IEntityExternalIdentityStore, EfEntityExternalIdentityStore>();
+        services.AddScoped<IEntityProviderIdentityStore, EfEntityProviderIdentityStore>();
+        services.AddScoped<IEntityHierarchyReader, EfEntityHierarchyReader>();
+        services.AddScoped<IEntityLifecycleMutationLease, EfEntityLifecycleMutationLease>();
+        services.AddScoped<EfEntitySourceOwnershipProjection>();
+        services.AddScoped<IEntitySourceOwnershipReader>(provider =>
+            provider.GetRequiredService<EfEntitySourceOwnershipProjection>());
+        services.AddScoped<EfEntityFileDeletionRecoveryProjection>();
+        services.AddScoped<IEntityFileDeletionRecoveryReader>(provider =>
+            provider.GetRequiredService<EfEntityFileDeletionRecoveryProjection>());
+        services.AddScoped<IEntityLifecycleRecoveryStore>(provider =>
+            provider.GetRequiredService<EfEntityFileDeletionRecoveryProjection>());
+        services.AddScoped<EfEntityRepository>();
+        services.AddScoped<IEntityWriteRepository>(provider => provider.GetRequiredService<EfEntityRepository>());
+        services.AddScoped<EfEntityProgressTopologyResolver>();
+        services.AddScoped<IEntityProgressTopologyResolver>(provider => provider.GetRequiredService<EfEntityProgressTopologyResolver>());
+        // Read, statistics, and collection projections share this scoped hidden-roots memoization.
+        services.AddSingleton<VisibilityScopeCache>();
+        services.AddScoped<EfEntityLibraryVisibilityFilter>();
+        services.AddScoped<EfEntityCatalogQuery>();
+        services.AddScoped<EfEntityReadService>();
+        services.AddScoped<IEntityReadService>(provider => provider.GetRequiredService<EfEntityReadService>());
+        services.AddScoped<IEntityAvailabilityReconciler, EfEntityAvailabilityReconciler>();
+        services.AddScoped<IEntityRollupReconciler, EfEntityRollupReconciler>();
+        services.AddScoped<IEntityAssetRowSweeper, EfEntityAssetRowSweeper>();
+        services.AddScoped<IEntityVisibilityChecker, EfEntityVisibilityChecker>();
+        services.AddScoped<EfLibraryAccessReader>();
+        services.AddScoped<ILibraryAccessReader>(provider => provider.GetRequiredService<EfLibraryAccessReader>());
+        services.AddScoped<ILibraryAccessStore>(provider => provider.GetRequiredService<EfLibraryAccessReader>());
+        services.AddScoped<IEntityFileContentService, EfEntityFileContentService>();
+        services.AddScoped<EfEntityReaderService>();
+        services.AddScoped<IEntityReaderService>(provider =>
+            provider.GetRequiredService<EfEntityReaderService>());
+        services.AddScoped<IEntityPageManifestStore>(provider =>
+            provider.GetRequiredService<EfEntityReaderService>());
+        services.AddSingleton<EpubBookContentsCache>();
+        services.AddScoped<IBookContentsService, EpubBookContentsService>();
+        services.AddScoped<IBookChapterMappingService, EfBookChapterMappingService>();
+        services.TryAddSingleton(TimeProvider.System);
+        services.AddScoped<IBookAnnotationService, EfBookAnnotationService>();
+        services.AddScoped<IBookChapterMapService, EfBookChapterMapService>();
+        services.AddScoped<IGridThumbnailService>(provider =>
+            new GridThumbnailService(
+                provider.GetRequiredService<PrismediaDbContext>(),
+                provider.GetRequiredService<AssetPathService>(),
+                provider.GetRequiredService<IImageThumbnailGenerator>(),
+                provider.GetRequiredService<SkiaThumbnailCollageComposer>()));
+        services.AddScoped<IEntityImageAssetMutationService>(provider =>
+            new EntityImageAssetMutationService(
+                provider.GetRequiredService<PrismediaDbContext>(),
+                new EntityImageAssetStorageOptions(cacheDir),
+                provider.GetRequiredService<IGridThumbnailService>()));
+        services.AddScoped<IOpdsCatalogService, EfOpdsCatalogService>();
+    }
+
+    private static void RegisterFilesAndOrganization(IServiceCollection services) {
+        services.AddScoped<IOrganizePersistence, EfOrganizePersistence>();
+        services.AddScoped<IFilesPersistence, EfFilesPersistence>();
+        services.AddScoped<IEntitySourcePathOwnerReader, EfEntitySourcePathOwnerReader>();
+        services.AddSingleton<IManagedFileStorage, LocalManagedFileStorage>();
+        services.AddSingleton<IFileArchivePreparationService, FileArchivePreparationService>();
+    }
+
+    private static void RegisterPlayback(
+        IServiceCollection services,
+        IConfiguration configuration,
+        string cacheDir,
+        MediaToolOptions mediaToolOptions) {
+        services.AddScoped<IVideoSourceService, VideoSourceService>();
+        services.AddScoped<IAudioSourceService, AudioSourceService>();
+        services.AddSingleton<IAudioTranscodeStreamer, FfmpegAudioTranscodeStreamer>();
+        services.AddSingleton<IAudioTranscodeOptions, MediaToolAudioTranscodeOptions>();
+        services.AddSingleton(new HlsAssetServiceOptions(
+            cacheDir,
+            HlsTranscoderProfiles.ParseOrDefault(configuration["PRISMEDIA_HLS_TRANSCODER"] ?? configuration["Prismedia:Hls:Transcoder"]),
+            mediaToolOptions.FfmpegPath,
+            configuration["PRISMEDIA_VAAPI_DEVICE"] ?? configuration["Prismedia:Hls:VaapiDevice"] ?? "/dev/dri/renderD128",
+            mediaToolOptions.FfprobePath));
+        services.AddSingleton<ITranscodeSessionService, TranscodeSessionService>();
+        services.AddSingleton<ITranscodeCacheService, TranscodeCacheService>();
+        services.AddScoped<HlsAssetService>();
+        services.AddScoped<IHlsAssetService>(provider => provider.GetRequiredService<HlsAssetService>());
+        services.AddScoped<IRemuxTimelinePreparationService>(provider => provider.GetRequiredService<HlsAssetService>());
+        services.AddScoped<IVideoPlaybackPlanService, VideoPlaybackPlanService>();
+        services.AddScoped<IPlaybackSessionService, PlaybackSessionService>();
+        services.AddScoped<IConsumptionEventStore, EfConsumptionEventStore>();
+        services.AddScoped<IConsumptionActivityStore, EfConsumptionActivityStore>();
+        services.AddScoped<IConsumptionStatisticsService, EfConsumptionStatisticsService>();
+        services.AddScoped<ITrickplayService, TrickplayService>();
+        services.AddScoped<IVideoSubtitleAssetService>(provider =>
+            new VideoSubtitleAssetService(
+                provider.GetRequiredService<PrismediaDbContext>(),
+                provider.GetRequiredService<ProcessExecutor>(),
+                provider.GetRequiredService<MediaToolOptions>(),
+                provider.GetRequiredService<AssetPathService>()));
+        services.AddSingleton(_ => new OpenSubtitlesClient(new HttpClient(new SocketsHttpHandler {
+            AllowAutoRedirect = true,
+            MaxAutomaticRedirections = 3,
+        }) {
+            Timeout = TimeSpan.FromSeconds(30),
+        }));
+        services.AddScoped<ISubtitleAcquisitionService, SubtitleAcquisitionService>();
+    }
+
+    private static void RegisterJobsSettingsAndState(
+        IServiceCollection services,
+        IConfiguration configuration,
+        string dataDir,
+        string connectionString,
+        string pathBase) {
+        var backupDir = NormalizePath(configuration["PRISMEDIA_BACKUP_DIR"] ??
+            configuration["Prismedia:Backups:Directory"] ??
+            Path.Combine(dataDir, "backups", "database"), dataDir);
+        var retentionDays = int.TryParse(
+                configuration["PRISMEDIA_BACKUP_RETENTION_DAYS"] ??
+                configuration["Prismedia:Backups:RetentionDays"],
+                out var configuredRetentionDays) && configuredRetentionDays > 0
+            ? configuredRetentionDays
+            : 7;
+        var repoRoot = FindRepoRoot(pathBase);
+        var dockerComposeFilePath = configuration["PRISMEDIA_BACKUP_DOCKER_COMPOSE_FILE"] ??
+            configuration["Prismedia:Backups:DockerComposeFile"] ??
+            (repoRoot is null ? null : Path.Combine(repoRoot, "infra", "docker", "docker-compose.yml"));
+        if (!string.IsNullOrWhiteSpace(dockerComposeFilePath)) {
+            dockerComposeFilePath = NormalizePath(dockerComposeFilePath, pathBase);
+        }
+
+        services.AddSingleton(new DatabaseBackupOptions(
+            connectionString,
+            backupDir,
+            Path.Combine(backupDir, "restore-request.json"),
+            configuration["PRISMEDIA_PG_DUMP_PATH"] ??
+            configuration["Prismedia:Backups:PgDumpPath"] ??
+            "pg_dump",
+            configuration["PRISMEDIA_PG_RESTORE_PATH"] ??
+            configuration["Prismedia:Backups:PgRestorePath"] ??
+            "pg_restore",
+            dockerComposeFilePath,
+            configuration["PRISMEDIA_BACKUP_DOCKER_COMPOSE_POSTGRES_SERVICE"] ??
+            configuration["Prismedia:Backups:DockerComposePostgresService"] ??
+            "postgres",
+            retentionDays,
+            TimeSpan.FromDays(1)));
+        services.AddSingleton<IWorkerHeartbeatStore>(new FileWorkerHeartbeatStore(dataDir));
+        services.AddScoped<IDatabaseBackupService, DatabaseBackupService>();
+        services.AddScoped<IJobQueueService, JobQueueService>();
+        services.AddScoped<IJobGraphService, JobGraphService>();
+        services.AddSingleton<SettingsSnapshotCache>();
+        services.AddScoped<EfSettingsPersistence>();
+        services.AddScoped<ISettingsPersistence>(provider => new CachedSettingsPersistence(
+            provider.GetRequiredService<EfSettingsPersistence>(),
+            provider.GetRequiredService<SettingsSnapshotCache>(),
+            provider.GetService<VisibilityScopeCache>()));
+        services.AddScoped<IBrowserSessionPersistence, EfBrowserSessionPersistence>();
+        services.AddScoped<ISecurityPersistence, EfSecurityPersistence>();
+        services.AddSingleton<IPasswordHasher, IdentityPasswordHasher>();
+    }
+
+    private static void RegisterRequests(IServiceCollection services) {
+        // Prismedia fulfils all requests itself through its plugin-backed acquisition pipeline; the
+        // request layer is the kind-registry-driven selected-plugin search + proposal review that feeds
+        // acquisitions. One source class serves every requestable kind.
+        services.AddScoped<PluginRequestMetadataSource>();
+        services.AddScoped<IPluginRequestSearchSource>(provider =>
+            provider.GetRequiredService<PluginRequestMetadataSource>());
+        services.AddScoped<IRequestMetadataEnricher>(provider =>
+            provider.GetRequiredService<PluginRequestMetadataSource>());
+        services.AddScoped<IPluginRequestReviewSource>(provider =>
+            provider.GetRequiredService<PluginRequestMetadataSource>());
+        services.AddScoped<IPluginRequestProgressiveReviewSource>(provider =>
+            provider.GetRequiredService<PluginRequestMetadataSource>());
+        services.AddScoped<IPluginRequestProposalSource>(provider =>
+            provider.GetRequiredService<PluginRequestMetadataSource>());
+        services.AddSingleton<IRequestReviewPreparationService, RequestReviewPreparationService>();
+        services.AddScoped<IWantedEntityWriter, WantedEntityWriter>();
+        services.AddScoped<IWantedSuppressionStore, EfWantedSuppressionStore>();
+        services.AddScoped<IProviderTrackingCatalog, PluginProviderTrackingCatalog>();
+    }
+
+    private static void RegisterAcquisition(IServiceCollection services, string dataDir) {
+        services.AddScoped<IIndexerConfigStore, EfIndexerConfigStore>();
+        services.AddScoped<IIndexerStatusStore, EfIndexerStatusStore>();
+        services.AddSingleton<IndexerQueryWindow>();
+        services.AddScoped<IRemotePathMappingStore, EfRemotePathMappingStore>();
+        services.AddScoped<RemotePathMapper>();
+        services.AddScoped<IRecycleBin, RecycleBin>();
+        services.AddScoped<IDownloadClientConfigStore, EfDownloadClientConfigStore>();
+        services.AddScoped<IBookAcquisitionProfileStore, EfBookAcquisitionProfileStore>();
+        services.AddScoped<IEntityReleaseDateStore, EfEntityReleaseDateStore>();
+        services.AddScoped<IReleaseCalendarService, EfReleaseCalendarService>();
+        services.AddScoped<ICustomFormatStore, EfCustomFormatStore>();
+        services.AddScoped<IAcquisitionStore, EfAcquisitionStore>();
+        services.AddScoped<IAtomicUpgradeCheckpointStore, EfAtomicUpgradeCheckpointStore>();
+        services.AddScoped<IAtomicUpgradeFiles, AtomicUpgradeFiles>();
+        services.AddScoped<IHeldTvImportRecoveryStore, EfHeldTvImportRecoveryStore>();
+        services.AddScoped<IHeldAcquisitionAlternativeService, EfHeldAcquisitionAlternativeService>();
+        services.AddScoped<ISupersededHeldAcquisitionStore, EfSupersededHeldAcquisitionStore>();
+        services.AddScoped<ITvPayloadObservationStore, EfTvPayloadObservationStore>();
+        services.AddScoped<IDetachedDownloadCleanupStore, EfDetachedDownloadCleanupStore>();
+        services.AddScoped<EfManualAcquisitionStore>();
+        services.AddScoped<IManualReplacementStore>(provider =>
+            provider.GetRequiredService<EfManualAcquisitionStore>());
+        services.AddScoped<IAcquisitionUploadStore>(provider =>
+            provider.GetRequiredService<EfManualAcquisitionStore>());
+        services.AddSingleton(new AcquisitionUploadStorageOptions(
+            Path.Combine(dataDir, "acquisition-uploads")));
+        services.AddSingleton<IAcquisitionUploadStorage, LocalAcquisitionUploadStorage>();
+        services.AddScoped<IAcquisitionLifecycleStore>(provider =>
+            provider.GetRequiredService<IAcquisitionStore>());
+        services.AddScoped<IAcquisitionTransferAddCoordinator, EfAcquisitionTransferAddCoordinator>();
+        services.AddScoped<IAcquisitionBlocklistStore, EfAcquisitionBlocklistStore>();
+        services.AddScoped<IAcquisitionHistoryStore, EfAcquisitionHistoryStore>();
+        services.AddScoped<IMonitorStore, EfMonitorStore>();
+        services.AddScoped<IAcquisitionJobCleanup, AcquisitionJobCleanup>();
+        services.AddScoped<IAcquisitionImportResetCleanup, AcquisitionImportResetCleanup>();
+        services.AddScoped<IEntityUnmonitorPersistence, EfEntityUnmonitorPersistence>();
+        // Explicit indexer timeouts: a hung indexer must fail the search (which surfaces per-indexer in
+        // the outcome) rather than pin the whole search job. Prowlarr gets longer because one call fans
+        // out across every indexer it aggregates; direct Torznab/Newznab calls hit a single tracker.
+        services.AddSingleton<ProwlarrSearchConcurrencyGate>();
+        services.AddScoped(provider => new ProwlarrIndexerClient(
+            new HttpClient { Timeout = TimeSpan.FromMinutes(5) },
+            provider.GetRequiredService<ProwlarrSearchConcurrencyGate>(),
+            provider.GetRequiredService<ILogger<ProwlarrIndexerClient>>()));
+        services.AddScoped<IIndexerSearchClient>(provider => provider.GetRequiredService<ProwlarrIndexerClient>());
+        services.AddScoped(_ => new TorznabIndexerClient(new HttpClient { Timeout = TimeSpan.FromSeconds(60) }));
+        services.AddScoped<IIndexerSearchClient>(provider => provider.GetRequiredService<TorznabIndexerClient>());
+        services.AddScoped(_ => new NewznabIndexerClient(new HttpClient { Timeout = TimeSpan.FromSeconds(60) }));
+        services.AddScoped<IIndexerSearchClient>(provider => provider.GetRequiredService<NewznabIndexerClient>());
+        services.AddSingleton<SlskdSearchConcurrencyGate>();
+        services.AddScoped(provider => new SlskdIndexerClient(
+            new HttpClient { Timeout = TimeSpan.FromSeconds(30) },
+            provider.GetRequiredService<SlskdSearchConcurrencyGate>()));
+        services.AddScoped<IIndexerSearchClient>(provider => provider.GetRequiredService<SlskdIndexerClient>());
+        services.AddScoped<IIndexerSearchClientFactory, IndexerSearchClientFactory>();
+        services.AddScoped<IAcquisitionSearchResourcePolicy, IndexerSearchJobResourcePolicy>();
+        // UseCookies=false keeps the default handler from swallowing qBittorrent's Set-Cookie SID,
+        // so the client can read and re-send the session cookie explicitly.
+        services.AddScoped(_ => new QBittorrentDownloadClient(new HttpClient(new HttpClientHandler { UseCookies = false })));
+        services.AddScoped<IDownloadClient>(provider => provider.GetRequiredService<QBittorrentDownloadClient>());
+        services.AddScoped(_ => new SabnzbdDownloadClient(new HttpClient()));
+        services.AddScoped<IDownloadClient>(provider => provider.GetRequiredService<SabnzbdDownloadClient>());
+        services.AddScoped(_ => new TransmissionDownloadClient(new HttpClient()));
+        services.AddScoped<IDownloadClient>(provider => provider.GetRequiredService<TransmissionDownloadClient>());
+        services.AddScoped(_ => new SlskdDownloadClient(new HttpClient()));
+        services.AddScoped<IDownloadClient>(provider => provider.GetRequiredService<SlskdDownloadClient>());
+        services.AddScoped<IAcquisitionDownloadRemoval, EfAcquisitionDownloadRemoval>();
+        services.AddScoped<IAcquisitionDownloadAdmission, EfAcquisitionDownloadAdmission>();
+        services.AddSingleton<IAcquisitionReleaseInventory, SoulseekReleaseInventory>();
+        services.AddScoped<EfCompletedDownloadPayloadCleanup>();
+        services.AddScoped<IDownloadClientFactory, DownloadClientFactory>();
+        services.AddScoped<IAcquisitionImportPlanner, AcquisitionImportPlanner>();
+        services.AddScoped<IImportFileMover, ImportFileMover>();
+        services.AddScoped<IOwnedFileReplacer, OwnedFileReplacer>();
+        services.AddScoped<IMediaUpgradePayloadInspector, MediaUpgradePayloadInspector>();
+        services.AddScoped<IVideoPayloadVerifier, VideoPayloadVerifier>();
+        services.AddScoped<IAcquisitionHintApplier>(provider => new AcquisitionHintApplier(
+            provider.GetRequiredService<PrismediaDbContext>(),
+            provider.GetRequiredService<IEntityExternalIdentityStore>(),
+            provider.GetRequiredService<IEntityLifecycleMutationLease>()));
+        services.AddScoped<IImportTargetIndex, EfImportTargetIndex>();
+        services.AddScoped<ITvOwnedEpisodeCoverageRepair, EfTvOwnedEpisodeCoverageRepair>();
+        services.AddScoped<IImportedFilesReader, ImportedFilesReader>();
+        services.AddScoped<IDownloadPayloadReader, DownloadPayloadReader>();
+        // No auto-redirect: the resolver validates the destination host is public before fetching, and a
+        // redirect could hop to a private address that bypasses that check (SSRF defense for the LAN host).
+        services.AddScoped<IReleaseLinkResolver>(_ => new ReleaseLinkResolver(
+            new HttpClient(new SocketsHttpHandler { AllowAutoRedirect = false }) { Timeout = TimeSpan.FromSeconds(20) }));
+    }
+
+    private static void RegisterThumbnailContributors(IServiceCollection services) {
+        var contributorType = typeof(Entities.Thumbnails.IThumbnailContributor);
+        foreach (var type in contributorType.Assembly.GetTypes()
+                     .Where(type => type is { IsClass: true, IsAbstract: false } &&
+                                    contributorType.IsAssignableFrom(type))) {
+            services.AddScoped(contributorType, type);
+        }
+    }
+
+    private static void RegisterEntityMappers(IServiceCollection services) {
+        var assembly = typeof(IEntityKindMapper).Assembly;
+        var implementations = assembly.GetTypes()
+            .Where(type => type is { IsClass: true, IsAbstract: false });
+
+        var explicitKindTypes = implementations
+            .Where(type => typeof(IEntityKindMapper).IsAssignableFrom(type) &&
+                           type != typeof(EntityMappers.ConventionEntityKindMapper))
+            .ToArray();
+        foreach (var type in explicitKindTypes) {
+            services.AddScoped(typeof(IEntityKindMapper), type);
+        }
+
+        foreach (var factory in EntityKindRegistry.All.OfType<IEntityRootFactory>()) {
+            services.AddScoped<IEntityKindMapper>(_ => new EntityMappers.ConventionEntityKindMapper(factory));
+        }
+
+        foreach (var type in implementations.Where(type => typeof(IEntityCapabilityMapper).IsAssignableFrom(type))) {
+            services.AddScoped(typeof(IEntityCapabilityMapper), type);
+        }
+    }
+
+    private static string NormalizePath(string path, string basePath) =>
+        Path.GetFullPath(Path.IsPathRooted(path)
+            ? path
+            : Path.Combine(basePath, path));
+
+    private static IReadOnlyList<string> ResolvePluginDevPaths(IConfiguration configuration, string basePath) {
+        var configured = configuration["PRISMEDIA_PLUGIN_DEV_PATHS"] ??
+            configuration["Prismedia:Plugins:DevPaths"];
+        var paths = new List<string>();
+        if (!string.IsNullOrWhiteSpace(configured)) {
+            paths.AddRange(configured
+                .Split([',', ';'], StringSplitOptions.TrimEntries | StringSplitOptions.RemoveEmptyEntries)
+                .Select(path => NormalizePath(path, basePath)));
+        }
+
+        var repoRoot = FindRepoRoot(basePath);
+        if (repoRoot is not null) {
+            var home = Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
+            if (!string.IsNullOrWhiteSpace(home)) {
+                var prismediaPluginsRepo = Path.Combine(home, "Dev", "Prismedia-Plugins");
+                if (Directory.Exists(prismediaPluginsRepo)) {
+                    paths.Add(prismediaPluginsRepo);
+                }
+            }
+
+            paths.Add(Path.Combine(repoRoot, "packages", "plugins"));
+        }
+
+        return paths.Distinct(StringComparer.OrdinalIgnoreCase).ToArray();
+    }
+
+    private static string ResolveCurrentVersion(IConfiguration configuration, string basePath) {
+        var configured = configuration["PRISMEDIA_VERSION"] ??
+            configuration["Prismedia:Version"];
+        if (!string.IsNullOrWhiteSpace(configured)) {
+            return configured;
+        }
+
+        var repoRoot = FindRepoRoot(basePath);
+        if (repoRoot is null) {
+            return "1.0.0";
+        }
+
+        var packageJson = Path.Combine(repoRoot, "package.json");
+        if (!File.Exists(packageJson)) {
+            return "1.0.0";
+        }
+
+        try {
+            using var document = System.Text.Json.JsonDocument.Parse(File.ReadAllText(packageJson));
+            return document.RootElement.TryGetProperty("version", out var version)
+                ? version.GetString() ?? "1.0.0"
+                : "1.0.0";
+        } catch (System.Text.Json.JsonException) {
+            return "1.0.0";
+        } catch (IOException) {
+            return "1.0.0";
+        }
+    }
+
+    private static string? ResolvePluginIndexUrl(IConfiguration configuration) {
+        var configured = configuration["PRISMEDIA_PLUGIN_INDEX_URL"] ??
+            configuration["Prismedia:Plugins:IndexUrl"];
+        if (!string.IsNullOrWhiteSpace(configured)) {
+            return configured;
+        }
+
+        if (string.Equals(
+                configuration["PRISMEDIA_PLUGIN_INDEX_DISABLED"] ??
+                configuration["Prismedia:Plugins:IndexDisabled"],
+                "true",
+                StringComparison.OrdinalIgnoreCase)) {
+            return null;
+        }
+
+        return "https://raw.githubusercontent.com/pauljoda/Prismedia-Plugins/main/index.yml";
+    }
+
+    private static string? ResolveStashScraperIndexUrl(IConfiguration configuration) {
+        var configured = configuration["PRISMEDIA_STASH_SCRAPER_INDEX_URL"] ??
+            configuration["Prismedia:StashScrapers:IndexUrl"];
+        if (!string.IsNullOrWhiteSpace(configured)) {
+            return configured;
+        }
+
+        if (string.Equals(
+                configuration["PRISMEDIA_STASH_SCRAPERS_DISABLED"] ??
+                configuration["Prismedia:StashScrapers:Disabled"],
+                "true",
+                StringComparison.OrdinalIgnoreCase)) {
+            return null;
+        }
+
+        return "https://stashapp.github.io/CommunityScrapers/stable/index.yml";
+    }
+
+    private static string? FindRepoRoot(string start) {
+        var directory = new DirectoryInfo(start);
+        while (directory is not null) {
+            if (File.Exists(Path.Combine(directory.FullName, "pnpm-workspace.yaml")) &&
+                File.Exists(Path.Combine(directory.FullName, "package.json"))) {
+                return directory.FullName;
+            }
+
+            directory = directory.Parent;
+        }
+
+        return null;
+    }
+
+}

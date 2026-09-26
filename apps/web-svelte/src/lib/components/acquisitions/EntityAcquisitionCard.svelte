@@ -1,0 +1,311 @@
+<script lang="ts">
+  /**
+   * THE acquisition + monitoring surface an entity page mounts — the Acquisition detail tab's body,
+   * collapsing everything the request layer knows about an entity: its stable monitor,
+   * the wanted placeholder's "Search for release", direct-child monitoring, and the full acquisition
+   * management panel (releases, live download, files, cancel). All state lives in the
+   * page-owned {@link useEntityAcquisition} composable, whose `visible` also gates the tab itself;
+   * this component only renders it. Renders nothing while the state says there is no story.
+   */
+  import type { Snippet } from "svelte";
+  import { RefreshCw, Search, Wrench } from "@lucide/svelte";
+  import { Alert, Button, Card, Disclosure } from "@prismedia/ui-svelte";
+  import { ACQUISITION_STATUS, ENTITY_KIND, ENTITY_KIND_DEFINITIONS } from "$lib/api/generated/codes";
+  import type { EntityCapability } from "$lib/api/generated/model";
+  import AcquisitionPanel from "$lib/components/acquisitions/AcquisitionPanel.svelte";
+  import ManualAcquisitionActions from "$lib/components/acquisitions/ManualAcquisitionActions.svelte";
+  import EntityChildMonitoring from "$lib/components/acquisitions/EntityChildMonitoring.svelte";
+  import type { EntityAcquisition } from "$lib/components/acquisitions/use-entity-acquisition.svelte";
+  import { acquisitionStatusShouldPoll } from "$lib/requests/acquisition-status";
+  import EntityFileManagementAction from "$lib/components/entities/EntityFileManagementAction.svelte";
+  import type { EntityFileManagementCallbacks } from "$lib/entities/entity-file-management";
+  import EntityBlocklistClearAction from "$lib/components/acquisitions/EntityBlocklistClearAction.svelte";
+  import EntityMonitorControl from "$lib/components/acquisitions/EntityMonitorControl.svelte";
+  import {
+    requestKindForEntityKind,
+    requestKindInfo,
+  } from "$lib/requests/request-helpers";
+  import { isEntityKindCode } from "$lib/entities/entity-codes";
+
+  let {
+    acq,
+    entity,
+    fileManagement,
+    showEntityRequestControls = true,
+    showAcquisitionPanel = true,
+    onCancelled,
+    onImported,
+  }: {
+    /** The page-owned acquisition state (from {@link useEntityAcquisition}). */
+    acq: EntityAcquisition;
+    /** Entity core projected into the shared managed-file action. */
+    entity?: { id: string; title: string; kind?: string; capabilities: EntityCapability[] } | null;
+    /** Route follow-ups after managed deletion either removes or reverts the Entity. */
+    fileManagement?: EntityFileManagementCallbacks;
+    /** False when an owner-specific surface provides its own monitor and request controls. */
+    showEntityRequestControls?: boolean;
+    /** False when a richer owner-specific surface renders the acquisition rows itself. */
+    showAcquisitionPanel?: boolean;
+    /**
+     * Called after the acquisition is cancelled, so the page can refresh. Cancel stops the download
+     * only — the wanted placeholder and any monitoring stay, and the page keeps existing.
+     */
+    onCancelled?: () => void;
+    /** Called once when the acquisition becomes Imported so the page can refresh its Entity in place. */
+    onImported?: () => void | Promise<void>;
+  } = $props();
+
+  const hasActions = $derived(
+    acq.showSync ||
+      (showEntityRequestControls && acq.showSearch) ||
+      acq.showSearchMissing ||
+      (acq.showFileManagement && Boolean(entity && fileManagement)),
+  );
+  const monitorExpanded = $derived(
+    !showEntityRequestControls
+      || !acq.showMonitor
+      || acq.monitorActive
+      || acq.monitorStopping
+      || acq.monitorDeletingFiles,
+  );
+  const activeChildAcquisitionCount = $derived(acq.childCards.filter((card) =>
+    acquisitionStatusShouldPoll(card.wantedStatus)
+    || acquisitionStatusShouldPoll(card.latestAcquisitionStatus),
+  ).length);
+  const failedParentWithChildActivity = $derived(
+    acq.acquisition?.summary.status === ACQUISITION_STATUS.failed
+      && activeChildAcquisitionCount > 0,
+  );
+  const kindDefinition = $derived(
+    entity?.kind && isEntityKindCode(entity.kind)
+      ? ENTITY_KIND_DEFINITIONS[entity.kind]
+      : null,
+  );
+  const replaceableKind = $derived(kindDefinition?.manualAcquisition.supportsReplacement === true);
+  const uploadableAcquisitionKind = $derived(
+    kindDefinition?.manualAcquisition.supportsUpload === true,
+  );
+  const monitorKindInfo = $derived.by(() => {
+    const kind = entity?.kind ? requestKindForEntityKind(entity.kind) : null;
+    return kind ? requestKindInfo(kind) : null;
+  });
+  const hasImportedBaseline = $derived(
+    acq.acquisition?.summary.status === ACQUISITION_STATUS.imported,
+  );
+  const hasPrimaryContent = $derived(
+    (showAcquisitionPanel && Boolean(acq.acquisition)) || acq.childCards.length > 0,
+  );
+  const hasOwnedContent = $derived(acq.showFileManagement || hasImportedBaseline);
+  const activeChildLabel = $derived(
+    acq.childCards.every((card) => card.entity.kind === ENTITY_KIND.videoEpisode)
+      ? activeChildAcquisitionCount === 1 ? "episode" : "episodes"
+      : acq.childCards.every((card) => card.entity.kind === ENTITY_KIND.audioTrack)
+        ? activeChildAcquisitionCount === 1 ? "track" : "tracks"
+      : activeChildAcquisitionCount === 1 ? "child item" : "child items",
+  );
+</script>
+
+{#snippet managedFileAction()}
+  {#if entity && fileManagement}
+    <EntityFileManagementAction
+      {entity}
+      onDeleted={fileManagement.onDeleted}
+      onReverted={fileManagement.onReverted}
+      compact
+    />
+  {/if}
+{/snippet}
+
+{#if acq.visible}
+  <ManualAcquisitionActions
+    entityId={entity?.id ?? ""}
+    canReplace={Boolean(entity) && uploadableAcquisitionKind && hasOwnedContent && replaceableKind}
+    canUpload={Boolean(entity) && uploadableAcquisitionKind && (Boolean(acq.acquisition) || (hasOwnedContent && replaceableKind))}
+    onStarted={async (detail) => {
+      acq.setAcquisition(detail);
+      await acq.refresh();
+    }}
+    children={acquisitionLayout}
+  />
+{/if}
+
+{#snippet acquisitionLayout(manualActions: Snippet, replacementReview: Snippet, reviewOpen: boolean)}
+  <section class="acquisition-card">
+    <div class:has-primary={hasPrimaryContent || reviewOpen} class="acquisition-layout">
+      {#if hasPrimaryContent || reviewOpen}
+        <div class="acquisition-primary" role="region" aria-label={reviewOpen ? "Replacement search" : "Current acquisition"}>
+          {#if reviewOpen}
+            {@render replacementReview()}
+          {:else}
+          {#if showAcquisitionPanel && acq.acquisition}
+        {#if failedParentWithChildActivity}
+          <Disclosure
+            title={`Parent release attempt failed · ${activeChildAcquisitionCount} ${activeChildLabel} active instead`}
+          >
+            <div>
+              {#key acq.acquisition.summary.id}
+                <AcquisitionPanel
+                  acquisitionId={acq.acquisition.summary.id}
+                  detail={acq.acquisition}
+                  onDetailChange={acq.setAcquisition}
+                  {onCancelled}
+                  {onImported}
+                  onReset={acq.refresh}
+                />
+              {/key}
+            </div>
+          </Disclosure>
+        {:else}
+            {#key acq.acquisition.summary.id}
+              <AcquisitionPanel
+                acquisitionId={acq.acquisition.summary.id}
+                detail={acq.acquisition}
+                onDetailChange={acq.setAcquisition}
+                {onCancelled}
+                {onImported}
+                onReset={acq.refresh}
+              />
+            {/key}
+        {/if}
+          {/if}
+
+          {#if acq.childCards.length > 0}
+            <EntityChildMonitoring
+              cards={acq.childCards}
+              initiallyExpanded={!showAcquisitionPanel || !acq.acquisition}
+              onChanged={acq.childMonitoringChanged}
+            />
+          {/if}
+          {/if}
+        </div>
+      {/if}
+
+      <aside class="acquisition-settings" aria-label="Acquisition settings">
+        {#if showEntityRequestControls && acq.showMonitor}
+          <EntityMonitorControl
+            {acq}
+            kindInfo={monitorKindInfo}
+            footer={!monitorExpanded && acq.showFileManagement && entity && fileManagement ? managedFileAction : undefined}
+          />
+        {/if}
+
+        {#if acq.monitorError}
+          <Alert.Root variant="destructive">
+            <Alert.Title>Monitoring could not be updated</Alert.Title>
+            <Alert.Description>{acq.monitorError}</Alert.Description>
+          </Alert.Root>
+        {/if}
+
+        {#if monitorExpanded}
+          {#if hasActions}
+            <Card.Root size="sm">
+              <Card.Header class="border-b border-border-subtle">
+                <Card.Title role="heading" aria-level={2}>Actions</Card.Title>
+              </Card.Header>
+              <Card.Content class="flex flex-col gap-2">
+                {#if acq.showSync}
+                  <Button
+                    type="button"
+                    variant="secondary"
+                    size="sm"
+                    disabled={acq.syncBusy}
+                    onclick={() => void acq.syncNow()}
+                    class="no-lift w-full justify-start"
+                    title="Re-sync from the provider now instead of waiting for the daily sweep"
+                  >
+                    <RefreshCw data-icon="inline-start" />
+                    {acq.syncBusy ? "Checking…" : "Check for new works"}
+                  </Button>
+                {/if}
+                {#if showEntityRequestControls && acq.showSearch}
+                  <Button
+                    type="button"
+                    variant="primary"
+                    size="sm"
+                    disabled={acq.searchBusy}
+                    onclick={() => void acq.searchForRelease()}
+                    class="no-lift w-full justify-start"
+                  >
+                    <Search data-icon="inline-start" />
+                    {acq.searchBusy ? "Searching…" : "Search for release"}
+                  </Button>
+                {/if}
+                {#if acq.showSearchMissing}
+                  <Button
+                    type="button"
+                    variant="primary"
+                    size="sm"
+                    disabled={acq.missingBusy}
+                    onclick={() => void acq.searchMissing()}
+                    class="no-lift w-full justify-start"
+                    title="Search every monitored gap in this group"
+                  >
+                    <Search data-icon="inline-start" />
+                    {acq.missingBusy
+                      ? "Searching…"
+                      : acq.missingChildCount > 0
+                        ? `Search ${acq.missingChildCount} missing`
+                        : "Search missing content"}
+                  </Button>
+                {/if}
+                {#if acq.showFileManagement && entity && fileManagement}
+                  <EntityFileManagementAction
+                    {entity}
+                    onDeleted={fileManagement.onDeleted}
+                    onReverted={fileManagement.onReverted}
+                    compact
+                  />
+                {/if}
+                {#if showEntityRequestControls && acq.showSearch}
+                  <p class="text-xs leading-relaxed text-muted-foreground">
+                    Starts a monitored search and grabs the best matching release automatically.
+                  </p>
+                {/if}
+                {#if acq.missingResult}
+                  <p class="text-xs leading-relaxed text-muted-foreground">{acq.missingResult}</p>
+                {/if}
+              </Card.Content>
+            </Card.Root>
+          {/if}
+
+        {/if}
+
+        {#if entity}
+          <Disclosure title="More acquisition actions" icon={Wrench}>
+            <div class="flex flex-col gap-3">
+              {@render manualActions()}
+              <EntityBlocklistClearAction entityId={entity.id} entityTitle={entity.title} />
+            </div>
+          </Disclosure>
+        {/if}
+      </aside>
+    </div>
+  </section>
+{/snippet}
+
+<style>
+  .acquisition-card {
+    container-type: inline-size;
+    min-width: 0;
+  }
+
+  .acquisition-layout,
+  .acquisition-primary,
+  .acquisition-settings {
+    display: grid;
+    gap: 1rem;
+    min-width: 0;
+  }
+
+  .acquisition-primary,
+  .acquisition-settings {
+    align-self: start;
+  }
+
+  @container (min-width: 64rem) {
+    .acquisition-layout.has-primary {
+      grid-template-columns: minmax(0, 1fr) minmax(20rem, 24rem);
+      align-items: start;
+    }
+  }
+</style>

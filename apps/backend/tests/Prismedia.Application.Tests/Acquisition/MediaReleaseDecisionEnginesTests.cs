@@ -1,0 +1,815 @@
+using Prismedia.Application.Acquisition;
+using Prismedia.Domain.Entities;
+
+namespace Prismedia.Application.Tests.Acquisition;
+
+/// <summary>
+/// Covers the per-kind acquisition seams added for multi-media expansion: Torznab category routing by
+/// media kind, and the movie/music decision engines' ranking (resolution/source and codec quality) with
+/// the shared acceptance gates.
+/// </summary>
+public sealed class MediaReleaseDecisionEnginesTests {
+    [Theory]
+    [InlineData("Example.Show.S03E03.Rise.and.Bloom.480p.WEB-DL", true)]
+    [InlineData("Example.Show.S03E03E04.Rise.and.Bloom.Super.Snow.Day.480p.WEB-DL", true)]
+    [InlineData("Example.Show.S03E03E04.Rise.and.Bloom.480p.WEB-DL", false)]
+    [InlineData("Example.Show.S03E03.Rise.and.Bloom.Revisited.480p.WEB-DL", false)]
+    [InlineData("Example.Show.S03E03.Super.Snow.Day.480p.WEB-DL", false)]
+    [InlineData("Other.Show.S03E03.Rise.and.Bloom.480p.WEB-DL", false)]
+    [InlineData("Example.Show.S02E03.Rise.and.Bloom.480p.WEB-DL", false)]
+    public void CompleteCatalogTitlesCanRecoverDifferentEpisodeOrderingWithinTheSameSeason(string title, bool accepted) {
+        var rules = BookAcquisitionRules.Default with { Kind = EntityKind.VideoEpisode, TargetTitle = "Example Show",
+            SeasonNumber = 3, EpisodeNumber = 2, TargetEpisodeTitle = "Rise and Bloom",
+            TargetEpisodeCatalog = [new(Guid.NewGuid(), 3,
+                [new(2, "Rise and Bloom", Guid.NewGuid()), new(3, "Super Snow Day", Guid.NewGuid())])] };
+        var candidate = Assert.Single(new TvReleaseDecisionEngine(EntityKind.VideoEpisode).Evaluate(
+            [(Release(title, seeders: 10), null, "Indexer")], rules));
+        Assert.Equal(accepted, candidate.Accepted);
+        if (accepted) {
+            var plan = TvImportPlanBuilder.PlanUnits([new(title + ".mkv", 1000)], "Example Show", 3, 2,
+                episodeTitles: rules.TargetEpisodeCatalog[0].Episodes);
+            Assert.False(plan.Blocked);
+            var unit = Assert.Single(plan.Units);
+            Assert.Equal(2, unit.Episode);
+        }
+    }
+
+    [Theory]
+    [InlineData(true, false)]
+    [InlineData(false, true)]
+    public void AlternateNumberingCannotUseRepeatedOrUnidentifiedCatalogTitles(bool repeated, bool unidentified) {
+        var rules = BookAcquisitionRules.Default with { Kind = EntityKind.VideoEpisode, TargetTitle = "Example Show",
+            SeasonNumber = 3, EpisodeNumber = 2, TargetEpisodeTitle = "Rise and Bloom",
+            TargetEpisodeCatalog = [new(Guid.NewGuid(), 3, [new(2, "Rise and Bloom", unidentified ? null : Guid.NewGuid())]),
+                new(Guid.NewGuid(), 2, [new(9, repeated ? "Rise and Bloom" : "Unrelated Story", Guid.NewGuid())])] };
+        var candidate = Assert.Single(new TvReleaseDecisionEngine(EntityKind.VideoEpisode).Evaluate(
+            [(Release("Example Show S03E03 Rise and Bloom 480p WEB-DL", seeders: 10), null, "Indexer")], rules));
+        Assert.False(candidate.Accepted);
+    }
+
+    [Fact]
+    public void ExactNumberingStillOutranksAnAlternateOrderTitleMatch() {
+        var rules = BookAcquisitionRules.Default with { Kind = EntityKind.VideoEpisode, TargetTitle = "Example Show",
+            SeasonNumber = 3, EpisodeNumber = 2, TargetEpisodeTitle = "Rise and Bloom",
+            TargetEpisodeCatalog = [new(Guid.NewGuid(), 3, [new(2, "Rise and Bloom", Guid.NewGuid())])] };
+        var candidates = new TvReleaseDecisionEngine(EntityKind.VideoEpisode).Evaluate([
+            (Release("Example Show S03E03 Rise and Bloom 1080p WEB-DL", seeders: 10), null, "Indexer"),
+            (Release("Example Show S03E02 Rise and Bloom 480p WEB-DL", seeders: 10), null, "Indexer")], rules);
+        Assert.All(candidates, candidate => Assert.True(candidate.Accepted));
+        Assert.Contains("S03E02", candidates[0].Release.Title);
+    }
+
+    [Fact]
+    public void RepeatedCatalogTitlesStillDisproveAnUnrelatedEpisodeWithTheSameReleaseNumber() {
+        var rules = BookAcquisitionRules.Default with { Kind = EntityKind.VideoEpisode, TargetTitle = "Example Show",
+            SeasonNumber = 3, EpisodeNumber = 3, TargetEpisodeTitle = "Super Snow Day",
+            TargetEpisodeCatalog = [new(Guid.NewGuid(), 3, [new(2, "Rise and Bloom", Guid.NewGuid()),
+                new(3, "Super Snow Day", Guid.NewGuid()), new(44, "Rise and Bloom", Guid.NewGuid())])] };
+        var candidate = Assert.Single(new TvReleaseDecisionEngine(EntityKind.VideoEpisode).Evaluate(
+            [(Release("Example Show S03E03 Rise and Bloom 480p WEB-DL", seeders: 10), null, "Indexer")], rules));
+        Assert.False(candidate.Accepted);
+        Assert.Contains(ReleaseRejectionReason.WrongTvUnit, candidate.Rejections);
+    }
+
+    [Theory]
+    [InlineData("Going West", "Going West", true)]
+    [InlineData("Going West Again", "Going West", true)]
+    [InlineData("A Bug Adventure", "Going West", false)]
+    [InlineData("A Bug Adventure", "Pilot", true)]
+    public void ConflictingTitleEvidenceRequiresADistinctUnambiguousCatalogIdentity(string targetTitle, string otherTitle, bool identified) {
+        var rules = BookAcquisitionRules.Default with { Kind = EntityKind.VideoEpisode, TargetTitle = "Example Show",
+            SeasonNumber = 2, EpisodeNumber = 17, TargetEpisodeTitle = targetTitle,
+            TargetEpisodeCatalog = [new(Guid.NewGuid(), 2, [new(17, targetTitle, Guid.NewGuid())]),
+                new(Guid.NewGuid(), 1, [new(70, otherTitle, identified ? Guid.NewGuid() : null)])] };
+        var title = targetTitle.StartsWith(otherTitle, StringComparison.Ordinal) ? targetTitle : otherTitle;
+
+        var result = new TvReleaseDecisionEngine(EntityKind.VideoEpisode).Evaluate([
+            (Release($"Example Show S02E17 {title} 1080p", seeders: 10), null, "Indexer")], rules);
+
+        Assert.True(Assert.Single(result).Accepted);
+    }
+
+    [Theory]
+    [InlineData("Example Show S02E17 Going West 1080p", false)]
+    [InlineData("Example Show S02E17 A New Friend 1080p", false)]
+    [InlineData("Example Show S02E17 A Bug Adventure 1080p", true)]
+    [InlineData("Example Show S02E17 1080p", true)]
+    [InlineData("Example Show S02E17 Unknown Translation 1080p", true)]
+    [InlineData("Example Show S02E17E18 A New Friend 1080p", true)]
+    [InlineData("[01/12] \"Example Show S02E17 Going West 1080p.mkv\"", false)]
+    [InlineData("[01/12] \"Example Show S02E17 A Bug Adventure 1080p.mkv\"", true)]
+    public void KnownEpisodeTitlesCanDisproveAnOtherwiseExactSingleEpisodeNumber(string title, bool accepted) {
+        var input = new AcquisitionSearchInput(Guid.NewGuid(), "A Bug Adventure", null, EntityKind.VideoEpisode,
+            Series: "Example Show", SeasonNumber: 2, EpisodeNumber: 17) {
+            EpisodeCatalog = [
+                new(Guid.NewGuid(), 1, [new(70, "Going West", Guid.NewGuid())]),
+                new(Guid.NewGuid(), 2, [new(17, "A Bug Adventure", Guid.NewGuid()), new(18, "A New Friend", Guid.NewGuid())])
+            ] };
+        var rules = AcquisitionRuleContext.Apply(BookAcquisitionRules.Default with { Kind = input.Kind }, input,
+            null, ProperDownloadPolicy.PreferAndUpgrade, [DownloadProtocol.Torrent]);
+
+        var result = new TvReleaseDecisionEngine(EntityKind.VideoEpisode).Evaluate([(Release(title, seeders: 10), null, "Indexer")], rules);
+
+        Assert.Equal(accepted, Assert.Single(result).Accepted);
+        if (!accepted) Assert.Contains(ReleaseRejectionReason.WrongTvUnit, result[0].Rejections);
+    }
+
+    [Theory]
+    [InlineData("[Group] Example Show (1997) EP018 Story [ENG DUB]")]
+    [InlineData("Example Show Episode 18 1080p WEB-DL")]
+    [InlineData("Example Show EP.018 1080p")]
+    public void ExplicitAbsoluteSinglesCannotFulfilSeasonPackRequests(string title) {
+        var rules = BookAcquisitionRules.Default with { TargetTitle = "Example Show", SeasonNumber = 2 };
+        Assert.Equal(ReleaseRejectionReason.WrongTvUnit, new TvUnitSpecification().Evaluate(Release(title, seeders: 10), rules));
+    }
+
+    [Theory]
+    [InlineData("Example Show EP018 1080p", true)]
+    [InlineData("Example Show Episode 18 1080p", true)]
+    [InlineData("Example Show EP019 1080p", false)]
+    public void ExplicitAbsolutePrefixesUseTheSameVerifiedEpisodeIdentity(string title, bool accepted) {
+        var rules = BookAcquisitionRules.Default with { TargetTitle = "Example Show", SeasonNumber = 2, EpisodeNumber = 1, TargetAbsoluteEpisodeNumber = 18 };
+        Assert.Equal(accepted ? null : ReleaseRejectionReason.WrongTvUnit, new TvUnitSpecification().Evaluate(Release(title, seeders: 10), rules));
+    }
+
+    [Theory]
+    [InlineData("Episode 18", "Episode 18 Season 2 1080p")]
+    [InlineData("Example Show", "Example Show Episodes 1-82 Complete 1080p")]
+    [InlineData("Example Show", "Example Show EP001-082 1080p")]
+    public void SeriesNamesAndExplicitEpisodeRangesAreNotMisreadAsSingleEpisodePacks(string series, string title) {
+        var rules = BookAcquisitionRules.Default with { TargetTitle = series, SeasonNumber = 2 };
+        Assert.Null(new TvUnitSpecification().Evaluate(Release(title, seeders: 10), rules));
+    }
+
+    [Fact]
+    public void TechnicalSuffixDetailsDoNotMakeAnExactHdFilmOutrankAnExactUhdFilm() {
+        const string recording = "Example.Film.English.HDTS.1080p-Group";
+        const string disc = "Example Film (2024) (2160p UHD BluRay x265 DV HDR DDP 7.1 English - Encoder Group)";
+        var rules = BookAcquisitionRules.Default with { Kind = EntityKind.Movie, TargetTitle = "Example Film", TargetYear = 2024, PreferredLanguages = ["English"] };
+        var result = new MovieReleaseDecisionEngine().Evaluate([
+            (Release(recording, seeders: 10), null, "Indexer"),
+            (Release(disc, seeders: 10), null, "Indexer")], rules);
+        Assert.All(result, candidate => Assert.True(candidate.Accepted));
+        Assert.Equal(disc, result[0].Release.Title);
+    }
+
+    [Theory]
+    [InlineData("Example.Film.2024.1080p.WEB-DL.DDP.5.1-GROUP")]
+    [InlineData("Example Film (2024) (2160p UHD BluRay x265 DV HDR DDP 7.1 English - Encoder Group)")]
+    public void TechnicalSuffixesDoNotChangeWorkTitleRelevance(string title) {
+        var rules = BookAcquisitionRules.Default with { TargetTitle = "Example Film" };
+        Assert.Equal(ReleaseTitleRelevance.Score(Release("Example Film", seeders: 10), rules),
+            ReleaseTitleRelevance.Score(Release(title, seeders: 10), rules));
+    }
+
+    [Fact]
+    public void ExtraWorkWordsBeforeTechnicalMetadataStillReduceTitleRelevance() {
+        var rules = BookAcquisitionRules.Default with { TargetTitle = "Example Film" };
+        Assert.True(ReleaseTitleRelevance.Score(Release("Example Film Returns 2024 1080p WEB-DL", seeders: 10), rules)
+            < ReleaseTitleRelevance.Score(Release("Example Film 2024 1080p WEB-DL", seeders: 10), rules));
+    }
+
+    [Fact]
+    public void ExplicitPreferredAudioOutranksAmbiguousMultiEvenAtHigherQuality() {
+        var rules = BookAcquisitionRules.Default with { Kind = EntityKind.Movie, PreferredLanguages = ["English", "German"] };
+        var titles = new[] { "Movie 2160p BluRay MULTi", "Movie 2160p BluRay", "Movie 720p WEB-DL ENG", "Movie 1080p WEB-DL GER MULTi" };
+        var results = new MovieReleaseDecisionEngine().Evaluate(titles.Select(title =>
+            (Release(title, seeders: 10), (Guid?)null, "Indexer")).ToArray(), rules);
+
+        Assert.All(results, row => Assert.True(row.Accepted));
+        Assert.Equal(titles[2], results[0].Release.Title);
+        Assert.Equal(titles[3], results[1].Release.Title);
+        Assert.Equal(titles[0], results[2].Release.Title);
+        Assert.Equal(titles[1], results[3].Release.Title);
+        Assert.Equal(results.Select(row => row.Release.Title), results.OrderByDescending(row => row.Score).Select(row => row.Release.Title));
+    }
+
+    [Fact]
+    public void ForeignAudioWithPreferredSubtitlesDoesNotPassTheAudioGate() {
+        var rules = BookAcquisitionRules.Default with { PreferredLanguages = ["English"] };
+        var result = new LanguageSpecification().Evaluate(Release("Movie 1080p JPN Audio [ENG Subs]", seeders: 10), rules);
+        Assert.Equal(ReleaseRejectionReason.LanguageMismatch, result);
+    }
+
+    [Fact]
+    public void SharedSearchAndGrabContextCarriesMeasuredOwnershipIntoTheUpgradeGate() {
+        var input = new AcquisitionSearchInput(Guid.NewGuid(), "Movie", null, EntityKind.Movie, null);
+        var owned = new UpgradeOwnedQuality(null, VideoQuality.Unknown.ToCode()) { VideoResolutionTier = 1080 };
+        var rules = AcquisitionRuleContext.Apply(BookAcquisitionRules.Default, input, owned,
+            ProperDownloadPolicy.PreferAndUpgrade, [DownloadProtocol.Torrent]);
+
+        var rejection = new MediaUpgradeSpecification(EntityKind.Movie).Evaluate(Release("Movie 720p WEB-DL", seeders: 10), rules);
+
+        Assert.Equal(ReleaseRejectionReason.NotAnUpgrade, rejection);
+    }
+
+    [Theory]
+    [InlineData(VideoQuality.Unknown, 1080, "Movie 720p WEB-DL", false)]
+    [InlineData(VideoQuality.Unknown, 1080, "Movie 1080p WEB-DL", false)]
+    [InlineData(VideoQuality.Unknown, 1080, "Movie 2160p WEB-DL", true)]
+    [InlineData(VideoQuality.Webdl720p, 1080, "Movie 1080p BluRay", false)]
+    [InlineData(VideoQuality.Bluray2160p, 720, "Movie 1080p WEB-DL", true)]
+    [InlineData(VideoQuality.Webdl1080p, 1080, "Movie 1080p BluRay", true)]
+    public void MeasuredOwnedResolutionGatesUpgradesBeforeDownloading(VideoQuality ownedLabel, int measuredResolution,
+        string candidate, bool accepted) {
+        var rules = BookAcquisitionRules.Default with {
+            Kind = EntityKind.Movie, IsUpgradeSearch = true, OwnedMediaQuality = ownedLabel.ToCode(),
+            OwnedVideoResolutionTier = measuredResolution, OwnedHasSubtitles = true
+        };
+
+        var rejection = new MediaUpgradeSpecification(EntityKind.Movie).Evaluate(Release(candidate, seeders: 10), rules);
+
+        Assert.Equal(accepted ? null : ReleaseRejectionReason.NotAnUpgrade, rejection);
+    }
+
+    [Theory]
+    [InlineData("Movie 1080p WEB-DL", false)]
+    [InlineData("Movie 1080p WEB-DL Multi-Sub", true)]
+    [InlineData("Movie 720p WEB-DL Multi-Sub", false)]
+    public void UnknownSourceQualityNeedsEvidenceForASpeculativeSameResolutionSubtitleUpgrade(string title, bool accepted) {
+        var rules = BookAcquisitionRules.Default with {
+            Kind = EntityKind.Movie, IsUpgradeSearch = true, OwnedMediaQuality = VideoQuality.Unknown.ToCode(),
+            OwnedVideoResolutionTier = 1080, OwnedHasSubtitles = false
+        };
+
+        var rejection = new MediaUpgradeSpecification(EntityKind.Movie).Evaluate(Release(title, seeders: 10), rules);
+
+        Assert.Equal(accepted ? null : ReleaseRejectionReason.NotAnUpgrade, rejection);
+    }
+
+    [Theory]
+    [InlineData("[AnimeRG] Naruto Shippuden - 500 [1080p] [Multi-Sub] [x265]", true)]
+    [InlineData("[AnimeRG] Naruto Shippuden - 499 [1080p]", false)]
+    [InlineData("[Naruto Shippuden] Boruto - 500 [1080p]", false)]
+    [InlineData("[AnimeRG] Naruto Shippuden Movie - 500 [1080p]", false)]
+    public void LeadingReleaseGroupDoesNotReplaceTheRequiredSeriesAndEpisodeIdentity(string title, bool accepted) {
+        var rules = BookAcquisitionRules.Default with {
+            TargetTitle = "Naruto Shippuden", TargetEpisodeTitle = "The Message",
+            SeasonNumber = 20, EpisodeNumber = 500, TargetAbsoluteEpisodeNumber = 500
+        };
+        var result = Assert.Single(new TvReleaseDecisionEngine(EntityKind.VideoEpisode).Evaluate(
+            [(Release(title, seeders: 10), null, "Indexer")], rules));
+
+        Assert.Equal(accepted, result.Accepted);
+    }
+
+    [Theory]
+    [InlineData("[ReleaseGroup] Example.Show.2007.S01E01.1080p.WEB-DL", true)]
+    [InlineData("[ReleaseGroup] Example.Show.2020.S01E01.1080p.WEB-DL", false)]
+    public void LeadingReleaseGroupKeepsTheTitleYearGuard(string title, bool accepted) {
+        var rules = BookAcquisitionRules.Default with {
+            TargetTitle = "Example Show", TargetYear = 2007, SeasonNumber = 1, EpisodeNumber = 1
+        };
+        var result = Assert.Single(new TvReleaseDecisionEngine(EntityKind.VideoEpisode).Evaluate(
+            [(Release(title, seeders: 10), null, "Indexer")], rules));
+
+        Assert.Equal(accepted, result.Accepted);
+        if (!accepted) {
+            Assert.Contains(ReleaseRejectionReason.WrongYear, result.Rejections);
+        }
+    }
+
+    [Theory]
+    [InlineData(VideoQuality.Dvd, false)]
+    [InlineData(VideoQuality.Bluray720p, true)]
+    public void HdDvdSourceObeysTheHdProfileInsteadOfTheDiscCapacityLabel(VideoQuality allowed, bool accepted) {
+        var rules = BookAcquisitionRules.Default with {
+            TargetTitle = "Example", AllowedQualities = [allowed.ToCode()]
+        };
+        var result = Assert.Single(new MovieReleaseDecisionEngine().Evaluate(
+            [(Release("Example.1999.DVD9.720p.HDDVD.x264-GROUP", seeders: 10), null, "Indexer")], rules));
+
+        Assert.Equal(accepted, result.Accepted);
+        if (!accepted) {
+            Assert.Contains(ReleaseRejectionReason.QualityNotAllowed, result.Rejections);
+        }
+    }
+
+    [Theory]
+    [InlineData("Example.1999.DVDRip.XviD.AC3.CD1-GROUP", false)]
+    [InlineData("Example.1999.DVDRip.XviD.AC3.CD2-GROUP", false)]
+    [InlineData("Example.1999.DVDRip.XviD.CD.02-GROUP", false)]
+    [InlineData("Example.1999.DVDRip.XviD.2CD-GROUP", true)]
+    [InlineData("Example.1999.DVDRip.XviD-GROUP", true)]
+    public void MovieSearchRejectsIndividualCdParts(string title, bool accepted) {
+        var result = Assert.Single(new MovieReleaseDecisionEngine().Evaluate(
+            [(Release(title, seeders: 10), null, "Indexer")],
+            BookAcquisitionRules.Default with { TargetTitle = "Example" }));
+        Assert.Equal(accepted, result.Accepted);
+        if (!accepted) {
+            Assert.Contains(ReleaseRejectionReason.UnsupportedFormat, result.Rejections);
+        }
+    }
+
+    [Theory]
+    [InlineData(EntityKind.Movie, "Example.1999.720p.BDRip.XviD.Sample-GROUP")]
+    [InlineData(EntityKind.Movie, "Example.1999.1080p.Trailer.x264-GROUP")]
+    [InlineData(EntityKind.VideoSeason, "Example.S01.1080p.WEB-DL.Sample-GROUP")]
+    [InlineData(EntityKind.VideoEpisode, "Example.S01E01.1080p.WEB-DL.Sample-GROUP")]
+    public void VideoSearchRejectsStandaloneSamplesAndTrailers(EntityKind kind, string title) {
+        IAcquisitionDecisionEngine engine = kind == EntityKind.Movie
+            ? new MovieReleaseDecisionEngine() : new TvReleaseDecisionEngine(kind);
+        var rules = BookAcquisitionRules.Default with {
+            TargetTitle = "Example", SeasonNumber = kind == EntityKind.Movie ? null : 1,
+            EpisodeNumber = kind == EntityKind.VideoEpisode ? 1 : null
+        };
+        var result = Assert.Single(engine.Evaluate([(Release(title, seeders: 10), null, "Indexer")], rules));
+        Assert.False(result.Accepted);
+        Assert.Contains(ReleaseRejectionReason.UnsupportedFormat, result.Rejections);
+    }
+
+    [Theory]
+    [InlineData("Sample This", "Sample.This.2012.1080p.WEB-DL", true)]
+    [InlineData("Sample This", "Sample.This.2012.1080p.WEB-DL.Sample", false)]
+    [InlineData("Trailer Park Boys", "Trailer.Park.Boys.2006.1080p.WEB-DL", true)]
+    [InlineData("Sampler", "Sampler.2020.1080p.WEB-DL", true)]
+    public void PreviewWordsInsideTheWorkTitleDoNotRejectFullReleases(string target, string release, bool accepted) {
+        var result = Assert.Single(new MovieReleaseDecisionEngine().Evaluate(
+            [(Release(release, seeders: 10), null, "Indexer")], BookAcquisitionRules.Default with { TargetTitle = target }));
+        Assert.Equal(accepted, result.Accepted);
+    }
+
+    [Fact]
+    public void ProviderEpisodeTitleCanContainPreviewWords() {
+        var result = Assert.Single(new TvReleaseDecisionEngine(EntityKind.VideoEpisode).Evaluate(
+            [(Release("Example.S01E01.The.Sample.1080p.WEB-DL", seeders: 10), null, "Indexer")],
+            BookAcquisitionRules.Default with {
+                TargetTitle = "Example", TargetEpisodeTitle = "The Sample", SeasonNumber = 1, EpisodeNumber = 1
+            }));
+        Assert.True(result.Accepted);
+    }
+
+    [Fact]
+    public void CategoriesNarrowToTheKindRangeAndFallBackToItsTopLevel() {
+        var book = new BookAcquisitionPolicyModule();
+        var movie = new MovieAcquisitionPolicyModule();
+        var music = new MusicAcquisitionPolicyModule();
+        var tv = new TvAcquisitionPolicyModule();
+
+        // A book-configured indexer (7000s) searching movies falls back to the movie top-level category…
+        Assert.Equal([2000], movie.RouteCategories(Input(EntityKind.Movie), [7000, 7030]));
+        // …while the user's narrower in-range picks are preserved for the matching kind.
+        Assert.Equal([7020], book.RouteCategories(Input(EntityKind.Book, BookRendition.Ebook), [7000, 7020, 7030, 2000]));
+        Assert.Equal([3000], music.RouteCategories(Input(EntityKind.AudioLibrary), []));
+        Assert.Equal([5000], tv.RouteCategories(Input(EntityKind.VideoSeries), [7000]));
+    }
+
+    [Fact]
+    public void ConfiguredOtherRangeCategoriesPassThroughForEveryKind() {
+        var book = new BookAcquisitionPolicyModule();
+        var movie = new MovieAcquisitionPolicyModule();
+        var tv = new TvAcquisitionPolicyModule();
+
+        // The default book config (7000,8000) keeps its Other pick — this was silently dropped before.
+        Assert.Equal([7020, 8000], book.RouteCategories(Input(EntityKind.Book, BookRendition.Ebook), [7000, 8000]));
+        // Other-range picks ride along with the kind narrowing for any kind…
+        Assert.Equal([2000, 8010], movie.RouteCategories(Input(EntityKind.Movie), [2000, 7000, 8010]));
+        // …and with the top-level fallback when nothing kind-specific is configured.
+        Assert.Equal([7020, 8000], book.RouteCategories(Input(EntityKind.Book, BookRendition.Ebook), [8000]));
+        // No Other picks configured → behavior unchanged.
+        Assert.Equal([5000, 5040], tv.RouteCategories(Input(EntityKind.VideoSeries), [5000, 5040]));
+    }
+
+    [Fact]
+    public void MovieEngineRanksResolutionThenSourceThenSeeders() {
+        var engine = new MovieReleaseDecisionEngine();
+
+        var scored = engine.Evaluate([
+            (Release("Dune Part Two 1080p BluRay x264", seeders: 500), null, "Idx"),
+            (Release("Dune Part Two 2160p WEB-DL HDR", seeders: 50), null, "Idx"),
+            (Release("Dune Part Two 720p HDTV", seeders: 900), null, "Idx"),
+        ], BookAcquisitionRules.Default);
+
+        Assert.All(scored, candidate => Assert.True(candidate.Accepted));
+        Assert.Equal(
+            ["Dune Part Two 2160p WEB-DL HDR", "Dune Part Two 1080p BluRay x264", "Dune Part Two 720p HDTV"],
+            scored.Select(candidate => candidate.Release.Title).ToArray());
+    }
+
+    [Fact]
+    public void MediaQualityDetectionTreatsIndexerSeparatorsAsSpaces() {
+        Assert.Equal(VideoQuality.Bluray1080p.ToCode(), MediaQualityLadder.Detect(EntityKind.Movie, "Movie_1080p_Blu_Ray_x264").Code);
+        Assert.Equal(VideoQuality.Webdl2160p.ToCode(), MediaQualityLadder.Detect(EntityKind.Movie, "Movie_2160p_WEB_DL_HDR").Code);
+        Assert.Equal(VideoQuality.Webrip720p.ToCode(), MediaQualityLadder.Detect(EntityKind.Movie, "Movie_720p_WEB_Rip").Code);
+        Assert.Equal(AudioQuality.Lossless.ToCode(), MediaQualityLadder.Detect(EntityKind.AudioLibrary, "Artist_Album_FLAC").Code);
+        Assert.Equal(AudioQuality.LosslessHiRes.ToCode(), MediaQualityLadder.Detect(EntityKind.AudioLibrary, "Artist_Album_24_Bit_FLAC").Code);
+    }
+
+    [Fact]
+    public void TvLadderDrillsSeasonThenCompleteAndEpisodeExactly() {
+        var policy = new TvAcquisitionPolicyModule();
+        var season = new AcquisitionSearchInput(
+            Guid.NewGuid(), "Season 1", null, EntityKind.VideoSeason, Series: "Andor", SeasonNumber: 1);
+        Assert.Equal(["Andor S01", "Andor Season 1", "Andor complete"], policy.BuildQueries(season));
+
+        var episode = new AcquisitionSearchInput(
+            Guid.NewGuid(), "Pilot", null, EntityKind.VideoEpisode, Series: "Andor", SeasonNumber: 1, EpisodeNumber: 5);
+        Assert.Equal(["Andor S01E05", "Andor 1x05"], policy.BuildQueries(episode));
+        Assert.Equal(["Andor Pilot"], policy.BuildFallbackQueries(episode));
+    }
+
+    [Fact]
+    public void SeasonPackSearchRejectsWrongUnitsAndAcceptsCompletePacks() {
+        var engine = new TvReleaseDecisionEngine(EntityKind.VideoSeason);
+        var rules = BookAcquisitionRules.Default with { SeasonNumber = 1 };
+
+        var scored = engine.Evaluate([
+            (Release("Andor S01 1080p WEB-DL", seeders: 100), null, "Idx"),
+            (Release("Andor Season 1 720p", seeders: 100), null, "Idx"),
+            (Release("Andor COMPLETE 1080p", seeders: 100), null, "Idx"),
+            (Release("Andor S52 COMPLETE 720p", seeders: 100), null, "Idx"),
+            (Release("Andor The Complete Third Season", seeders: 100), null, "Idx"),
+            (Release("Andor Season 1 Poster Part 1", seeders: 100), null, "Idx"),
+            (Release("Andor 1080p WEB-DL", seeders: 100), null, "Idx"),
+            (Release("Andor S02 1080p WEB-DL", seeders: 100), null, "Idx"),
+            (Release("Andor S01E05 1080p WEB-DL", seeders: 100), null, "Idx"),
+        ], rules);
+
+        var verdicts = scored.ToDictionary(candidate => candidate.Release.Title, candidate => candidate.Accepted);
+        Assert.True(verdicts["Andor S01 1080p WEB-DL"]);
+        Assert.True(verdicts["Andor Season 1 720p"]);
+        Assert.True(verdicts["Andor COMPLETE 1080p"]);
+        Assert.False(verdicts["Andor S52 COMPLETE 720p"]);
+        Assert.False(verdicts["Andor The Complete Third Season"]);
+        Assert.False(verdicts["Andor Season 1 Poster Part 1"]);
+        // A marker-less pack passes (judged by the query match), like format-anonymous book titles.
+        Assert.True(verdicts["Andor 1080p WEB-DL"]);
+        Assert.False(verdicts["Andor S02 1080p WEB-DL"]);
+        Assert.False(verdicts["Andor S01E05 1080p WEB-DL"]);
+        Assert.Contains(ReleaseRejectionReason.WrongTvUnit, scored.Single(c => c.Release.Title.Contains("S01E05")).Rejections);
+    }
+
+    [Fact]
+    public void EpisodeSearchAcceptsTheExactUnitOrProviderTitleWithoutACompetingUnit() {
+        var engine = new TvReleaseDecisionEngine(EntityKind.VideoEpisode);
+        var rules = BookAcquisitionRules.Default with {
+            SeasonNumber = 1,
+            EpisodeNumber = 5,
+            TargetEpisodeTitle = "Pilot"
+        };
+
+        var scored = engine.Evaluate([
+            (Release("Andor S01E05 1080p WEB-DL", seeders: 10), null, "Idx"),
+            (Release("Andor 1x05 720p", seeders: 10), null, "Idx"),
+            (Release("Andor Pilot 720p", seeders: 10), null, "Idx"),
+            (Release("Andor S01E06 Pilot 1080p", seeders: 10), null, "Idx"),
+            (Release("Andor S01E06 1080p", seeders: 10), null, "Idx"),
+            (Release("Andor S01 1080p pack", seeders: 10), null, "Idx"),
+        ], rules);
+
+        var verdicts = scored.ToDictionary(candidate => candidate.Release.Title, candidate => candidate.Accepted);
+        Assert.True(verdicts["Andor S01E05 1080p WEB-DL"]);
+        Assert.True(verdicts["Andor 1x05 720p"]);
+        Assert.True(verdicts["Andor Pilot 720p"]);
+        Assert.False(verdicts["Andor S01E06 Pilot 1080p"]);
+        Assert.False(verdicts["Andor S01E06 1080p"]);
+        Assert.False(verdicts["Andor S01 1080p pack"]);
+    }
+
+    [Theory]
+    [InlineData(DownloadProtocol.Torrent)]
+    [InlineData(DownloadProtocol.Usenet)]
+    public void EpisodeSearchUsesAbsoluteIdentityForTorrentAndUsenetTitles(DownloadProtocol protocol) {
+        var engine = new TvReleaseDecisionEngine(EntityKind.VideoEpisode);
+        var rules = BookAcquisitionRules.Default with {
+            TargetTitle = "Sesame Street",
+            SeasonNumber = 11,
+            EpisodeNumber = 95,
+            TargetEpisodeTitle = "A Visit from Sally Ride",
+            TargetAbsoluteEpisodeNumber = 1316,
+            AllowedProtocols = [protocol]
+        };
+
+        var scored = engine.Evaluate([
+            (Release("Sesame Street S11E95 720p", 2, protocol), null, "Idx"),
+            (Release("Sesame Street 1316 Season 11 1080p", 20, protocol), null, "Idx"),
+            (Release("Sesame Street A Visit from Sally Ride 2160p", 200, protocol), null, "Idx"),
+            (Release("Sesame Street 1316 Season 12 1080p", 20, protocol), null, "Idx"),
+            (Release("Sesame Street S11E96 Episode 1316 1080p", 20, protocol), null, "Idx")
+        ], rules);
+
+        Assert.Equal(
+            [
+                "Sesame Street S11E95 720p",
+                "Sesame Street 1316 Season 11 1080p",
+                "Sesame Street A Visit from Sally Ride 2160p"
+            ],
+            scored.Where(candidate => candidate.Accepted).Select(candidate => candidate.Release.Title).ToArray());
+        Assert.False(scored.Single(candidate => candidate.Release.Title.Contains("Season 12")).Accepted);
+        Assert.False(scored.Single(candidate => candidate.Release.Title.Contains("S11E96")).Accepted);
+    }
+
+    [Fact]
+    public void MusicEngineRanksLosslessAboveHighBitrateLossy() {
+        var engine = new MusicReleaseDecisionEngine();
+
+        var scored = engine.Evaluate([
+            (Release("Daft Punk - Discovery (2001) MP3 320", seeders: 800), null, "Idx"),
+            (Release("Daft Punk - Discovery (2001) FLAC", seeders: 100), null, "Idx"),
+        ], BookAcquisitionRules.Default);
+
+        Assert.Equal("Daft Punk - Discovery (2001) FLAC", scored[0].Release.Title);
+    }
+
+    [Fact]
+    public void ExactTrackFileQualityOutranksUnrelatedPeerFolderNames() {
+        var rules = BookAcquisitionRules.Default with {
+            TargetTitle = "Pharrell Williams Happy", TargetTrackTitle = "Happy", TargetAuthor = "Pharrell Williams",
+            AllowedProtocols = [DownloadProtocol.Soulseek]
+        };
+        var lossless = Release("Archive / Downloads / Collection / Favorites / Recently Added / Pharrell Williams / Happy / 01 Happy.flac FLAC",
+            seeders: 1, protocol: DownloadProtocol.Soulseek) with { KnownFileNames = ["01 Happy.flac"] };
+        var lossy = Release("Pharrell Williams / Happy.mp3 MP3 128kbps", seeders: 1, protocol: DownloadProtocol.Soulseek)
+            with { KnownFileNames = ["Happy.mp3"] };
+        var scored = new MusicReleaseDecisionEngine(EntityKind.AudioTrack).Evaluate([(lossless, null, "Soulseek"), (lossy, null, "Soulseek")], rules);
+        Assert.All(scored, candidate => Assert.True(candidate.Accepted));
+        Assert.Equal(lossless, scored[0].Release);
+    }
+
+    [Theory]
+    [InlineData("Happy", "01-pharrell_williams-happy.flac", true)]
+    [InlineData("Happy", "02-pharrell_williams-happy_(instrumental).flac", false)]
+    [InlineData("Happy (Instrumental)", "02-pharrell_williams-happy_(instrumental).flac", true)]
+    [InlineData("Happy", "01-other_artist-happy.flac", false)]
+    public void TrackRankingUsesAdvertisedFilesToMatchTheRequestedRecording(string title, string filename, bool accepted) {
+        var rules = BookAcquisitionRules.Default with {
+            TargetTitle = "Pharrell Williams Happy", TargetTrackTitle = title, TargetAuthor = "Pharrell Williams",
+            AllowedProtocols = [DownloadProtocol.Soulseek]
+        };
+        var release = Release("Pharrell Williams / Happy / " + filename + " FLAC", seeders: 1,
+            protocol: DownloadProtocol.Soulseek) with { KnownFileNames = ["Music\\Pharrell Williams\\Happy\\" + filename] };
+        var result = Assert.Single(new MusicReleaseDecisionEngine(EntityKind.AudioTrack).Evaluate([(release, null, "Soulseek")], rules));
+        Assert.Equal(accepted, result.Accepted);
+        if (!accepted) Assert.Contains(ReleaseRejectionReason.TitleMismatch, result.Rejections);
+    }
+
+    [Fact]
+    public void MusicEngineUsesSoulseekFolderContextForTrackIdentity() {
+        var engine = new MusicReleaseDecisionEngine(EntityKind.AudioTrack);
+        var rules = BookAcquisitionRules.Default with {
+            TargetTitle = "Divide Music Had Enough",
+            AllowedProtocols = [DownloadProtocol.Soulseek]
+        };
+
+        var scored = engine.Evaluate([
+            (Release(
+                "Music / Divide Music / Had Enough / 01 Had Enough.flac FLAC [Soulseek peer]",
+                seeders: 1,
+                protocol: DownloadProtocol.Soulseek), null, "slskd"),
+            (Release(
+                "Music / Other Artist / Had Enough / 01 Had Enough.flac FLAC [Soulseek peer]",
+                seeders: 1,
+                protocol: DownloadProtocol.Soulseek), null, "slskd"),
+        ], rules);
+
+        var verdicts = scored.ToDictionary(candidate => candidate.Release.Title, candidate => candidate);
+        Assert.True(verdicts["Music / Divide Music / Had Enough / 01 Had Enough.flac FLAC [Soulseek peer]"].Accepted);
+        Assert.Contains(
+            ReleaseRejectionReason.TitleMismatch,
+            verdicts["Music / Other Artist / Had Enough / 01 Had Enough.flac FLAC [Soulseek peer]"].Rejections);
+    }
+
+    [Fact]
+    public void MusicEngineAcceptsQuotedAlbumMetadataInSoulseekPathContext() {
+        var engine = new MusicReleaseDecisionEngine();
+        var rules = BookAcquisitionRules.Default with {
+            TargetTitle = "Pharrell Williams Double Life (From \"Despicable Me 4\")",
+            AllowedProtocols = [DownloadProtocol.Soulseek]
+        };
+
+        var candidate = Assert.Single(engine.Evaluate([
+            (Release(
+                "Music / Pharrell Williams / Double Life (From Despicable Me 4) (2024) OPUS [Soulseek peer]",
+                seeders: 1,
+                protocol: DownloadProtocol.Soulseek), null, "slskd")
+        ], rules));
+
+        Assert.True(candidate.Accepted);
+        Assert.DoesNotContain(ReleaseRejectionReason.TitleMismatch, candidate.Rejections);
+    }
+
+    [Fact]
+    public void SharedGatesStillApplyToTheNewEngines() {
+        var engine = new MovieReleaseDecisionEngine();
+        var rules = BookAcquisitionRules.Default with { MinSeeders = 5, IgnoredTerms = ["cam"] };
+
+        var scored = engine.Evaluate([
+            (Release("Movie 1080p CAM", seeders: 100), null, "Idx"),
+            (Release("Movie 1080p BluRay", seeders: 1), null, "Idx"),
+            (Release("Movie 1080p BluRay", seeders: 100), null, "Idx"),
+        ], rules);
+
+        Assert.Single(scored, candidate => candidate.Accepted);
+        Assert.Contains(scored, candidate => candidate.Rejections.Contains(ReleaseRejectionReason.HasIgnoredTerm));
+        Assert.Contains(scored, candidate => candidate.Rejections.Contains(ReleaseRejectionReason.BelowMinSeeders));
+    }
+
+    [Fact]
+    public void BlocklistGateAppliesToTheNewEngines() {
+        var engine = new MusicReleaseDecisionEngine();
+        var release = Release("Album FLAC", seeders: 10);
+        var identity = ReleaseIdentity.For(release.InfoHash, "Idx", release.Title);
+
+        var scored = engine.Evaluate([(release, null, "Idx")], BookAcquisitionRules.Default, new HashSet<string> { identity });
+
+        Assert.False(scored[0].Accepted);
+        Assert.Contains(ReleaseRejectionReason.Blocklisted, scored[0].Rejections);
+    }
+
+    [Fact]
+    public void MediaUpgradeSearchAcceptsStrictlyBetterAndRejectsEqualOrLower() {
+        var spec = new MediaUpgradeSpecification(EntityKind.Movie);
+        var rules = BookAcquisitionRules.Default with { IsUpgradeSearch = true, OwnedMediaQuality = "webdl-1080p" };
+
+        // A strictly higher ladder position is an upgrade…
+        Assert.Null(spec.Evaluate(Release("Movie 1080p BluRay", seeders: 10), rules));
+        // …a lower same-resolution source is not…
+        Assert.Equal(ReleaseRejectionReason.NotAnUpgrade, spec.Evaluate(Release("Movie 1080p WEBRip", seeders: 10), rules));
+        // …and the exact same ladder position is not an upgrade either.
+        Assert.Equal(ReleaseRejectionReason.NotAnUpgrade, spec.Evaluate(Release("Movie 1080p WEB-DL", seeders: 10), rules));
+    }
+
+    [Fact]
+    public void SubtitleMissingOwnedVideoAdmitsEqualQualityForPayloadInspectionButNeverLowerQuality() {
+        var spec = new MediaUpgradeSpecification(EntityKind.Movie);
+        var rules = BookAcquisitionRules.Default with {
+            IsUpgradeSearch = true,
+            OwnedMediaQuality = VideoQuality.Remux2160p.ToCode(),
+            OwnedHasSubtitles = false
+        };
+
+        Assert.Null(spec.Evaluate(Release("Movie 2160p Remux", seeders: 10), rules));
+        Assert.Equal(
+            ReleaseRejectionReason.NotAnUpgrade,
+            spec.Evaluate(Release("Movie 2160p Remux", seeders: 10), rules with { OwnedHasSubtitles = true }));
+        Assert.Equal(
+            ReleaseRejectionReason.NotAnUpgrade,
+            spec.Evaluate(Release("Movie 1080p Remux MULTISUB", seeders: 10), rules));
+    }
+
+    [Theory]
+    [InlineData("Movie.1080p.WEB-DL.MULTISUB")]
+    [InlineData("Movie 1080p BluRay ENGSubs")]
+    [InlineData("Movie 1080p subbed")]
+    public void SubtitleReleaseHintsAreRecognized(string title) {
+        Assert.True(ReleaseSubtitleDetection.HasSubtitleHint(title));
+    }
+
+    [Fact]
+    public void SubtitleHintOutranksSeedersAtEqualVideoQualityWithoutOutrankingHigherQuality() {
+        var engine = new MovieReleaseDecisionEngine();
+        var scored = engine.Evaluate([
+            (Release("Movie 1080p WEB-DL MULTISUB", seeders: 1), null, "Idx"),
+            (Release("Movie 1080p WEB-DL", seeders: 9_000), null, "Idx"),
+            (Release("Movie 2160p WEB-DL", seeders: 1), null, "Idx")
+        ], BookAcquisitionRules.Default);
+
+        Assert.Equal("Movie 2160p WEB-DL", scored[0].Release.Title);
+        Assert.Equal("Movie 1080p WEB-DL MULTISUB", scored[1].Release.Title);
+    }
+
+    [Fact]
+    public void MediaUpgradeSpecificationIsNoOpOnNonUpgradeSearches() {
+        var spec = new MediaUpgradeSpecification(EntityKind.Movie);
+        // Not an upgrade search → the gate never rejects, even for a weak release.
+        Assert.Null(spec.Evaluate(Release("Movie 1080p WEBRip", seeders: 10), BookAcquisitionRules.Default));
+        // Upgrade search but no owned code set → still a no-op (can't judge without an owned baseline).
+        var noOwned = BookAcquisitionRules.Default with { IsUpgradeSearch = true };
+        Assert.Null(spec.Evaluate(Release("Movie 1080p WEBRip", seeders: 10), noOwned));
+    }
+
+    [Fact]
+    public void MovieUpgradeSearchThroughTheEngineRejectsNonUpgradesAndAcceptsBetter() {
+        var engine = new MovieReleaseDecisionEngine();
+        var rules = BookAcquisitionRules.Default with { IsUpgradeSearch = true, OwnedMediaQuality = "webdl-1080p" };
+
+        var scored = engine.Evaluate([
+            (Release("Movie 1080p WEBRip", seeders: 100), null, "Idx"),
+            (Release("Movie 1080p WEB-DL", seeders: 100), null, "Idx"),
+            (Release("Movie 1080p BluRay", seeders: 100), null, "Idx"),
+        ], rules);
+
+        var verdicts = scored.ToDictionary(candidate => candidate.Release.Title, candidate => candidate);
+        Assert.False(verdicts["Movie 1080p WEBRip"].Accepted);
+        Assert.Contains(ReleaseRejectionReason.NotAnUpgrade, verdicts["Movie 1080p WEBRip"].Rejections);
+        Assert.False(verdicts["Movie 1080p WEB-DL"].Accepted);
+        Assert.Contains(ReleaseRejectionReason.NotAnUpgrade, verdicts["Movie 1080p WEB-DL"].Rejections);
+        Assert.True(verdicts["Movie 1080p BluRay"].Accepted);
+    }
+
+    [Fact]
+    public void SameQualityHigherRevisionIsAnUpgradeOnlyUnderPreferAndUpgrade() {
+        var spec = new MediaUpgradeSpecification(EntityKind.Movie);
+        // Owned: a plain webdl-1080p (revision 1). Candidate: a PROPER of the same quality (revision 2).
+        var proper = Release("Movie 1080p WEB-DL PROPER", seeders: 10);
+
+        // PreferAndUpgrade → a same-quality higher revision counts as an upgrade.
+        var prefer = BookAcquisitionRules.Default with {
+            IsUpgradeSearch = true, OwnedMediaQuality = "webdl-1080p", OwnedMediaRevision = 1,
+            ProperPolicy = ProperDownloadPolicy.PreferAndUpgrade
+        };
+        Assert.Null(spec.Evaluate(proper, prefer));
+
+        // DoNotUpgrade → a same-quality higher revision is NOT an upgrade.
+        var doNotUpgrade = prefer with { ProperPolicy = ProperDownloadPolicy.DoNotUpgrade };
+        Assert.Equal(ReleaseRejectionReason.NotAnUpgrade, spec.Evaluate(proper, doNotUpgrade));
+
+        // DoNotPrefer → also not an upgrade.
+        var doNotPrefer = prefer with { ProperPolicy = ProperDownloadPolicy.DoNotPrefer };
+        Assert.Equal(ReleaseRejectionReason.NotAnUpgrade, spec.Evaluate(proper, doNotPrefer));
+
+        // A same-quality PLAIN release (no higher revision) is never an upgrade, even under PreferAndUpgrade.
+        Assert.Equal(ReleaseRejectionReason.NotAnUpgrade, spec.Evaluate(Release("Movie 1080p WEB-DL", seeders: 10), prefer));
+    }
+
+    [Fact]
+    public void HigherLadderPositionIsAnUpgradeUnderEveryProperPolicy() {
+        var spec = new MediaUpgradeSpecification(EntityKind.Movie);
+        var better = Release("Movie 1080p BluRay", seeders: 10); // strictly above webdl-1080p on the ladder
+        foreach (var policy in new[] { ProperDownloadPolicy.PreferAndUpgrade, ProperDownloadPolicy.DoNotUpgrade, ProperDownloadPolicy.DoNotPrefer }) {
+            var rules = BookAcquisitionRules.Default with {
+                IsUpgradeSearch = true, OwnedMediaQuality = "webdl-1080p", OwnedMediaRevision = 1, ProperPolicy = policy
+            };
+            Assert.Null(spec.Evaluate(better, rules));
+        }
+    }
+
+    [Fact]
+    public void ProperOutranksPlainAtEqualQualityUnlessDoNotPrefer() {
+        var engine = new MovieReleaseDecisionEngine();
+        // The plain release has far more seeders; only the revision boost can float the PROPER above it.
+        var releases = new[] {
+            (Release("Movie 1080p BluRay PROPER", seeders: 10), (Guid?)null, "Idx"),
+            (Release("Movie 1080p BluRay", seeders: 9_000), (Guid?)null, "Idx"),
+        };
+
+        // PreferAndUpgrade (the default) and DoNotUpgrade both keep the revision ranking boost.
+        foreach (var policy in new[] { ProperDownloadPolicy.PreferAndUpgrade, ProperDownloadPolicy.DoNotUpgrade }) {
+            var scored = engine.Evaluate(releases, BookAcquisitionRules.Default with { ProperPolicy = policy });
+            Assert.Equal("Movie 1080p BluRay PROPER", scored[0].Release.Title);
+        }
+
+        // DoNotPrefer drops the boost entirely, so seeders decide the same-quality tie for the plain release.
+        var ignored = engine.Evaluate(releases, BookAcquisitionRules.Default with { ProperPolicy = ProperDownloadPolicy.DoNotPrefer });
+        Assert.Equal("Movie 1080p BluRay", ignored[0].Release.Title);
+    }
+
+    [Fact]
+    public void SeasonSearchRanksExactSeasonAboveMarkerlessRegardlessOfQuality() {
+        // Regression (Bear in the Big Blue House): one marker-less DVD rip with high quality/seeders
+        // outscored the exact season packs for FOUR different season searches and was queued as the
+        // same torrent four times. Unit precision must dominate quality for auto-grabs.
+        var engine = new TvReleaseDecisionEngine(EntityKind.VideoSeason);
+        var rules = BookAcquisitionRules.Default with { SeasonNumber = 2 };
+
+        var scored = engine.Evaluate([
+            (Release("WALT DISNEYS BEAR IN THE BIG BLUE HOUSE SHAPES SOUNDS COLOURS KIDZCORNER DVDRIP[ENG]", seeders: 500), null, "Indexer"),
+            (Release("Bear in the Big Blue House 1997 S02 TVRip x264", seeders: 3), null, "Indexer"),
+            (Release("Bear in the Big Blue House COMPLETE SERIES DVDRip", seeders: 50), null, "Indexer"),
+        ], rules);
+
+        Assert.All(scored, candidate => Assert.True(candidate.Accepted));
+        Assert.Equal(
+            [
+                "Bear in the Big Blue House 1997 S02 TVRip x264",
+                "Bear in the Big Blue House COMPLETE SERIES DVDRip",
+                "WALT DISNEYS BEAR IN THE BIG BLUE HOUSE SHAPES SOUNDS COLOURS KIDZCORNER DVDRIP[ENG]",
+            ],
+            scored.Select(candidate => candidate.Release.Title).ToArray());
+    }
+
+    [Fact]
+    public void EpisodeSearchRanksTheExactEpisodeAboveMarkerlessTitles() {
+        var engine = new TvReleaseDecisionEngine(EntityKind.VideoEpisode);
+        var rules = BookAcquisitionRules.Default with { SeasonNumber = 1, EpisodeNumber = 5 };
+
+        var scored = engine.Evaluate([
+            (Release("Show 2160p BluRay REMUX", seeders: 900), null, "Indexer"),
+            (Release("Show S01E05 720p WEB", seeders: 2), null, "Indexer"),
+        ], rules);
+
+        Assert.Equal("Show S01E05 720p WEB", scored[0].Release.Title);
+    }
+
+    [Fact]
+    public void MediaEnginesRejectReleaseTitlesNamingDangerousFiles() {
+        var engine = new MovieReleaseDecisionEngine();
+
+        var scored = engine.Evaluate(
+            [(Release("Blockbuster 2160p BluRay.exe", seeders: 500), null, "Indexer")],
+            BookAcquisitionRules.Default);
+
+        Assert.False(scored[0].Accepted);
+        Assert.Contains(ReleaseRejectionReason.DangerousContent, scored[0].Rejections);
+    }
+
+    private static IndexerRelease Release(
+        string title,
+        int seeders,
+        DownloadProtocol protocol = DownloadProtocol.Torrent) =>
+        new(title, SizeBytes: 1_000_000_000, Seeders: seeders, Peers: seeders, protocol,
+            DownloadUrl: "http://dl", MagnetUrl: null, InfoHash: null, InfoUrl: null, Language: null, PublishedAt: null);
+
+    private static AcquisitionSearchInput Input(EntityKind kind, BookRendition? rendition = null) =>
+        new(Guid.NewGuid(), "Title", null, kind, BookRendition: rendition);
+}

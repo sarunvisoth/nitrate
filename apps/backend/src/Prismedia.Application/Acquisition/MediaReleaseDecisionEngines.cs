@@ -1,0 +1,538 @@
+using Prismedia.Domain.Entities;
+
+namespace Prismedia.Application.Acquisition;
+
+/// <summary>
+/// Movie decision engine: the generic acceptance gates (protocol, link, seeders, size, terms,
+/// language, blocklist) plus a resolution/source-aware ranking parsed from the release title. Runs on
+/// the shared rules record — the format/quality gates are book vocabulary and don't apply here; a
+/// movie-specific profile (cutoffs, resolution floors) lands with the movie import workstream.
+/// </summary>
+public sealed class MovieReleaseDecisionEngine(EntityKind kind = EntityKind.Movie) : IAcquisitionDecisionEngine {
+    public EntityKind Kind => kind;
+
+    private readonly IReleaseSpecification[] _specifications = [
+        new DangerousContentSpecification(),
+        new TitleIdentitySpecification(),
+        new MediaYearSpecification(),
+        new VideoPreviewSpecification(),
+        new MoviePartialReleaseSpecification(),
+        new ProtocolSpecification(),
+        new DownloadLinkSpecification(),
+        new MinSeedersSpecification(),
+        new SizeSpecification(),
+        new RequiredTermsSpecification(),
+        new IgnoredTermsSpecification(),
+        new LanguageSpecification(),
+        new MediaQualityAllowedSpecification(kind),
+        new MinFormatScoreSpecification(),
+        new MediaUpgradeSpecification(kind)
+    ];
+
+    public IReadOnlyList<ScoredRelease> Evaluate(
+        IReadOnlyList<(IndexerRelease Release, Guid? IndexerConfigId, string IndexerName)> releases,
+        BookAcquisitionRules rules,
+        IReadOnlySet<string>? blocklistedIdentities = null) =>
+        MediaReleaseEvaluation.Evaluate(releases, rules, blocklistedIdentities, _specifications, MovieScore);
+
+    /// <summary>Profile preference (terms, custom weights, language) outranks everything; then resolution, then source provenance, then seeders.</summary>
+    private static double MovieScore(IndexerRelease release, BookAcquisitionRules rules) =>
+        MediaReleaseEvaluation.VideoReleaseScore(release, rules);
+}
+
+/// <summary>
+/// Music decision engine: the generic acceptance gates plus a codec-quality ranking parsed from the
+/// release title (lossless above high-bitrate lossy above the rest). The music policy binds one engine
+/// to each supported music kind while sharing this release vocabulary.
+/// </summary>
+public sealed class MusicReleaseDecisionEngine(EntityKind kind = EntityKind.AudioLibrary) : IAcquisitionDecisionEngine {
+    public EntityKind Kind => kind;
+
+    private readonly IReleaseSpecification[] _specifications = [
+        new DangerousContentSpecification(),
+        // Torrent/Usenet scene names lead with artist and work, while Soulseek exposes the work in
+        // its remote folder path. Keep the strict scene-title guard everywhere except that path-based
+        // protocol. NO year gate on purpose — remaster/reissue years legitimately diverge.
+        new MusicTitleIdentitySpecification(kind),
+        new ProtocolSpecification(),
+        new DownloadLinkSpecification(),
+        new MinSeedersSpecification(),
+        new SizeSpecification(),
+        new RequiredTermsSpecification(),
+        new IgnoredTermsSpecification(),
+        new LanguageSpecification(),
+        new MediaQualityAllowedSpecification(kind),
+        new MinFormatScoreSpecification(),
+        new MediaUpgradeSpecification(kind)
+    ];
+
+    public IReadOnlyList<ScoredRelease> Evaluate(
+        IReadOnlyList<(IndexerRelease Release, Guid? IndexerConfigId, string IndexerName)> releases,
+        BookAcquisitionRules rules,
+        IReadOnlySet<string>? blocklistedIdentities = null) =>
+        MediaReleaseEvaluation.Evaluate(releases, rules, blocklistedIdentities, _specifications, MusicScore);
+
+    /// <summary>Profile preference (terms, custom weights, language) outranks everything; then the codec-quality ladder (hi-res and lossless first), then the revision boost (a proper/repack at the same quality outranks a plain release unless propers are not preferred), then seeders.</summary>
+    private double MusicScore(IndexerRelease release, BookAcquisitionRules rules) {
+        var quality = (int)AudioQualityDetection.Detect(release.Title);
+        // Once an advertised file identifies the exact recording, arbitrary peer folder names
+        // cannot improve identity or justify demoting a higher-quality copy.
+        var relevance = kind == EntityKind.AudioTrack && release.KnownFileNames.Count > 0
+            && !string.IsNullOrWhiteSpace(rules.TargetTrackTitle) ? 0 : ReleaseTitleRelevance.Score(release, rules);
+        return MediaReleaseEvaluation.PreferenceScore(release, rules) * 10_000
+            + relevance
+            + quality * 100_000
+            + MediaReleaseEvaluation.RevisionBoost(release.Title, rules)
+            + Math.Min(release.Seeders ?? 0, 9_999);
+    }
+}
+
+/// <summary>
+/// Rejects music releases that do not identify the sought artist/work. Torrent and Usenet candidates
+/// retain the strict leading-title convention; Soulseek candidates may place artist, album, and track
+/// in successive remote path segments, so every target token must occur somewhere in that path title.
+/// </summary>
+public sealed class MusicTitleIdentitySpecification(EntityKind kind = EntityKind.AudioLibrary) : IReleaseSpecification {
+    public ReleaseRejectionReason Reason => ReleaseRejectionReason.TitleMismatch;
+
+    public ReleaseRejectionReason? Evaluate(IndexerRelease release, BookAcquisitionRules rules) {
+        if (kind == EntityKind.AudioTrack && !string.IsNullOrWhiteSpace(rules.TargetTrackTitle)
+            && release.KnownFileNames.Count > 0
+            && !release.KnownFileNames.Any(file => AudioTrackTitleText.MatchesMetadataTitle(
+                rules.TargetTrackTitle, Path.GetFileNameWithoutExtension(file.Replace('\\', '/')), rules.TargetAuthor, requireArtistMatch: true))) {
+            return Reason;
+        }
+        var matched = release.Protocol == DownloadProtocol.Soulseek
+            ? ReleaseTitleIdentity.MatchesSoulseekPath(release.Title, rules.TargetTitle)
+            : ReleaseTitleIdentity.Match(release.Title, rules.TargetTitle).TitleMatched;
+        return matched ? null : Reason;
+    }
+}
+
+/// <summary>
+/// Rejects releases whose leading title tokens do not name exactly the sought work — the automatic-pick
+/// guard against sequels, spin-offs, and different titles sharing a prefix ("Dune Part Two" against
+/// "Dune", "Clifford's Puppy Days" against "Clifford the Big Red Dog"). Digit-preserving comparison per
+/// <see cref="ReleaseTitleIdentity"/>, so a year inside a title is significant. No-op without a target
+/// title (ad-hoc evaluations); manual picks bypass rejection by design.
+/// </summary>
+public sealed class TitleIdentitySpecification : IReleaseSpecification {
+    public ReleaseRejectionReason Reason => ReleaseRejectionReason.TitleMismatch;
+
+    public ReleaseRejectionReason? Evaluate(IndexerRelease release, BookAcquisitionRules rules) {
+        var identity = AcquisitionWorkTitles.Match(release.Title, rules.TargetTitle, rules.TargetAlternativeTitles,
+            rules.EpisodeNumber is not null ? TvEpisodeIdentifiers.Create(rules.TargetEpisodeTitle, rules.TargetAbsoluteEpisodeNumber) : null);
+        return identity.TitleMatched ? null : Reason;
+    }
+}
+
+/// <summary>
+/// Rejects releases whose title-adjacent year conflicts with the sought work's year — THE guard against
+/// same-name remakes and reboots ("Clifford.the.Big.Red.Dog.2019.S01" against the 2000 series, whose
+/// 1080p reboot packs would otherwise outrank the 480p original on quality alone). A ±1 tolerance
+/// absorbs regional release-date offsets; releases naming no year pass this gate (the title gate and
+/// import-time validation carry those). No-op without a known target year.
+/// </summary>
+public sealed class MediaYearSpecification : IReleaseSpecification {
+    private const int ToleranceYears = 1;
+
+    public ReleaseRejectionReason Reason => ReleaseRejectionReason.WrongYear;
+
+    public ReleaseRejectionReason? Evaluate(IndexerRelease release, BookAcquisitionRules rules) {
+        if (rules.TargetYear is not { } targetYear) {
+            return null;
+        }
+
+        var identity = AcquisitionWorkTitles.Match(release.Title, rules.TargetTitle, rules.TargetAlternativeTitles);
+        return identity.TitleYear is { } year && Math.Abs(year - targetYear) > ToleranceYears ? Reason : null;
+    }
+}
+
+/// <summary>
+/// Rejects TV releases that name a different unit than the acquisition seeks. An episode search only
+/// accepts exact SxxEyy (or 1x05), or a same-season alternate order proven by complete catalog titles;
+/// a season-pack search rejects single-episode
+/// releases and other seasons' packs, while accepting complete-series packs (they contain the season)
+/// and marker-less titles (judged by the query match alone, mirroring the format rule for books).
+/// No-op outside TV searches — the unit fields are set per search by the runner, never by a profile.
+/// </summary>
+public sealed class TvUnitSpecification : IReleaseSpecification {
+    private readonly TvCatalogEpisodeSpecification? catalog;
+
+    /// <summary>Checks numeric and title-only identity when no full catalog is available.</summary>
+    public TvUnitSpecification() { }
+
+    internal TvUnitSpecification(TvCatalogEpisodeSpecification catalog) => this.catalog = catalog;
+    public ReleaseRejectionReason Reason => ReleaseRejectionReason.WrongTvUnit;
+
+    public ReleaseRejectionReason? Evaluate(IndexerRelease release, BookAcquisitionRules rules) {
+        if (rules.SeasonNumber is not { } season) {
+            return null;
+        }
+
+        var declaredEpisodes = TvReleaseTokens.ParseEpisodes(release.Title);
+        if (rules.EpisodeNumber is { } episode) {
+            // Single episode sought: the release must declare the exact unit — including a multi-episode
+            // release that contains it (a double-episode S01E41E42 file fulfils an E42 search). A title-only
+            // release is the safe fallback only when it declares no competing TV unit and names the provider
+            // episode title; the series identity gate independently proves the parent work.
+            if (declaredEpisodes is { } unit) {
+                return unit.Season == season && unit.Episodes.Contains(episode)
+                    || catalog?.IdentifiesRequestedEpisode(release, rules) == true ? null : Reason;
+            }
+
+            if (TvReleaseTokens.NamesCompleteSeries(release.Title)) {
+                return Reason;
+            }
+
+            var episodeDeclaredSeason = TvReleaseTokens.ParseSeason(release.Title);
+            if (episodeDeclaredSeason is not null && episodeDeclaredSeason != season) {
+                return Reason;
+            }
+
+            return TvEpisodeIdentifiers
+                .Create(rules.TargetEpisodeTitle, rules.TargetAbsoluteEpisodeNumber)
+                .Matches(AcquisitionWorkTitles.EpisodeEvidence(release.Title, rules.TargetTitle, rules.TargetAlternativeTitles))
+                ? null
+                : Reason;
+        }
+
+        // Season pack sought: an episode-scoped release can never fulfil it.
+        if (declaredEpisodes is not null || TvAbsoluteEpisodeTokens.NamesSingleEpisode(
+                AcquisitionWorkTitles.EpisodeEvidence(release.Title, rules.TargetTitle, rules.TargetAlternativeTitles))) {
+            return Reason;
+        }
+
+        if (TvReleaseTokens.NamesCompleteSeries(release.Title)) {
+            return null;
+        }
+
+        var declaredSeason = TvReleaseTokens.ParseSeason(release.Title);
+        return declaredSeason is null || declaredSeason == season ? null : Reason;
+    }
+}
+
+/// <summary>
+/// Rejects a season or series candidate that explicitly advertises artwork instead of playable
+/// video. Broad "Other" indexer categories are intentionally searchable, so this gate keeps a
+/// strongly named poster archive from winning an otherwise valid TV-unit match. Episode searches
+/// remain exempt because a provider episode title may legitimately contain the word "poster".
+/// </summary>
+public sealed class TvNonVideoArtifactSpecification(EntityKind kind) : IReleaseSpecification {
+    private static readonly System.Text.RegularExpressions.Regex PosterTokenRegex = new(
+        @"(?:^|[^a-z0-9])posters?(?:$|[^a-z0-9])",
+        System.Text.RegularExpressions.RegexOptions.IgnoreCase
+        | System.Text.RegularExpressions.RegexOptions.CultureInvariant
+        | System.Text.RegularExpressions.RegexOptions.Compiled);
+
+    public ReleaseRejectionReason Reason => ReleaseRejectionReason.UnsupportedFormat;
+
+    public ReleaseRejectionReason? Evaluate(IndexerRelease release, BookAcquisitionRules rules) {
+        if (kind == EntityKind.VideoEpisode
+            || ReleaseTitleIdentity.ContainsMeaningfulRun(rules.TargetTitle ?? string.Empty, "poster")) {
+            return null;
+        }
+
+        return PosterTokenRegex.IsMatch(release.Title) ? Reason : null;
+    }
+}
+
+/// <summary>
+/// Rejects releases whose detected ladder quality falls outside the profile's allowed set. An empty
+/// allowed set accepts everything (including titles the detector can't place), mirroring the book
+/// format rule's permissive default.
+/// </summary>
+public sealed class MediaQualityAllowedSpecification(EntityKind kind) : IReleaseSpecification {
+    public ReleaseRejectionReason Reason => ReleaseRejectionReason.QualityNotAllowed;
+
+    public ReleaseRejectionReason? Evaluate(IndexerRelease release, BookAcquisitionRules rules) {
+        if (rules.AllowedQualities.Count == 0) {
+            return null;
+        }
+
+        var (code, _) = MediaQualityLadder.Detect(kind, release.Title);
+        return rules.AllowedQualities.Contains(code, StringComparer.Ordinal) ? null : Reason;
+    }
+}
+
+/// <summary>
+/// Upgrade-search gate for ladder kinds. A candidate is an upgrade when it sits strictly above the owned
+/// ladder position, OR — for video whose owned copy has no subtitles — at the same ladder position so the
+/// downloaded payload can be probed for a real subtitle gain, OR — at the same ladder position and same revision — its custom-format score is
+/// strictly higher than the owned copy's while the owned score is below the profile's
+/// <see cref="BookAcquisitionRules.CutoffFormatScore"/>, OR — only under
+/// <see cref="ProperDownloadPolicy.PreferAndUpgrade"/> — it sits at the same ladder position but carries a
+/// strictly higher revision than the owned copy (a proper/repack of the same quality). Under
+/// <see cref="ProperDownloadPolicy.DoNotUpgrade"/> / <see cref="ProperDownloadPolicy.DoNotPrefer"/> a
+/// same-quality higher revision is not an upgrade. Ladder position always dominates: a lower position is
+/// never rescued by subtitles, a revision, or a format-score gain. No-op on ordinary first-grab searches.
+/// </summary>
+public sealed class MediaUpgradeSpecification(EntityKind kind) : IReleaseSpecification {
+    public ReleaseRejectionReason Reason => ReleaseRejectionReason.NotAnUpgrade;
+
+    public ReleaseRejectionReason? Evaluate(IndexerRelease release, BookAcquisitionRules rules) {
+        if (rules.IsUpgradeSearch && MediaQualityLadder.IsVideoKind(kind) && rules.OwnedVideoSourceShared) return Reason;
+        if (!rules.IsUpgradeSearch || rules.OwnedMediaQuality is null) {
+            return null;
+        }
+
+        var owned = MediaQualityLadder.PositionOf(kind, rules.OwnedMediaQuality);
+        var (candidateCode, candidate) = MediaQualityLadder.Detect(kind, release.Title);
+        if (MediaQualityLadder.IsVideoKind(kind) && rules.OwnedVideoResolutionTier is > 0 and var measured) {
+            var candidateResolution = MediaQualityLadder.VideoResolutionTierOf(candidateCode);
+            if (candidateResolution is null || candidateResolution < measured) return Reason;
+            if (MediaQualityLadder.VideoResolutionTierOf(rules.OwnedMediaQuality) != measured) {
+                // An unknown or stale source label cannot justify a same-resolution source/revision gain.
+                // Subtitle-only exploration needs a concrete hint before spending a download on it.
+                return candidateResolution > measured
+                    || candidateResolution == measured && rules.OwnedHasSubtitles == false
+                        && ReleaseSubtitleDetection.HasSubtitleHint(release.Title)
+                    ? null : Reason;
+            }
+        }
+        if (candidate > owned) {
+            return null;
+        }
+
+        if (candidate == owned) {
+            // A title cannot prove that a payload contains usable subtitle streams. When the owned video has
+            // none, admit an equal-ladder candidate as a speculative download; the replace handler probes both
+            // files and rejects/removes/blocklists the candidate unless it really adds embedded or adjacent subtitles.
+            if (MediaQualityLadder.IsVideoKind(kind) && rules.OwnedHasSubtitles == false) {
+                return null;
+            }
+
+            // Same-quality format-score upgrade: a strictly-better-scoring release counts only while a
+            // cutoff format score is configured and the owned score is still below it. Independent of the
+            // proper policy (custom-format scoring is not the PROPER/REPACK axis).
+            if (rules.CutoffFormatScore is { } cutoff
+                && rules.OwnedFormatScore < cutoff
+                && CustomFormatEvaluation.Score(release.Title, rules, release.Language) > rules.OwnedFormatScore) {
+                return null;
+            }
+
+            // Same-quality revision upgrade: a strictly-better proper/repack counts only when propers are
+            // preferred-and-upgradeable.
+            if (rules.ProperPolicy == ProperDownloadPolicy.PreferAndUpgrade
+                && ReleaseRevisionDetection.Detect(release.Title) > rules.OwnedMediaRevision) {
+                return null;
+            }
+        }
+
+        return Reason;
+    }
+}
+
+/// <summary>
+/// Rejects releases whose total custom-format score is below the profile's minimum-format-score floor
+/// (Sonarr's minimum custom format score gate). Off unless the profile has custom formats configured, so a
+/// profile with no formats never rejects on this axis. A negative-scoring release (a format tuned as a soft
+/// ban) is rejected when the floor is 0 or above.
+/// </summary>
+public sealed class MinFormatScoreSpecification : IReleaseSpecification {
+    public ReleaseRejectionReason Reason => ReleaseRejectionReason.BelowMinFormatScore;
+
+    public ReleaseRejectionReason? Evaluate(IndexerRelease release, BookAcquisitionRules rules) {
+        if (rules.CustomFormats.Count == 0) {
+            return null;
+        }
+
+        return CustomFormatEvaluation.Score(release.Title, rules, release.Language) >= rules.MinFormatScore ? null : Reason;
+    }
+}
+
+/// <summary>
+/// TV decision engine: the generic acceptance gates plus the unit-match rule, ranked like movies
+/// (resolution, then source provenance) with a dominant unit-precision tier on top — a release that
+/// NAMES the sought season/episode outranks a complete-series pack, which outranks a marker-less
+/// title, regardless of their detected qualities. One engine class serves series, season packs, and
+/// single episodes, bound once per kind by the TV policy because the release vocabulary is shared.
+/// </summary>
+public sealed class TvReleaseDecisionEngine(EntityKind kind) : IAcquisitionDecisionEngine {
+    /// <summary>
+    /// Unit-precision score tiers. Sized to dominate every quality/revision/seeder difference (quality
+    /// tops out around 1.5M) while staying below deliberate heavy user weighted-terms (±10_000 weight →
+    /// ±100M), so unit precision decides auto-grabs unless the user explicitly tuned something stronger.
+    /// A marker-less title (no season/episode token at all) is the last resort, never the winner while a
+    /// unit-named or complete-series candidate exists — the fix for one marker-less DVD rip winning four
+    /// different season searches and being queued as the same torrent four times.
+    /// </summary>
+    private const double ExactUnitBoost = 10_000_000;
+    private const double CompleteSeriesBoost = 5_000_000;
+    private const double AbsoluteEpisodeBoost = 7_500_000;
+    private const double ProviderEpisodeTitleBoost = 5_000_000;
+
+    public EntityKind Kind => kind;
+
+    private readonly IReleaseSpecification[] _specifications = [
+        new DangerousContentSpecification(),
+        new TitleIdentitySpecification(),
+        new MediaYearSpecification(),
+        new ProtocolSpecification(),
+        new DownloadLinkSpecification(),
+        new MinSeedersSpecification(),
+        new SizeSpecification(),
+        new RequiredTermsSpecification(),
+        new IgnoredTermsSpecification(),
+        new LanguageSpecification(),
+        new TvNonVideoArtifactSpecification(kind),
+        new VideoPreviewSpecification(),
+        new TvUnitSpecification(),
+        new MediaQualityAllowedSpecification(kind),
+        new MinFormatScoreSpecification(),
+        new MediaUpgradeSpecification(kind)
+    ];
+
+    public IReadOnlyList<ScoredRelease> Evaluate(
+        IReadOnlyList<(IndexerRelease Release, Guid? IndexerConfigId, string IndexerName)> releases,
+        BookAcquisitionRules rules,
+        IReadOnlySet<string>? blocklistedIdentities = null) {
+        var catalog = rules.EpisodeNumber is not null && rules.TargetEpisodeCatalog.Count > 0
+            ? new TvCatalogEpisodeSpecification(rules.TargetEpisodeCatalog) : null;
+        var specifications = catalog is not null
+            ? _specifications.Select(specification => specification is TvUnitSpecification
+                ? new TvUnitSpecification(catalog) : specification).Append(catalog).ToArray()
+            : _specifications;
+        return MediaReleaseEvaluation.Evaluate(
+            releases, rules, blocklistedIdentities, specifications,
+            static (release, rules) => MediaReleaseEvaluation.VideoReleaseScore(release, rules) + UnitPrecisionBoost(release, rules));
+    }
+
+    /// <summary>The unit-precision tier of one candidate for the sought TV unit; 0 outside TV searches.</summary>
+    internal static double UnitPrecisionBoost(IndexerRelease release, BookAcquisitionRules rules) {
+        if (rules.SeasonNumber is not { } season) {
+            return 0;
+        }
+
+        if (rules.EpisodeNumber is { } episode) {
+            // Single episode sought: a release declaring the exact unit — alone or within a multi-episode
+            // span — wins first, followed by absolute numbering and then provider-title evidence.
+            if (TvReleaseTokens.ParseEpisodes(release.Title) is { } unit
+                && unit.Season == season && unit.Episodes.Contains(episode)) {
+                return ExactUnitBoost;
+            }
+
+            var identifiers = TvEpisodeIdentifiers.Create(
+                rules.TargetEpisodeTitle,
+                rules.TargetAbsoluteEpisodeNumber);
+            var episodeEvidence = AcquisitionWorkTitles.EpisodeEvidence(release.Title, rules.TargetTitle, rules.TargetAlternativeTitles);
+            if (identifiers.MatchesNumeric(episodeEvidence)) {
+                return AbsoluteEpisodeBoost;
+            }
+
+            return identifiers.MatchesProviderTitle(episodeEvidence)
+                ? ProviderEpisodeTitleBoost
+                : 0;
+        }
+
+        if (TvReleaseTokens.ParseSeason(release.Title) == season) {
+            return ExactUnitBoost;
+        }
+
+        return TvReleaseTokens.NamesCompleteSeries(release.Title) ? CompleteSeriesBoost : 0;
+    }
+}
+
+/// <summary>
+/// The shared evaluate loop for per-kind engines: run the acceptance specifications, apply the
+/// blocklist gate, score with the kind's ranking function, and order accepted-best-first — identical
+/// shape to the book engine so every kind's verdicts read the same in the release picker.
+/// </summary>
+internal static class MediaReleaseEvaluation {
+    public static IReadOnlyList<ScoredRelease> Evaluate(
+        IReadOnlyList<(IndexerRelease Release, Guid? IndexerConfigId, string IndexerName)> releases,
+        BookAcquisitionRules rules,
+        IReadOnlySet<string>? blocklistedIdentities,
+        IReadOnlyList<IReleaseSpecification> specifications,
+        Func<IndexerRelease, BookAcquisitionRules, double> score) {
+        var scored = new List<ScoredRelease>(releases.Count);
+        foreach (var (release, indexerConfigId, indexerName) in releases) {
+            var rejections = new List<ReleaseRejectionReason>();
+            foreach (var specification in specifications) {
+                if (specification.Evaluate(release, rules) is { } reason) {
+                    rejections.Add(reason);
+                }
+            }
+
+            if (ReleaseIdentity.IsListed(blocklistedIdentities, release.InfoHash, indexerName, release.Title)) {
+                rejections.Add(ReleaseRejectionReason.Blocklisted);
+            }
+
+            scored.Add(new ScoredRelease(
+                release, indexerConfigId, indexerName, rejections.Count == 0, ReleaseLanguageDetection.RankScore(release, rules, score(release, rules)), rejections));
+        }
+
+        return scored
+            .OrderByDescending(candidate => candidate.Accepted)
+            .ThenByDescending(candidate => candidate.Score)
+            .ToArray();
+    }
+
+    /// <summary>Case-insensitive whole-ish token match against a release title.</summary>
+    public static bool TitleHasAny(string title, params string[] tokens) =>
+        tokens.Any(token => ReleaseTitleText.ContainsTerm(title, token));
+
+    /// <summary>
+    /// The shared video release ranking (movies and TV alike): profile preference outranks everything,
+    /// then the position on the combined source × resolution quality ladder, then an explicit subtitle
+    /// hint, then the revision boost
+    /// (a proper/repack outranks a plain release at the same quality, unless propers are not preferred),
+    /// then seeders.
+    /// </summary>
+    public static double VideoReleaseScore(IndexerRelease release, BookAcquisitionRules rules) {
+        var quality = (int)VideoQualityDetection.Detect(release.Title);
+        return PreferenceScore(release, rules) * 10_000
+            + ReleaseTitleRelevance.Score(release, rules)
+            + quality * 100_000
+            + (ReleaseSubtitleDetection.HasSubtitleHint(release.Title) ? 50_000 : 0)
+            + RevisionBoost(release.Title, rules)
+            + Math.Min(release.Seeders ?? 0, 9_999);
+    }
+
+    /// <summary>
+    /// The revision component of a release's score, in raw score points. When the policy is not
+    /// <see cref="ProperDownloadPolicy.DoNotPrefer"/>, each revision step above a plain release is worth
+    /// 10_000 — below one ladder step (100_000, so it can never outrank a genuinely higher quality) and
+    /// above the seeders tie-break (max 9_999, so a proper always beats a plain release of the same
+    /// quality regardless of seed counts). Under <c>DoNotPrefer</c> revisions carry no weight at all.
+    /// </summary>
+    public static double RevisionBoost(string title, BookAcquisitionRules rules) {
+        if (rules.ProperPolicy == ProperDownloadPolicy.DoNotPrefer) {
+            return 0;
+        }
+
+        return (ReleaseRevisionDetection.Detect(title) - 1) * 10_000;
+    }
+
+    /// <summary>How many of the profile's preferred terms the title matches.</summary>
+    public static int PreferredTermMatches(string title, BookAcquisitionRules rules) =>
+        rules.PreferredTerms.Count(term => ReleaseTitleText.ContainsTerm(title, term));
+
+    /// <summary>
+    /// The profile-preference component of a release's score, in shared preference points: each preferred
+    /// term is worth 100, each matched custom weighted term contributes its own weight (so 100 equals one
+    /// preferred term, negatives push down), the release's language earns up to 50 per step of the ordered
+    /// preferred-language list (unspecified multi earns 25, unmarked earns none), and every
+    /// matching custom format adds its score directly (so 100 custom-format points equal one preferred term).
+    /// Every engine multiplies this by its own boost so preference always compares the same way across kinds.
+    /// </summary>
+    public static double PreferenceScore(IndexerRelease release, BookAcquisitionRules rules) {
+        var title = release.Title;
+        double score = PreferredTermMatches(title, rules) * 100;
+        foreach (var term in rules.WeightedTerms) {
+            if (ReleaseTitleText.ContainsTerm(title, term.Term)) {
+                score += term.Weight;
+            }
+        }
+
+        return score
+            + LanguagePreferenceBonus(release, rules)
+            + CustomFormatEvaluation.Score(title, rules, release.Language);
+    }
+
+    /// <summary>Explicit preferred audio earns 50 points per preference step; uncertain multi earns 25.</summary>
+    private static double LanguagePreferenceBonus(IndexerRelease release, BookAcquisitionRules rules) {
+        var rank = ReleaseLanguageDetection.PreferenceRank(release, rules);
+        return rank > 1 ? (rank - 1) * 50 : rank * 25;
+    }
+}

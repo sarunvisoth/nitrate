@@ -1,0 +1,392 @@
+using Microsoft.Extensions.Logging;
+using Prismedia.Application.Acquisition;
+using Prismedia.Application.Files;
+using Prismedia.Application.Jobs.Ports;
+using Prismedia.Domain.Entities;
+
+namespace Prismedia.Infrastructure.Acquisition;
+
+/// <summary>
+/// Default <see cref="IOwnedFileReplacer"/>: an in-place, same-path swap of an owned single-file payload for
+/// a strictly-better one. Safe adjacent video subtitle sidecars are staged and renamed onto the owned video
+/// basename as part of the same replacement. The owned file is renamed aside to a <c>.prismedia-bak</c> (same directory → an
+/// atomic rename, and the previous file is kept so it is always recoverable; the scanner ignores it because
+/// the extension is not importable), then the new file is moved into the owned file's exact path.
+/// <para>
+/// Same-extension swaps keep the exact path. Approved container changes keep the owned basename and
+/// install at the incoming extension; the caller must rebind the existing Source in its lifecycle
+/// transaction. A competing destination is never overwritten. The kind selects the importable files
+/// and whether the book format-tier floor applies. Originals remain recoverable on failure.
+/// </para>
+/// </summary>
+public sealed class OwnedFileReplacer(
+    IRecycleBin recycleBin,
+    ILogger<OwnedFileReplacer> logger,
+    IVideoPayloadVerifier videoVerifier,
+    ISubtitleSidecarDiscovery? subtitleSidecars = null) : IOwnedFileReplacer {
+    public Task<OwnedFileReplaceResult> ReplaceAsync(
+        string ownedFolder,
+        string newContentPath,
+        BookFormatTier ownedFormatTier,
+        CancellationToken cancellationToken,
+        EntityKind kind,
+        bool allowFormatChange = false) =>
+        ReplaceCoreAsync(
+            ownedFolder,
+            newContentPath,
+            ownedFormatTier,
+            cancellationToken,
+            kind,
+            allowFormatChange,
+            retainBackup: false);
+
+    public Task<OwnedFileReplaceResult> ReplaceRetainingBackupAsync(
+        string ownedFolder,
+        string newContentPath,
+        BookFormatTier ownedFormatTier,
+        CancellationToken cancellationToken,
+        EntityKind kind,
+        bool allowFormatChange = false,
+        string? recoveryBackupPath = null,
+        string? incomingEvidencePath = null,
+        VerifiedVideoPayload? verifiedVideo = null) =>
+        ReplaceCoreAsync(
+            ownedFolder,
+            newContentPath,
+            ownedFormatTier,
+            cancellationToken,
+            kind,
+            allowFormatChange,
+            retainBackup: true,
+            recoveryBackupPath,
+            incomingEvidencePath,
+            verifiedVideo);
+
+    private async Task<OwnedFileReplaceResult> ReplaceCoreAsync(
+        string ownedFolder,
+        string newContentPath,
+        BookFormatTier ownedFormatTier,
+        CancellationToken cancellationToken,
+        EntityKind kind,
+        bool allowFormatChange,
+        bool retainBackup,
+        string? recoveryBackupPath = null,
+        string? incomingEvidencePath = null,
+        VerifiedVideoPayload? verifiedVideo = null) {
+        cancellationToken.ThrowIfCancellationRequested();
+        var isVideo = MediaQualityLadder.IsUpgradeCapableKind(kind);
+        var extensions = isVideo ? MovieImportPlanBuilder.VideoExtensions : ImportPlanBuilder.SupportedExtensions;
+        var fileNoun = isVideo ? "video" : "book";
+
+        var owned = isVideo ? VideoUpgradeFileSelection.Find(ownedFolder) : FindSingleFile(ownedFolder, extensions);
+        if (owned is null) {
+            return (OwnedFileReplaceResult.Failed($"Could not find a single owned {fileNoun} file to replace."));
+        }
+
+        var incoming = isVideo ? VideoUpgradeFileSelection.Find(newContentPath) : FindSingleFile(newContentPath, extensions);
+        if (incoming is null) {
+            return (OwnedFileReplaceResult.Failed($"The upgrade download has no single importable {fileNoun} file."));
+        }
+
+        var incomingInfo = new FileInfo(incoming);
+        if (!incomingInfo.Exists || incomingInfo.Length == 0) {
+            return (OwnedFileReplaceResult.Failed("The upgrade file is missing or empty."));
+        }
+
+        var ownedExtension = Path.GetExtension(owned);
+        var incomingExtension = Path.GetExtension(incoming);
+        if (!string.Equals(ownedExtension, incomingExtension, StringComparison.OrdinalIgnoreCase) && !allowFormatChange) {
+            // Permission comes from the profile or an explicit reviewed retry. The caller owns
+            // rebinding and durable recovery when this changes the Source path.
+            return (OwnedFileReplaceResult.Failed($"Upgrading the format ({ownedExtension} → {incomingExtension}) needs a manual replacement."));
+        }
+
+        // The installed path: same basename as the owned file, with the incoming file's extension. For a
+        // same-extension swap this IS the owned path (the never-momentarily-empty atomic replace); for a
+        // consented format change it is a sibling path, and the old file is retired after the install.
+        var installPath = string.Equals(ownedExtension, incomingExtension, StringComparison.OrdinalIgnoreCase)
+            ? owned : Path.ChangeExtension(owned, incomingExtension);
+        var changesPath = !FileSystemPathComparison.Equals(owned, installPath);
+        if (changesPath && (File.Exists(installPath) || Directory.Exists(installPath)))
+            return OwnedFileReplaceResult.Failed("The replacement destination already exists. Both copies were retained for review.");
+
+        // Books enforce a format-tier floor from the actual extension (a folder named "(epub)" must not make a
+        // PDF look reflowable). Video has no extension-derived format tier — the caller judges the video quality upgrade — so it is a
+        // pass-through here (NewFormat stays Unknown; the caller records the media-quality code).
+        var newFormat = isVideo ? BookFormatTier.Unknown : BookFormatDetection.FormatTierFromExtension(incoming);
+        if (!isVideo && newFormat < ownedFormatTier) {
+            return (OwnedFileReplaceResult.Failed("The upgrade file's format is lower than the owned file's."));
+        }
+
+        var backup = !string.IsNullOrWhiteSpace(recoveryBackupPath)
+            ? Path.GetFullPath(recoveryBackupPath)
+            : OwnedFileReplacementArtifacts.BackupPath(owned);
+        var staged = OwnedFileReplacementArtifacts.StagedPath(owned);
+        var evidence = !string.IsNullOrWhiteSpace(incomingEvidencePath)
+            ? Path.GetFullPath(incomingEvidencePath)
+            : null;
+        if (File.Exists(staged) || Directory.Exists(staged)) {
+            return OwnedFileReplaceResult.Failed("A previous replacement candidate is still staged beside the owned file. Resume or review that attempt before replacing it.");
+        }
+        var stagedIncoming = false;
+        // Full decoding can wait minutes for CPU admission and execution. Re-check all paths that the
+        // swap can consume or overwrite so an independently repaired copy or recovery artifact survives.
+        var beforeVerification = ReplacementFileSnapshot.Capture(owned, incoming, installPath, backup, staged, evidence);
+        if (beforeVerification is null) {
+            return OwnedFileReplaceResult.Failed("The replacement files could not be inspected. Both copies were retained for review.");
+        }
+        if (isVideo) {
+            if (verifiedVideo is not null) {
+                if (!verifiedVideo.Matches(incoming))
+                    return OwnedFileReplaceResult.Failed("The verified video changed before replacement. Both copies were retained for review.");
+            } else if (await videoVerifier.FindFailureAsync(incoming, cancellationToken) is { } verificationFailure) {
+                return OwnedFileReplaceResult.Failed(verificationFailure);
+            }
+        }
+        if (!beforeVerification.IsCurrent()) {
+            return OwnedFileReplaceResult.Failed("The replacement files changed during verification. Both copies and recovery files were retained for review.");
+        }
+        IReadOnlyList<StagedSubtitleSidecar> stagedSubtitleSidecars;
+        try {
+            stagedSubtitleSidecars = await StageSubtitleSidecarsAsync(
+                isVideo,
+                incoming,
+                installPath,
+                cancellationToken);
+        } catch (Exception ex) when (ex is not OperationCanceledException) {
+            logger.LogWarning(ex, "OwnedFileReplacer: could not stage subtitle sidecars for {Path}.", owned);
+            return OwnedFileReplaceResult.Failed($"Could not stage the upgrade's subtitle sidecars: {ex.Message}");
+        }
+
+        try {
+            // Stage the new file beside the owned file FIRST (this is the only possibly-cross-device move, and
+            // it never touches the owned file), then preserve the original as a backup COPY, then atomically
+            // replace the owned file in a single rename. Ordering it this way means the owned path is never
+            // momentarily empty — a concurrent scan always sees either the old or the new file, never neither.
+            cancellationToken.ThrowIfCancellationRequested();
+            if (retainBackup && evidence is not null) {
+                // Publish incoming evidence before consuming the transfer file. Linking the evidence
+                // into staging also avoids a second cross-device copy when download/library differ.
+                // A crash during handoff leaves either the original input or a provable staged copy.
+                TryDelete(evidence);
+                if (!HardLink.TryCreate(incoming, evidence)) {
+                    File.Copy(incoming, evidence, overwrite: false);
+                }
+                if (!HardLink.TryCreate(evidence, staged)) {
+                    File.Copy(evidence, staged, overwrite: false);
+                }
+                stagedIncoming = true;
+                File.Delete(incoming);
+            } else {
+                File.Move(incoming, staged);
+                stagedIncoming = true;
+            }
+            File.Copy(owned, backup, overwrite: true); // keep the previous file as a recoverable backup
+        } catch (Exception ex) {
+            logger.LogWarning(ex, "OwnedFileReplacer: could not stage the upgrade for {Path}.", owned);
+            RollBackSubtitleSidecars(stagedSubtitleSidecars);
+            if (!retainBackup && stagedIncoming) {
+                ReturnStagedCandidate(staged, incoming);
+            }
+            if (ex is OperationCanceledException) throw;
+            return (OwnedFileReplaceResult.Failed($"Could not stage the upgrade: {ex.Message}"));
+        }
+
+        var installedNewFile = false;
+        try {
+            cancellationToken.ThrowIfCancellationRequested();
+            CommitSubtitleSidecars(stagedSubtitleSidecars);
+            File.Move(staged, installPath, overwrite: !changesPath); // never overwrite a competing sibling
+            installedNewFile = true;
+            var installed = new FileInfo(installPath);
+            if (!installed.Exists || installed.Length == 0) {
+                throw new IOException("The installed file is missing or empty after the move.");
+            }
+
+            // A consented format change installs beside the old file (different extension) — retire the
+            // old file so the library never carries both. The backup copy already preserves it, so a
+            // failed delete rolls the attempt back instead of publishing two competing Sources.
+            if (changesPath) {
+                File.Delete(owned);
+            }
+        } catch (Exception ex) {
+            logger.LogWarning(ex, "OwnedFileReplacer: swap failed for {Path}; the original is intact (or restorable from backup).", owned);
+            // The atomic replace either fully succeeded or left the owned file as it was; if it somehow left the
+            // owned file missing, restore it from the backup copy. Preserve the candidate for a retry.
+            try {
+                if (File.Exists(backup) && (installedNewFile || !File.Exists(owned))) {
+                    if (installedNewFile && File.Exists(installPath)) {
+                        File.Move(installPath, staged, overwrite: false);
+                    }
+                    File.Copy(backup, owned, overwrite: true);
+                    if (!FileSystemPathComparison.Equals(installPath, owned)) {
+                        TryDelete(installPath);
+                    }
+                }
+            } catch (Exception restoreEx) when (restoreEx is not OperationCanceledException) {
+                logger.LogError(restoreEx, "OwnedFileReplacer: failed to restore the backup at {Backup}; it remains on disk.", backup);
+            }
+
+            RollBackSubtitleSidecars(stagedSubtitleSidecars);
+            if (!retainBackup && stagedIncoming) {
+                ReturnStagedCandidate(staged, incoming);
+            }
+            if (ex is OperationCanceledException) throw;
+            return (OwnedFileReplaceResult.Failed($"The swap could not be completed; recovery files were retained: {ex.Message}"));
+        }
+
+        // The install is committed. Optional backup housekeeping cannot undo it or discard its bytes.
+        try {
+            if (!retainBackup && await recycleBin.TryMoveToBinAsync(backup, CancellationToken.None) is { } binned) {
+                logger.LogDebug("OwnedFileReplacer: previous file recycled to {Binned}.", binned);
+            }
+        } catch (Exception ex) {
+            logger.LogWarning(ex, "OwnedFileReplacer: installed upgrade retained; backup cleanup failed at {Backup}.", backup);
+        }
+        try {
+            await FinalizeSubtitleSidecarsAsync(stagedSubtitleSidecars, CancellationToken.None);
+        } catch (Exception ex) {
+            logger.LogWarning(ex, "OwnedFileReplacer: installed upgrade retained; subtitle backup cleanup failed for {Path}.", owned);
+        }
+        return OwnedFileReplaceResult.Ok(installPath, newFormat);
+    }
+
+    private void ReturnStagedCandidate(string staged, string incoming) {
+        try {
+            if (File.Exists(staged)) File.Move(staged, incoming, overwrite: false);
+        } catch (Exception ex) when (ex is IOException or UnauthorizedAccessException) {
+            // A newly occupied/unavailable download path must not cause either candidate to be deleted.
+            logger.LogWarning(ex, "OwnedFileReplacer: downloaded candidate remains recoverable at {Staged}.", staged);
+        }
+    }
+
+    private async Task<IReadOnlyList<StagedSubtitleSidecar>> StageSubtitleSidecarsAsync(
+        bool isVideo,
+        string incomingVideo,
+        string installVideo,
+        CancellationToken cancellationToken) {
+        if (!isVideo || subtitleSidecars is null) {
+            return [];
+        }
+
+        var discovery = (await subtitleSidecars.DiscoverAsync([incomingVideo], cancellationToken)).SingleOrDefault();
+        if (discovery is null || !discovery.IsComplete) {
+            throw new IOException("Adjacent subtitle discovery could not read the downloaded video's directory reliably.");
+        }
+
+        var incomingStem = Path.GetFileNameWithoutExtension(incomingVideo);
+        var installStem = Path.GetFileNameWithoutExtension(installVideo);
+        var installDirectory = Path.GetDirectoryName(installVideo)
+            ?? throw new IOException("The owned video's directory is unavailable.");
+        var stages = new List<StagedSubtitleSidecar>(discovery.Candidates.Count);
+        var targets = new HashSet<string>(FileSystemPathComparison.Comparer);
+        try {
+            foreach (var candidate in discovery.Candidates) {
+                cancellationToken.ThrowIfCancellationRequested();
+                var candidateName = Path.GetFileName(candidate.Path);
+                if (!candidateName.StartsWith(incomingStem, StringComparison.OrdinalIgnoreCase)) {
+                    throw new IOException("A discovered subtitle sidecar does not belong to the downloaded video filename.");
+                }
+
+                var suffix = candidateName[incomingStem.Length..];
+                var finalPath = Path.Combine(installDirectory, installStem + suffix);
+                if (!targets.Add(finalPath)) {
+                    throw new IOException("Multiple downloaded subtitle sidecars map to the same owned filename.");
+                }
+
+                var stagedPath = finalPath + ".prismedia-staged";
+                var rollbackPath = finalPath + ".prismedia-rollback";
+                TryDelete(stagedPath);
+                TryDelete(rollbackPath);
+                var hadExisting = File.Exists(finalPath);
+                stages.Add(new StagedSubtitleSidecar(stagedPath, finalPath, rollbackPath, hadExisting));
+                File.Copy(candidate.Path, stagedPath, overwrite: false);
+                if (hadExisting) {
+                    File.Copy(finalPath, rollbackPath, overwrite: false);
+                }
+            }
+
+            return stages;
+        } catch {
+            RollBackSubtitleSidecars(stages);
+            throw;
+        }
+    }
+
+    private static void CommitSubtitleSidecars(IReadOnlyList<StagedSubtitleSidecar> stages) {
+        foreach (var stage in stages) {
+            File.Move(stage.StagedPath, stage.FinalPath, overwrite: true);
+        }
+    }
+
+    private static void RollBackSubtitleSidecars(IReadOnlyList<StagedSubtitleSidecar> stages) {
+        foreach (var stage in stages) {
+            try {
+                if (stage.HadExisting && File.Exists(stage.RollbackPath)) {
+                    File.Move(stage.RollbackPath, stage.FinalPath, overwrite: true);
+                } else if (!stage.HadExisting) {
+                    TryDelete(stage.FinalPath);
+                }
+            } catch {
+                // Best-effort restoration mirrors the video rollback; the rollback file remains recoverable.
+            }
+            TryDelete(stage.StagedPath);
+            if (!stage.HadExisting) {
+                TryDelete(stage.RollbackPath);
+            }
+        }
+    }
+
+    private async Task FinalizeSubtitleSidecarsAsync(
+        IReadOnlyList<StagedSubtitleSidecar> stages,
+        CancellationToken cancellationToken) {
+        foreach (var stage in stages.Where(stage => stage.HadExisting && File.Exists(stage.RollbackPath))) {
+            var backupPath = stage.FinalPath + ".prismedia-bak";
+            try {
+                File.Move(stage.RollbackPath, backupPath, overwrite: true);
+                if (await recycleBin.TryMoveToBinAsync(backupPath, cancellationToken) is { } binned) {
+                    logger.LogDebug("OwnedFileReplacer: previous subtitle sidecar recycled to {Binned}.", binned);
+                }
+            } catch (Exception ex) when (ex is not OperationCanceledException) {
+                logger.LogWarning(ex, "OwnedFileReplacer: could not finalize the previous subtitle sidecar backup at {Path}.", stage.RollbackPath);
+            }
+        }
+    }
+
+    private sealed record StagedSubtitleSidecar(
+        string StagedPath,
+        string FinalPath,
+        string RollbackPath,
+        bool HadExisting);
+
+    private static void TryDelete(string path) {
+        try {
+            if (File.Exists(path)) {
+                File.Delete(path);
+            }
+        } catch {
+            // best-effort cleanup of a staged temp file
+        }
+    }
+
+    /// <summary>
+    /// Returns the single file at or under a path whose extension is in <paramref name="extensions"/>, or
+    /// null when there is none or more than one (ambiguous). Shared by the book and video replace paths;
+    /// only the extension set differs between kinds.
+    /// </summary>
+    private static string? FindSingleFile(string path, IReadOnlySet<string> extensions) {
+        if (File.Exists(path)) {
+            return extensions.Contains(Path.GetExtension(path)) ? path : null;
+        }
+
+        if (!Directory.Exists(path)) {
+            return null;
+        }
+
+        var files = Directory.EnumerateFiles(path, "*", SearchOption.AllDirectories)
+            .Where(file => extensions.Contains(Path.GetExtension(file)))
+            .Take(2)
+            .ToArray();
+        return files.Length == 1 ? files[0] : null;
+    }
+}

@@ -1,0 +1,893 @@
+using Prismedia.Application.Acquisition;
+using Prismedia.Contracts.Acquisition;
+using Prismedia.Contracts.System;
+using Prismedia.Domain.Entities;
+
+using Prismedia.Api.Security;
+using Microsoft.AspNetCore.Mvc;
+
+namespace Prismedia.Api.Endpoints;
+
+public static class AcquisitionEndpoints {
+    private const long AcquisitionUploadLimitBytes = 250L * 1024 * 1024 * 1024;
+    public static RouteGroupBuilder MapAcquisitionEndpoints(this IEndpointRouteBuilder routes) {
+        routes.MapGet("/api/acquisitions/profiles", (
+            HttpContext httpContext,
+            BookAcquisitionProfileCommandService profiles,
+            CancellationToken cancellationToken) =>
+            profiles.ListAsync(NsfwVisibility.ShouldHide(null, httpContext), cancellationToken))
+            .WithTags("Acquisitions")
+            .WithName("ListAcquisitionProfiles")
+            .WithSummary("Lists acquisition profiles whose import targets are visible to the current viewer.")
+            .Produces<IReadOnlyList<BookAcquisitionProfileView>>();
+
+        var group = routes.MapGroup("/api/acquisitions")
+            .RequireAdmin()
+            .WithTags("Acquisitions");
+
+        group.MapGet("/indexers", (
+            IndexerConfigCommandService indexers,
+            CancellationToken cancellationToken) =>
+            indexers.ListAsync(cancellationToken))
+            .WithName("ListIndexers")
+            .WithSummary("Lists configured indexers with API keys redacted.")
+            .Produces<IReadOnlyList<IndexerConfigSummary>>();
+
+        group.MapPost("/indexers", async (
+            IndexerConfigSaveRequest request,
+            IndexerConfigCommandService indexers,
+            CancellationToken cancellationToken) =>
+            await SaveIndexerAsync(request, indexers, cancellationToken))
+            .WithName("SaveIndexer")
+            .WithSummary("Creates or updates an indexer configuration.")
+            .Produces<IndexerConfigSummary>()
+            .Produces<ApiProblem>(StatusCodes.Status400BadRequest);
+
+        group.MapPut("/indexers/{id:guid}", async (
+            Guid id,
+            IndexerConfigSaveRequest request,
+            IndexerConfigCommandService indexers,
+            CancellationToken cancellationToken) =>
+            await SaveIndexerAsync(request with { Id = id }, indexers, cancellationToken))
+            .WithName("UpdateIndexer")
+            .WithSummary("Updates an existing indexer configuration.")
+            .Produces<IndexerConfigSummary>()
+            .Produces<ApiProblem>(StatusCodes.Status400BadRequest);
+
+        group.MapDelete("/indexers/{id:guid}", async (
+            Guid id,
+            IndexerConfigCommandService indexers,
+            CancellationToken cancellationToken) =>
+            await indexers.DeleteAsync(id, cancellationToken)
+                ? Results.NoContent()
+                : Results.NotFound(new ApiProblem(ApiProblemCodes.NotFound, "Indexer was not found.")))
+            .WithName("DeleteIndexer")
+            .WithSummary("Deletes a configured indexer.")
+            .Produces(StatusCodes.Status204NoContent)
+            .Produces<ApiProblem>(StatusCodes.Status404NotFound);
+
+        group.MapPost("/indexers/test", async (
+            IndexerTestRequest request,
+            IndexerConfigCommandService indexers,
+            CancellationToken cancellationToken) => {
+                try {
+                    return Results.Ok(await indexers.TestAsync(request, cancellationToken));
+                } catch (AcquisitionConfigurationException ex) {
+                    return Results.BadRequest(new ApiProblem(ex.Code, ex.Message));
+                }
+            })
+            .WithName("TestIndexer")
+            .WithSummary("Tests connectivity for an indexer configuration.")
+            .Produces<IndexerTestResponse>()
+            .Produces<ApiProblem>(StatusCodes.Status400BadRequest);
+
+        group.MapPost("/indexers/{id:guid}/retry", async (
+            Guid id,
+            IndexerConfigCommandService indexers,
+            CancellationToken cancellationToken) =>
+            await indexers.RetryNowAsync(id, cancellationToken)
+                ? Results.NoContent()
+                : Results.NotFound(new ApiProblem(ApiProblemCodes.NotFound, "Indexer was not found.")))
+            .WithName("RetryIndexerNow")
+            .WithSummary("Clears an indexer's failure backoff so it can be used immediately.")
+            .Produces(StatusCodes.Status204NoContent)
+            .Produces<ApiProblem>(StatusCodes.Status404NotFound);
+
+        group.MapPost("/search", async (
+            AcquisitionCreateRequest request,
+            AcquisitionService acquisitions,
+            CancellationToken cancellationToken) => {
+                try {
+                    return Results.Ok(await acquisitions.CreateAndSearchAsync(request, cancellationToken));
+                } catch (AcquisitionConfigurationException ex) {
+                    return Results.BadRequest(new ApiProblem(ex.Code, ex.Message));
+                }
+            })
+            .WithName("CreateAcquisition")
+            .WithSummary("Creates an acquisition and starts a background indexer search; poll the acquisition for scored candidates.")
+            .Produces<AcquisitionSummary>()
+            .Produces<ApiProblem>(StatusCodes.Status400BadRequest);
+
+        group.MapGet("/", (
+            AcquisitionService acquisitions,
+            CancellationToken cancellationToken) =>
+            acquisitions.ListAsync(cancellationToken))
+            .WithName("ListAcquisitions")
+            .WithSummary("Lists acquisitions with their current status.")
+            .Produces<IReadOnlyList<AcquisitionSummary>>();
+
+        group.MapGet("/downloads", (
+            AcquisitionService acquisitions,
+            CancellationToken cancellationToken) =>
+            acquisitions.ListDownloadsAsync(cancellationToken))
+            .WithName("ListDownloadQueue")
+            .WithSummary("The global Downloads view: every active acquisition across all kinds with live download-client telemetry (progress, speed, ETA, peers) where a transfer is in flight.")
+            .Produces<IReadOnlyList<DownloadQueueItemView>>();
+
+        group.MapGet("/{id:guid}", async (
+            Guid id,
+            AcquisitionService acquisitions,
+            CancellationToken cancellationToken) => {
+                var detail = await acquisitions.GetAsync(id, cancellationToken);
+                return detail is null
+                    ? Results.NotFound(new ApiProblem(ApiProblemCodes.AcquisitionNotFound, "Acquisition was not found."))
+                    : Results.Ok(detail);
+            })
+            .WithName("GetAcquisition")
+            .WithSummary("Gets an acquisition with its scored release candidates for review.")
+            .Produces<AcquisitionDetail>()
+            .Produces<ApiProblem>(StatusCodes.Status404NotFound);
+
+        group.MapGet("/for-entity/{entityId:guid}", async (
+            Guid entityId,
+            AcquisitionService acquisitions,
+            CancellationToken cancellationToken) => {
+                var detail = await acquisitions.GetForEntityAsync(entityId, cancellationToken);
+                return detail is null
+                    ? Results.NoContent()
+                    : Results.Ok(detail);
+            })
+            .WithName("GetAcquisitionForEntity")
+            .WithSummary("Gets the latest acquisition backing a library entity, so entity detail pages can surface its wanted/tracking state inline.")
+            .Produces<AcquisitionDetail>()
+            .Produces(StatusCodes.Status204NoContent);
+
+        group.MapGet("/for-entity/{entityId:guid}/all", (
+            Guid entityId,
+            AcquisitionService acquisitions,
+            CancellationToken cancellationToken) =>
+            acquisitions.ListForEntityAsync(entityId, cancellationToken))
+            .WithName("ListAcquisitionsForEntity")
+            .WithSummary("Lists every direct acquisition backing a library Entity, including independent ebook and audiobook rows.")
+            .Produces<IReadOnlyList<AcquisitionDetail>>();
+
+        group.MapGet("/for-entity/{entityId:guid}/summaries", (
+            Guid entityId,
+            AcquisitionService acquisitions,
+            CancellationToken cancellationToken) =>
+            acquisitions.ListSummariesForEntityAsync(entityId, cancellationToken))
+            .WithName("ListAcquisitionSummariesForEntity")
+            .WithSummary("Lists compact acquisition lifecycle summaries for polling an Entity without re-sending release candidates.")
+            .Produces<IReadOnlyList<AcquisitionSummary>>();
+
+        group.MapPost("/for-entity/{entityId:guid}/replacement-search", async (
+            Guid entityId,
+            ManualReplacementSearchRequest request,
+            ManualReplacementService replacements,
+            CancellationToken cancellationToken) => {
+                try {
+                    return Results.Ok(await replacements.SearchAsync(entityId, request.Query, cancellationToken));
+                } catch (AcquisitionConfigurationException ex) {
+                    return Results.BadRequest(new ApiProblem(ex.Code, ex.Message));
+                }
+            })
+            .WithName("SearchManualReplacement")
+            .WithSummary("Searches for replacement releases without changing durable acquisition state or auto-selecting a result.")
+            .Produces<ManualReplacementSearchResult>()
+            .Produces<ApiProblem>(StatusCodes.Status400BadRequest);
+
+        group.MapPost("/for-entity/{entityId:guid}/replacement-queue", async (
+            Guid entityId,
+            ManualReplacementQueueRequest request,
+            ManualReplacementService replacements,
+            CancellationToken cancellationToken) => {
+                try {
+                    return Results.Ok(await replacements.QueueAsync(
+                        entityId,
+                        request.SearchId,
+                        request.CandidateId,
+                        cancellationToken));
+                } catch (AcquisitionConfigurationException ex) {
+                    return Results.BadRequest(new ApiProblem(ex.Code, ex.Message));
+                }
+            })
+            .WithName("QueueManualReplacement")
+            .WithSummary("Queues one explicitly reviewed replacement through the existing upgrade-child workflow.")
+            .Produces<AcquisitionDetail>()
+            .Produces<ApiProblem>(StatusCodes.Status400BadRequest);
+
+        group.MapPost("/for-entity/{entityId:guid}/upload", async (
+            Guid entityId,
+            HttpRequest request,
+            AcquisitionUploadService uploads,
+            CancellationToken cancellationToken) => {
+                if (!request.HasFormContentType) {
+                    return Results.BadRequest(new ApiProblem(
+                        ApiProblemCodes.InvalidUpload,
+                        "Acquisition upload expects multipart form data."));
+                }
+
+                var form = await request.ReadFormAsync(cancellationToken);
+                if (form.Files.Count == 0) {
+                    return Results.BadRequest(new ApiProblem(
+                        ApiProblemCodes.InvalidUpload,
+                        "Choose at least one file to upload."));
+                }
+                var relativePaths = form["relativePaths"].ToArray();
+                var items = form.Files.Select((file, index) => new AcquisitionUploadItem(
+                    index < relativePaths.Length && !string.IsNullOrWhiteSpace(relativePaths[index])
+                        ? relativePaths[index]!
+                        : file.FileName,
+                    file.OpenReadStream())).ToArray();
+                try {
+                    return Results.Ok(await uploads.UploadAsync(entityId, items, cancellationToken));
+                } catch (AcquisitionConfigurationException ex) {
+                    return Results.BadRequest(new ApiProblem(ex.Code, ex.Message));
+                } catch (InvalidDataException ex) {
+                    return Results.BadRequest(new ApiProblem(ApiProblemCodes.InvalidUpload, ex.Message));
+                } finally {
+                    foreach (var item in items) {
+                        await item.Content.DisposeAsync();
+                    }
+                }
+            })
+            .WithName("UploadAcquisitionContent")
+            .WithSummary("Uploads local content through the completed-acquisition import or replacement workflow; wrapped ZIP payloads are inspected and safely expanded.")
+            .WithMetadata(new RequestFormLimitsAttribute { MultipartBodyLengthLimit = AcquisitionUploadLimitBytes })
+            .WithMetadata(new RequestSizeLimitAttribute(AcquisitionUploadLimitBytes))
+            .DisableAntiforgery()
+            .Produces<AcquisitionDetail>()
+            .Produces<ApiProblem>(StatusCodes.Status400BadRequest);
+
+        group.MapPost("/{id:guid}/queue", async (
+            Guid id,
+            AcquisitionQueueRequest request,
+            AcquisitionQueueService queue,
+            CancellationToken cancellationToken) => {
+                try {
+                    // A release queued through this endpoint is the user's explicit choice, which exempts
+                    // it from automatic payload validation (manual picks are the user's authority).
+                    var detail = await queue.QueueAsync(id, request.CandidateId, cancellationToken, manualPick: true);
+                    return detail is null
+                        ? Results.NotFound(new ApiProblem(ApiProblemCodes.AcquisitionNotFound, "Acquisition was not found."))
+                        : Results.Ok(detail);
+                } catch (AcquisitionConfigurationException ex) {
+                    return Results.BadRequest(new ApiProblem(ex.Code, ex.Message));
+                }
+            })
+            .WithName("QueueAcquisition")
+            .WithSummary("Sends a chosen release to the download client and begins tracking the transfer.")
+            .Produces<AcquisitionDetail>()
+            .Produces<ApiProblem>(StatusCodes.Status400BadRequest)
+            .Produces<ApiProblem>(StatusCodes.Status404NotFound);
+
+        group.MapPost("/{id:guid}/candidates/{candidateId:guid}/blocklist", async (
+            Guid id,
+            Guid candidateId,
+            AcquisitionService acquisitions,
+            CancellationToken cancellationToken) => {
+                var detail = await acquisitions.BlocklistCandidateAsync(id, candidateId, cancellationToken);
+                return detail is null
+                    ? Results.NotFound(new ApiProblem(ApiProblemCodes.AcquisitionReleaseNotFound, "The release was not found for this acquisition."))
+                    : Results.Ok(detail);
+            })
+            .WithName("BlocklistAcquisitionCandidate")
+            .WithSummary("Blocklists a release from an acquisition's candidates so it is never grabbed again.")
+            .Produces<AcquisitionDetail>()
+            .Produces<ApiProblem>(StatusCodes.Status404NotFound);
+
+        group.MapPost("/{id:guid}/search", async (
+            Guid id,
+            AcquisitionSearchRequest request,
+            AcquisitionService acquisitions,
+            CancellationToken cancellationToken) => {
+                var detail = await acquisitions.ReSearchAsync(id, cancellationToken, request.Query);
+                return detail is null
+                    ? Results.NotFound(new ApiProblem(ApiProblemCodes.AcquisitionNotFound, "Acquisition was not found."))
+                    : Results.Ok(detail);
+            })
+            .WithName("ReSearchAcquisition")
+            .WithSummary("Re-runs the release search for review, optionally using an exact custom query; never auto-selects a result.")
+            .Produces<AcquisitionDetail>()
+            .Produces<ApiProblem>(StatusCodes.Status404NotFound);
+
+        group.MapPost("/{id:guid}/import", async (
+            Guid id,
+            AcquisitionImportRetryRequest request,
+            AcquisitionService acquisitions,
+            CancellationToken cancellationToken) => {
+                var detail = await acquisitions.RetryImportAsync(id, request.AllowFormatChange, cancellationToken);
+                return detail is null
+                    ? Results.NotFound(new ApiProblem(ApiProblemCodes.AcquisitionNotFound, "Acquisition was not found."))
+                    : Results.Ok(detail);
+            })
+            .WithName("RetryAcquisitionImport")
+            .WithSummary("Re-runs the import for a downloaded or manual-import-held acquisition; allowFormatChange consents to replacing the owned file across formats.")
+            .Produces<AcquisitionDetail>()
+            .Produces<ApiProblem>(StatusCodes.Status404NotFound);
+
+        group.MapGet("/{id:guid}/manual-import", async (
+            Guid id,
+            AcquisitionService acquisitions,
+            CancellationToken cancellationToken) =>
+            Results.Ok(await acquisitions.GetManualImportReviewAsync(id, cancellationToken)))
+            .WithName("GetAcquisitionManualImportReview")
+            .WithSummary("Lists a held download's files, allowed Entity targets, and safe inferred mappings for explicit review.")
+            .Produces<AcquisitionManualImportReview>()
+            .Produces<ApiProblem>(StatusCodes.Status404NotFound);
+
+        group.MapPost("/{id:guid}/manual-import", async (
+            Guid id,
+            AcquisitionManualImportRequest request,
+            AcquisitionService acquisitions,
+            CancellationToken cancellationToken) => {
+                var detail = await acquisitions.SubmitManualImportAsync(id, request, cancellationToken);
+                return detail is null
+                    ? Results.NotFound(new ApiProblem(ApiProblemCodes.AcquisitionNotFound, "Acquisition was not found."))
+                    : Results.Ok(detail);
+            })
+            .WithName("SubmitAcquisitionManualImport")
+            .WithSummary("Validates explicit per-file Entity mappings and queues the held payload through the crash-safe importer.")
+            .Produces<AcquisitionDetail>()
+            .Produces<ApiProblem>(StatusCodes.Status400BadRequest)
+            .Produces<ApiProblem>(StatusCodes.Status404NotFound);
+
+        group.MapPost("/{id:guid}/manual-import/reject", async (
+            Guid id,
+            AcquisitionService acquisitions,
+            CancellationToken cancellationToken) => {
+                try {
+                    return await acquisitions.RejectManualImportAsync(id, cancellationToken)
+                        ? Results.NoContent()
+                        : Results.NotFound(new ApiProblem(ApiProblemCodes.AcquisitionNotFound, "Acquisition was not found."));
+                } catch (AcquisitionConfigurationException ex) {
+                    return Results.BadRequest(new ApiProblem(ex.Code, ex.Message));
+                }
+            })
+            .WithName("RejectAcquisitionManualImport")
+            .WithSummary("Blocklists a held download's exact release, removes its transfer and data, and starts a fresh search.")
+            .Produces(StatusCodes.Status204NoContent)
+            .Produces<ApiProblem>(StatusCodes.Status400BadRequest)
+            .Produces<ApiProblem>(StatusCodes.Status404NotFound);
+
+        group.MapPost("/{id:guid}/cancel", async (
+            Guid id,
+            AcquisitionService acquisitions,
+            CancellationToken cancellationToken) => {
+                var detail = await acquisitions.CancelAsync(id, cancellationToken);
+                return detail is null
+                    ? Results.NotFound(new ApiProblem(ApiProblemCodes.AcquisitionNotFound, "Acquisition was not found."))
+                    : Results.Ok(detail);
+            })
+            .WithName("CancelAcquisition")
+            .WithSummary("Cancels an acquisition, removing the torrent from the download client.")
+            .Produces<AcquisitionDetail>()
+            .Produces<ApiProblem>(StatusCodes.Status404NotFound);
+
+        group.MapDelete("/{id:guid}", async (
+            Guid id,
+            AcquisitionService acquisitions,
+            CancellationToken cancellationToken) =>
+            // The user-facing Downloads remove tears down the download only: a monitor watching the
+            // acquisition survives (re-pointed at a fresh pending clone) so the loop keeps chasing the
+            // still-wanted item — removing a download is never a give-up.
+            await acquisitions.DeleteAsync(id, cancellationToken, preserveWantedLoop: true)
+                ? Results.NoContent()
+                : Results.NotFound(new ApiProblem(ApiProblemCodes.AcquisitionNotFound, "Acquisition was not found.")))
+            .WithName("DeleteAcquisition")
+            .WithSummary("Removes an acquisition and its torrent (and downloaded data) from the download client; monitoring of a still-wanted item continues.")
+            .Produces(StatusCodes.Status204NoContent)
+            .Produces<ApiProblem>(StatusCodes.Status404NotFound);
+
+        group.MapGet("/{id:guid}/transfer", async (
+            Guid id,
+            AcquisitionService acquisitions,
+            CancellationToken cancellationToken) => {
+                var transfer = await acquisitions.GetTransferAsync(id, cancellationToken);
+                return transfer is null ? Results.NoContent() : Results.Ok(transfer);
+            })
+            .WithName("GetAcquisitionTransfer")
+            .WithSummary("Live transfer telemetry (progress, speed, ETA, peers, per-piece state) for an in-flight acquisition.")
+            .Produces<AcquisitionTransferView>()
+            .Produces(StatusCodes.Status204NoContent);
+
+        group.MapGet("/{id:guid}/files", (
+            Guid id,
+            AcquisitionService acquisitions,
+            CancellationToken cancellationToken) =>
+            acquisitions.GetFilesAsync(id, cancellationToken))
+            .WithName("GetAcquisitionFiles")
+            .WithSummary("The acquisition's files: imported library files once imported, otherwise the in-progress download files.")
+            .Produces<AcquisitionFilesView>();
+
+        group.MapPost("/{id:guid}/upload-torrent", async (
+            Guid id,
+            IFormFile file,
+            AcquisitionQueueService queue,
+            CancellationToken cancellationToken) => {
+                if (file.Length == 0) {
+                    return Results.BadRequest(new ApiProblem(ApiProblemCodes.AcquisitionInvalid, "The uploaded torrent file is empty."));
+                }
+
+                using var stream = new MemoryStream();
+                await file.CopyToAsync(stream, cancellationToken);
+                try {
+                    var detail = await queue.QueueManualTorrentAsync(id, file.FileName, stream.ToArray(), cancellationToken);
+                    return detail is null
+                        ? Results.NotFound(new ApiProblem(ApiProblemCodes.AcquisitionNotFound, "Acquisition was not found."))
+                        : Results.Ok(detail);
+                } catch (AcquisitionConfigurationException ex) {
+                    return Results.BadRequest(new ApiProblem(ex.Code, ex.Message));
+                }
+            })
+            .WithName("UploadAcquisitionTorrent")
+            .WithSummary("Queues an acquisition from a user-supplied .torrent file (manual fallback for linkless releases).")
+            .DisableAntiforgery()
+            .Produces<AcquisitionDetail>()
+            .Produces<ApiProblem>(StatusCodes.Status400BadRequest)
+            .Produces<ApiProblem>(StatusCodes.Status404NotFound);
+
+        group.MapGet("/download-clients", (
+            DownloadClientCommandService downloadClients,
+            CancellationToken cancellationToken) =>
+            downloadClients.ListAsync(cancellationToken))
+            .WithName("ListDownloadClients")
+            .WithSummary("Lists configured download clients with passwords redacted.")
+            .Produces<IReadOnlyList<DownloadClientSummary>>();
+
+        group.MapPost("/download-clients", async (
+            DownloadClientSaveRequest request,
+            DownloadClientCommandService downloadClients,
+            CancellationToken cancellationToken) =>
+            await SaveDownloadClientAsync(request, downloadClients, cancellationToken))
+            .WithName("SaveDownloadClient")
+            .WithSummary("Creates or updates a download client configuration.")
+            .Produces<DownloadClientSummary>()
+            .Produces<ApiProblem>(StatusCodes.Status400BadRequest);
+
+        group.MapPut("/download-clients/{id:guid}", async (
+            Guid id,
+            DownloadClientSaveRequest request,
+            DownloadClientCommandService downloadClients,
+            CancellationToken cancellationToken) =>
+            await SaveDownloadClientAsync(request with { Id = id }, downloadClients, cancellationToken))
+            .WithName("UpdateDownloadClient")
+            .WithSummary("Updates an existing download client configuration.")
+            .Produces<DownloadClientSummary>()
+            .Produces<ApiProblem>(StatusCodes.Status400BadRequest);
+
+        group.MapDelete("/download-clients/{id:guid}", async (
+            Guid id,
+            DownloadClientCommandService downloadClients,
+            CancellationToken cancellationToken) =>
+            await downloadClients.DeleteAsync(id, cancellationToken)
+                ? Results.NoContent()
+                : Results.NotFound(new ApiProblem(ApiProblemCodes.NotFound, "Download client was not found.")))
+            .WithName("DeleteDownloadClient")
+            .WithSummary("Deletes a configured download client.")
+            .Produces(StatusCodes.Status204NoContent)
+            .Produces<ApiProblem>(StatusCodes.Status404NotFound);
+
+        group.MapPost("/download-clients/test", async (
+            DownloadClientTestRequest request,
+            DownloadClientCommandService downloadClients,
+            CancellationToken cancellationToken) => {
+                try {
+                    return Results.Ok(await downloadClients.TestAsync(request, cancellationToken));
+                } catch (AcquisitionConfigurationException ex) {
+                    return Results.BadRequest(new ApiProblem(ex.Code, ex.Message));
+                }
+            })
+            .WithName("TestDownloadClient")
+            .WithSummary("Tests connectivity for a download client configuration.")
+            .Produces<DownloadClientTestResponse>()
+            .Produces<ApiProblem>(StatusCodes.Status400BadRequest);
+
+        group.MapPost("/profiles", async (
+            BookAcquisitionProfileSaveRequest request,
+            BookAcquisitionProfileCommandService profiles,
+            CancellationToken cancellationToken) =>
+            await SaveProfileAsync(request, profiles, cancellationToken))
+            .WithName("SaveAcquisitionProfile")
+            .WithSummary("Creates or updates a book acquisition profile.")
+            .Produces<BookAcquisitionProfileView>()
+            .Produces<ApiProblem>(StatusCodes.Status400BadRequest);
+
+        group.MapPut("/profiles/{id:guid}", async (
+            Guid id,
+            BookAcquisitionProfileSaveRequest request,
+            BookAcquisitionProfileCommandService profiles,
+            CancellationToken cancellationToken) =>
+            await SaveProfileAsync(request with { Id = id }, profiles, cancellationToken))
+            .WithName("UpdateAcquisitionProfile")
+            .WithSummary("Updates an existing book acquisition profile.")
+            .Produces<BookAcquisitionProfileView>()
+            .Produces<ApiProblem>(StatusCodes.Status400BadRequest);
+
+        group.MapDelete("/profiles/{id:guid}", async (
+            Guid id,
+            BookAcquisitionProfileCommandService profiles,
+            CancellationToken cancellationToken) =>
+            await profiles.DeleteAsync(id, cancellationToken)
+                ? Results.NoContent()
+                : Results.NotFound(new ApiProblem(ApiProblemCodes.NotFound, "Acquisition profile was not found.")))
+            .WithName("DeleteAcquisitionProfile")
+            .WithSummary("Deletes a book acquisition profile.")
+            .Produces(StatusCodes.Status204NoContent)
+            .Produces<ApiProblem>(StatusCodes.Status404NotFound);
+
+        group.MapGet("/rule-presets", () => AcquisitionRulePresets.List())
+            .WithName("ListAcquisitionRulePresets")
+            .WithSummary("Lists editable starter rules for common audio language and format preferences.")
+            .Produces<IReadOnlyList<AcquisitionRulePresetView>>();
+
+        group.MapGet("/custom-formats", (
+            ICustomFormatStore customFormats,
+            CancellationToken cancellationToken) =>
+            customFormats.ListAsync(cancellationToken))
+            .WithName("ListCustomFormats")
+            .WithSummary("Lists custom formats (named, scored release classifiers) across all profile kinds.")
+            .Produces<IReadOnlyList<CustomFormatView>>();
+
+        group.MapPost("/custom-formats", async (
+            CustomFormatSaveRequest request,
+            ICustomFormatStore customFormats,
+            CancellationToken cancellationToken) => {
+                try {
+                    return Results.Ok(await customFormats.SaveAsync(request, cancellationToken));
+                } catch (AcquisitionConfigurationException ex) {
+                    return Results.BadRequest(new ApiProblem(ex.Code, ex.Message));
+                }
+            })
+            .WithName("SaveCustomFormat")
+            .WithSummary("Creates or updates a custom format (validates the name, conditions, and any regex patterns).")
+            .Produces<CustomFormatView>()
+            .Produces<ApiProblem>(StatusCodes.Status400BadRequest);
+
+        group.MapDelete("/custom-formats/{id:guid}", async (
+            Guid id,
+            ICustomFormatStore customFormats,
+            CancellationToken cancellationToken) =>
+            await customFormats.DeleteAsync(id, cancellationToken)
+                ? Results.NoContent()
+                : Results.NotFound(new ApiProblem(ApiProblemCodes.NotFound, "Custom format was not found.")))
+            .WithName("DeleteCustomFormat")
+            .WithSummary("Deletes a custom format.")
+            .Produces(StatusCodes.Status204NoContent)
+            .Produces<ApiProblem>(StatusCodes.Status404NotFound);
+
+        group.MapGet("/history", (
+            AcquisitionService acquisitions,
+            CancellationToken cancellationToken,
+            int? limit = null,
+            Guid? entityId = null) =>
+            acquisitions.ListHistoryAsync(limit ?? 0, entityId, cancellationToken))
+            .WithName("ListAcquisitionHistory")
+            .WithSummary("Lists the durable acquisition activity log (grabbed/imported/failed/removed), newest first; optionally filtered to one entity.")
+            .Produces<IReadOnlyList<AcquisitionHistoryView>>();
+
+        group.MapGet("/blocklist", (
+            IAcquisitionBlocklistStore blocklist,
+            CancellationToken cancellationToken) =>
+            blocklist.ListAsync(cancellationToken))
+            .WithName("ListAcquisitionBlocklist")
+            .WithSummary("Lists blocklisted releases that failed-download recovery refuses for future acquisition.")
+            .Produces<IReadOnlyList<AcquisitionBlocklistEntry>>();
+
+        group.MapDelete("/blocklist", async (
+            IAcquisitionBlocklistStore blocklist,
+            CancellationToken cancellationToken,
+            Guid? entityId = null,
+            DateTimeOffset? createdAfter = null) =>
+            Results.Ok(new AcquisitionBlocklistClearResponse(
+                await blocklist.ClearAsync(entityId, createdAfter, cancellationToken))))
+            .WithName("ClearAcquisitionBlocklist")
+            .WithSummary("Allows blocklisted releases again, optionally scoped to one library Entity and/or entries created after a cutoff.")
+            .Produces<AcquisitionBlocklistClearResponse>();
+
+        group.MapDelete("/blocklist/{id:guid}", async (
+            Guid id,
+            IAcquisitionBlocklistStore blocklist,
+            CancellationToken cancellationToken) =>
+            await blocklist.DeleteAsync(id, cancellationToken)
+                ? Results.NoContent()
+                : Results.NotFound(new ApiProblem(ApiProblemCodes.NotFound, "Blocklist entry was not found.")))
+            .WithName("DeleteAcquisitionBlocklistEntry")
+            .WithSummary("Removes a release from the blocklist so it can be acquired again.")
+            .Produces(StatusCodes.Status204NoContent)
+            .Produces<ApiProblem>(StatusCodes.Status404NotFound);
+
+        group.MapGet("/remote-path-mappings", (
+            IRemotePathMappingStore mappings,
+            CancellationToken cancellationToken) =>
+            mappings.ListAsync(cancellationToken))
+            .WithName("ListRemotePathMappings")
+            .WithSummary("Lists the path-prefix rewrites from download-client filesystem views to Prismedia's.")
+            .Produces<IReadOnlyList<RemotePathMappingView>>();
+
+        group.MapPost("/remote-path-mappings", async (
+            RemotePathMappingSaveRequest request,
+            IRemotePathMappingStore mappings,
+            CancellationToken cancellationToken) =>
+            string.IsNullOrWhiteSpace(request.RemotePath) || string.IsNullOrWhiteSpace(request.LocalPath)
+                ? Results.BadRequest(new ApiProblem(ApiProblemCodes.DownloadClientInvalid, "Both the remote and the local path are required."))
+                : Results.Ok(await mappings.SaveAsync(request, cancellationToken)))
+            .WithName("SaveRemotePathMapping")
+            .WithSummary("Creates or updates a remote path mapping for a download client.")
+            .Produces<RemotePathMappingView>()
+            .Produces<ApiProblem>(StatusCodes.Status400BadRequest);
+
+        group.MapDelete("/remote-path-mappings/{id:guid}", async (
+            Guid id,
+            IRemotePathMappingStore mappings,
+            CancellationToken cancellationToken) =>
+            await mappings.DeleteAsync(id, cancellationToken)
+                ? Results.NoContent()
+                : Results.NotFound(new ApiProblem(ApiProblemCodes.NotFound, "Remote path mapping was not found.")))
+            .WithName("DeleteRemotePathMapping")
+            .WithSummary("Removes a remote path mapping.")
+            .Produces(StatusCodes.Status204NoContent)
+            .Produces<ApiProblem>(StatusCodes.Status404NotFound);
+
+        return group;
+    }
+
+    /// <summary>Maps the monitor endpoints (start/stop/pause/resume + list) for keeping a wanted item's search alive.</summary>
+    public static RouteGroupBuilder MapMonitorEndpoints(this IEndpointRouteBuilder routes) {
+        var group = routes.MapGroup("/api/monitors")
+            .RequireAdmin()
+            .WithTags("Monitors");
+
+        group.MapGet("/", (
+            MonitorService monitors,
+            CancellationToken cancellationToken) =>
+            monitors.ListAsync(cancellationToken))
+            .WithName("ListMonitors")
+            .WithSummary("Lists monitored items with the status of each linked acquisition.")
+            .Produces<IReadOnlyList<MonitorView>>();
+
+        group.MapGet("/missing", async (
+            MonitorService monitors,
+            CancellationToken cancellationToken,
+            int page = 1,
+            int pageSize = 50,
+            string? kind = null) => {
+                if (!TryResolveKind(kind, out var resolvedKind, out var error)) {
+                    return error;
+                }
+
+                return Results.Ok(await monitors.ListMissingAsync(page, pageSize, resolvedKind, cancellationToken));
+            })
+            .WithName("ListMissingWanted")
+            .WithSummary("A page of the Wanted 'Missing' list — active monitored items not yet acquired, newest first. Paged (pageSize clamped 1–200) and optionally filtered by kind; the page total is exact.")
+            .Produces<WantedPageView>()
+            .Produces<ApiProblem>(StatusCodes.Status400BadRequest);
+
+        group.MapGet("/cutoff-unmet", async (
+            MonitorService monitors,
+            CancellationToken cancellationToken,
+            int page = 1,
+            int pageSize = 50,
+            string? kind = null) => {
+                if (!TryResolveKind(kind, out var resolvedKind, out var error)) {
+                    return error;
+                }
+
+                return Results.Ok(await monitors.ListCutoffUnmetAsync(page, pageSize, resolvedKind, cancellationToken));
+            })
+            .WithName("ListCutoffUnmetWanted")
+            .WithSummary("A page of the Wanted 'Cutoff Unmet' list — imported monitored items still below their kind's quality cutoff, newest first. Paged (pageSize clamped 1–200) and optionally filtered by kind, with an exact total after current-policy cutoff filtering.")
+            .Produces<WantedPageView>()
+            .Produces<ApiProblem>(StatusCodes.Status400BadRequest);
+
+        group.MapPost("/", async (
+            MonitorCreateRequest request,
+            MonitorService monitors,
+            CancellationToken cancellationToken) => {
+                try {
+                    var monitor = await monitors.StartAsync(request.AcquisitionId, cancellationToken);
+                    return monitor is null
+                        ? Results.NotFound(new ApiProblem(ApiProblemCodes.AcquisitionNotFound, "Acquisition was not found."))
+                        : Results.Ok(monitor);
+                } catch (AcquisitionConfigurationException exception) {
+                    return Results.Conflict(new ApiProblem(exception.Code, exception.Message));
+                }
+            })
+            .WithName("StartMonitor")
+            .WithSummary("Starts monitoring an acquisition so its release search is re-run until the item is acquired.")
+            .Produces<MonitorView>()
+            .Produces<ApiProblem>(StatusCodes.Status404NotFound)
+            .Produces<ApiProblem>(StatusCodes.Status409Conflict);
+
+        group.MapPost("/entity", async (
+            EntityMonitorCreateRequest request,
+            MonitorService monitors,
+            CancellationToken cancellationToken) => {
+                try {
+                    var targeting = request.TargetLibraryRootId is not null || request.ProfileId is not null
+                        ? new AcquisitionTargeting(request.TargetLibraryRootId, request.ProfileId)
+                        : null;
+                    var monitor = await monitors.StartForEntityAsync(
+                        request.EntityId,
+                        targeting,
+                        request.Preset,
+                        cancellationToken);
+                    return monitor is null
+                        ? Results.BadRequest(new ApiProblem(ApiProblemCodes.RequestInvalid, "The Entity can't be monitored: its kind must support requests and it must have a provider identity an enabled plugin can track (run Identify first for scanned-in items)."))
+                        : Results.Ok(monitor);
+                } catch (AcquisitionConfigurationException exception) {
+                    return Results.Conflict(new ApiProblem(exception.Code, exception.Message));
+                }
+            })
+            .WithName("StartEntityMonitor")
+            .WithSummary("Starts stable monitoring for any requestable Entity. Groupings discover children; leaves keep acquisition intent attached to the Entity id.")
+            .Produces<MonitorView>()
+            .Produces<ApiProblem>(StatusCodes.Status400BadRequest)
+            .Produces<ApiProblem>(StatusCodes.Status409Conflict);
+
+        group.MapGet("/for-entity/{entityId:guid}", async (
+            Guid entityId,
+            MonitorService monitors,
+            CancellationToken cancellationToken) => {
+                var monitor = await monitors.GetForEntityAsync(entityId, cancellationToken);
+                return monitor is null
+                    ? Results.NoContent()
+                    : Results.Ok(monitor);
+            })
+            .WithName("GetEntityMonitor")
+            .WithSummary("Gets the stable monitor targeting a library Entity, when one exists.")
+            .Produces<MonitorView>()
+            .Produces(StatusCodes.Status204NoContent);
+
+        group.MapGet("/for-entity/{entityId:guid}/all", (
+            Guid entityId,
+            MonitorService monitors,
+            CancellationToken cancellationToken) =>
+            monitors.ListForEntityAsync(entityId, cancellationToken))
+            .WithName("ListEntityMonitors")
+            .WithSummary("Lists every direct monitor targeting an Entity, including independent ebook and audiobook intent.")
+            .Produces<IReadOnlyList<MonitorView>>();
+
+        group.MapGet("/for-entity/{entityId:guid}/eligibility", (
+            Guid entityId,
+            MonitorService monitors,
+            CancellationToken cancellationToken) =>
+            monitors.GetEligibilityAsync(entityId, cancellationToken))
+            .WithName("GetEntityMonitorEligibility")
+            .WithSummary("Whether the Entity can be monitored: its kind must support requests and its provider identity must be trackable by an enabled metadata plugin.")
+            .Produces<MonitorEligibilityView>();
+
+        group.MapPost("/states", async (
+            EntityMonitorStateRequest request,
+            MonitorService monitors,
+            CancellationToken cancellationToken) => {
+                if (request.EntityIds is null || request.EntityIds.Count == 0) {
+                    return Results.BadRequest(new ApiProblem(
+                        ApiProblemCodes.RequestInvalid,
+                        "Provide at least one Entity id."));
+                }
+                if (request.EntityIds.Count > 500) {
+                    return Results.BadRequest(new ApiProblem(
+                        ApiProblemCodes.RequestInvalid,
+                        "At most 500 Entity ids can be loaded at once."));
+                }
+
+                return Results.Ok(await monitors.GetStatesAsync(request.EntityIds, cancellationToken));
+            })
+            .WithName("GetEntityMonitorStates")
+            .WithSummary("Returns bounded monitoring eligibility, direct monitor, and latest acquisition state for the requested Entities.")
+            .Produces<EntityMonitorStateView[]>()
+            .Produces<ApiProblem>(StatusCodes.Status400BadRequest);
+
+        group.MapDelete("/{id:guid}", async (
+            Guid id,
+            MonitorService monitors,
+            CancellationToken cancellationToken) => {
+                var result = await monitors.StopAsync(id, cancellationToken);
+                if (!result.Found) {
+                    return Results.NotFound(new ApiProblem(ApiProblemCodes.NotFound, "Monitor was not found."));
+                }
+
+                return result.Stopped
+                    ? Results.Ok(new MonitorStopResponse(result.RootEntityPruned))
+                    : Results.Conflict(new ApiProblem(
+                        ApiProblemCodes.AcquisitionInvalid,
+                        result.Message ?? "The monitor could not be safely stopped."));
+            })
+            .WithName("StopMonitor")
+            .WithSummary("Stops monitoring an Entity subtree, removes its acquisitions/downloads and fileless Wanted placeholders, and preserves source-backed Entities/files.")
+            .Produces<MonitorStopResponse>()
+            .Produces<ApiProblem>(StatusCodes.Status404NotFound)
+            .Produces<ApiProblem>(StatusCodes.Status409Conflict);
+
+        group.MapPost("/{id:guid}/pause", async (
+            Guid id,
+            MonitorService monitors,
+            CancellationToken cancellationToken) =>
+            await monitors.PauseAsync(id, cancellationToken)
+                ? Results.NoContent()
+                : Results.NotFound(new ApiProblem(ApiProblemCodes.NotFound, "Monitor was not found.")))
+            .WithName("PauseMonitor")
+            .WithSummary("Pauses a monitor so it is not re-searched until resumed.")
+            .Produces(StatusCodes.Status204NoContent)
+            .Produces<ApiProblem>(StatusCodes.Status404NotFound);
+
+        group.MapPost("/{id:guid}/resume", async (
+            Guid id,
+            MonitorService monitors,
+            CancellationToken cancellationToken) =>
+            await monitors.ResumeAsync(id, cancellationToken)
+                ? Results.NoContent()
+                : Results.NotFound(new ApiProblem(ApiProblemCodes.NotFound, "Monitor was not found.")))
+            .WithName("ResumeMonitor")
+            .WithSummary("Resumes a paused monitor.")
+            .Produces(StatusCodes.Status204NoContent)
+            .Produces<ApiProblem>(StatusCodes.Status404NotFound);
+
+        return group;
+    }
+
+    /// <summary>
+    /// Resolves an optional media-kind query value for the Wanted lists: a blank/absent value means "all
+    /// kinds" (out null, success), a recognized code resolves to its <see cref="EntityKind"/>, and any other
+    /// value fails with a 400 so a typo does not silently list everything.
+    /// </summary>
+    private static bool TryResolveKind(string? value, out EntityKind? kind, out IResult error) {
+        kind = null;
+        error = Results.Empty;
+        if (string.IsNullOrWhiteSpace(value)) {
+            return true;
+        }
+
+        if (EntityKindRegistry.TryGet(value, out var resolved)) {
+            kind = resolved;
+            return true;
+        }
+
+        error = Results.BadRequest(new ApiProblem(ApiProblemCodes.InvalidEntityKind, $"Entity kind '{value}' is not recognized."));
+        return false;
+    }
+
+    private static async Task<IResult> SaveIndexerAsync(
+        IndexerConfigSaveRequest request,
+        IndexerConfigCommandService indexers,
+        CancellationToken cancellationToken) {
+        try {
+            return Results.Ok(await indexers.SaveAsync(request, cancellationToken));
+        } catch (AcquisitionConfigurationException ex) {
+            return Results.BadRequest(new ApiProblem(ex.Code, ex.Message));
+        }
+    }
+
+    private static async Task<IResult> SaveDownloadClientAsync(
+        DownloadClientSaveRequest request,
+        DownloadClientCommandService downloadClients,
+        CancellationToken cancellationToken) {
+        try {
+            return Results.Ok(await downloadClients.SaveAsync(request, cancellationToken));
+        } catch (AcquisitionConfigurationException ex) {
+            return Results.BadRequest(new ApiProblem(ex.Code, ex.Message));
+        }
+    }
+
+    private static async Task<IResult> SaveProfileAsync(
+        BookAcquisitionProfileSaveRequest request,
+        BookAcquisitionProfileCommandService profiles,
+        CancellationToken cancellationToken) {
+        try {
+            return Results.Ok(await profiles.SaveAsync(request, cancellationToken));
+        } catch (AcquisitionConfigurationException ex) {
+            return Results.BadRequest(new ApiProblem(ex.Code, ex.Message));
+        }
+    }
+}

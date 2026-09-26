@@ -1,0 +1,333 @@
+using System.Globalization;
+using System.Text;
+using System.Text.RegularExpressions;
+
+namespace Prismedia.Application.Acquisition;
+
+/// <summary>
+/// Decides whether a release title names exactly the sought work, and extracts the title-adjacent year
+/// scene naming uses to disambiguate same-name works ("Clifford.the.Big.Red.Dog.2019.S01" names the 2019
+/// reboot, never the 2000 original). Mirrors Sonarr's clean-title comparison: digits are significant
+/// (so a year or number inside a title survives the comparison), while separators, articles, and
+/// diacritics do not. This feeds acceptance gates for AUTOMATIC selection only — rejected candidates
+/// stay visible for manual picks, which deliberately bypass identity checks (the user is the authority).
+/// </summary>
+public static partial class ReleaseTitleIdentity {
+    /// <summary>How a release title relates to the sought work's title.</summary>
+    /// <param name="TitleMatched">True when the release's leading title tokens are exactly the target title.</param>
+    /// <param name="TitleYear">The year token immediately following the matched title, when the release names one.</param>
+    public sealed record Result(bool TitleMatched, int? TitleYear);
+
+    /// <summary>A verdict used when no target is known: everything matches and no year is asserted.</summary>
+    private static readonly Result NoTarget = new(true, null);
+
+    // Words dropped from BOTH sides before comparing, per Sonarr's normalization (articles and
+    // connectives that scene naming and metadata providers disagree on). "&" normalizes to "and"
+    // upstream in ComparableTokens, so both spellings land here. prism-vocab: external.
+    private static readonly IReadOnlySet<string> IgnoredWords = new HashSet<string>(StringComparer.Ordinal) {
+        "a", "an", "the", "and", "or", "of"
+    };
+
+    // Tokens that legitimately end a title at the tail position — editions, cuts, and streaming-service
+    // tags that scene naming places between the title and the quality block, plus the album-edition
+    // vocabulary music releases append ("Album (Deluxe Edition) [FLAC]"). Everything already known to
+    // the shared metadata vocabulary (quality/source/codec/language) also ends a title. prism-vocab: external.
+    private static readonly IReadOnlySet<string> BoundaryTokens = new HashSet<string>(StringComparer.Ordinal) {
+        "extended", "unrated", "uncut", "remastered", "restored", "theatrical", "directors", "redux",
+        "imax", "limited", "internal", "criterion", "anniversary", "edition", "hybrid", "dubbed", "subbed",
+        "episode", "episodes", "collection", "hd",
+        "deluxe", "expanded", "remaster", "reissue", "bonus", "mono", "stereo",
+        "amzn", "nf", "dsnp", "pcok", "hulu", "atvp", "hmax", "hbo", "max", "pmtp", "roku", "stan", "itunes"
+    };
+
+    /// <summary>
+    /// Compares a release title's leading tokens against the sought work's title. The walk consumes the
+    /// target tokens in order; once the target is fully matched, the first following token settles the
+    /// verdict: a year token is the scene disambiguator (matched, year captured), a recognized
+    /// metadata/unit/edition token simply ends the title (matched, no year), and any other word means the
+    /// release names a longer, different title ("Dune Part Two" against "Dune"). An empty target
+    /// disables the gate entirely (ad-hoc evaluations without a known work).
+    /// </summary>
+    public static Result Match(string releaseTitle, string? targetTitle) {
+        foreach (var variant in ReleaseSubjectTitle.Variants(releaseTitle)) {
+            var result = MatchCore(variant, targetTitle);
+            if (result.TitleMatched) return result;
+            result = MatchCore(WithoutLeadingReleaseGroup(variant), targetTitle);
+            if (result.TitleMatched) return result;
+        }
+        return new Result(false, null);
+    }
+
+    /// <summary>
+    /// Removes a matching leading work title and optional release-group prefix before reading episode
+    /// evidence. Numbers and words belonging to the parent work cannot identify one of its episodes.
+    /// Preserves raw suffix punctuation so codecs and audio channels retain their technical meaning.
+    /// This only separates context; callers still apply their ordinary work-identity gates.
+    /// </summary>
+    public static string WithoutLeadingWorkTitle(string candidate, string? workTitle) {
+        var target = ComparableTokens(workTitle);
+        if (target.Count == 0) return candidate;
+        foreach (var variant in ReleaseSubjectTitle.Variants(candidate)) {
+            var suffix = Suffix(variant) ?? Suffix(WithoutLeadingReleaseGroup(variant));
+            if (suffix is not null) return suffix;
+        }
+        return candidate;
+
+        string? Suffix(string value) {
+            var index = 0;
+            foreach (var segment in ReleaseTitleText.TokenSegments(value)) {
+                var tokens = ComparableTokens(segment.Value);
+                for (var offset = 0; offset < tokens.Count; offset++) {
+                    if (tokens[offset] != target[index]) return null;
+                    index++;
+                    if (index == target.Count) return offset == tokens.Count - 1 ? value[segment.End..] : null;
+                }
+            }
+            return null;
+        }
+    }
+
+    private static Result MatchCore(string releaseTitle, string? targetTitle) {
+        var target = ComparableTokens(targetTitle);
+        if (target.Count == 0) {
+            return NoTarget;
+        }
+
+        var expectedIndex = 0;
+        foreach (var token in ComparableTokens(releaseTitle)) {
+            if (expectedIndex < target.Count) {
+                if (string.Equals(token, target[expectedIndex], StringComparison.Ordinal)) {
+                    expectedIndex++;
+                    continue;
+                }
+
+                return new Result(false, null);
+            }
+
+            if (YearTokenRegex().IsMatch(token)) {
+                return new Result(true, int.Parse(token, CultureInfo.InvariantCulture));
+            }
+
+            return new Result(IsBoundaryToken(token), null);
+        }
+
+        return new Result(expectedIndex == target.Count, null);
+    }
+
+    /// <summary>
+    /// Matches the work title while also allowing one known episode identity to begin immediately after
+    /// it. This keeps strict leading-series identity for archive releases such as
+    /// <c>Sesame Street 1316 Season 11</c> without making arbitrary numeric sequels match their base work.
+    /// The TV unit specification separately proves that the boundary identity is the sought episode.
+    /// </summary>
+    public static Result MatchWithEpisodeIdentifiers(
+        string releaseTitle,
+        string? targetTitle,
+        TvEpisodeIdentifierSet episodeIdentifiers) {
+        foreach (var variant in ReleaseSubjectTitle.Variants(releaseTitle)) {
+            var result = MatchEpisodeCore(variant, targetTitle, episodeIdentifiers);
+            if (result.TitleMatched) return result;
+            result = MatchEpisodeCore(WithoutLeadingReleaseGroup(variant), targetTitle, episodeIdentifiers);
+            if (result.TitleMatched) return result;
+        }
+        return new Result(false, null);
+    }
+
+    private static Result MatchEpisodeCore(
+        string releaseTitle,
+        string? targetTitle,
+        TvEpisodeIdentifierSet episodeIdentifiers) {
+        var ordinary = MatchCore(releaseTitle, targetTitle);
+        if (ordinary.TitleMatched) {
+            return ordinary;
+        }
+
+        var target = ComparableTokens(targetTitle);
+        var release = ComparableTokens(releaseTitle);
+        if (target.Count == 0 || release.Count < target.Count
+            || !release.Take(target.Count).SequenceEqual(target, StringComparer.Ordinal)) {
+            return ordinary;
+        }
+
+        var tail = release.Skip(target.Count).ToArray();
+        var boundaryMatched = episodeIdentifiers.All
+            .Select(ComparableTokens)
+            .Where(identifier => identifier.Count > 0 && identifier.Count <= tail.Length)
+            .Any(identifier => tail.Take(identifier.Count).SequenceEqual(identifier, StringComparer.Ordinal));
+        return boundaryMatched || TvAbsoluteEpisodeTokens.Matches(string.Join(' ', tail), episodeIdentifiers.Numeric, leadingOnly: true)
+            ? new Result(true, null) : ordinary;
+    }
+
+    // One bounded leading group label may precede the actual work title. Try the unmodified title
+    // first so titles such as [REC] remain intact; the suffix still has to name the complete work.
+    // Multipart Usenet counters, nested brackets, and free-form prefixes are not group labels.
+    private static string WithoutLeadingReleaseGroup(string value) =>
+        value.AsSpan().TrimStart().StartsWith("[")
+            ? LeadingReleaseGroupRegex().Replace(value, string.Empty, 1)
+            : value;
+
+    [GeneratedRegex(@"^\s*\[(?=[^\]\r\n]{0,63}\p{L})[\p{L}\p{N} _!&.+-]{1,64}\]\s*", RegexOptions.CultureInvariant)]
+    private static partial Regex LeadingReleaseGroupRegex();
+
+    /// <summary>
+    /// The comparison tokens of a title-like value: separator-normalized, diacritics folded, "&amp;"
+    /// spelled out, and articles/connectives dropped — the digit-preserving clean form both sides of the
+    /// identity comparison share. Numeric tokens compare by value, so provider title <c>Episode 131</c>
+    /// matches a release/file spelling it <c>Episode 0131</c> without weakening the number itself.
+    /// </summary>
+    internal static IReadOnlyList<string> ComparableTokens(string? value) {
+        if (string.IsNullOrWhiteSpace(value)) {
+            return [];
+        }
+
+        var tokens = new List<string>();
+        foreach (var token in ReleaseTitleText.Tokens(
+                     ReleaseTitleText.NormalizeIdentityPunctuation(value.Replace("&", " and ")))) {
+            var folded = NormalizeNumericToken(FoldDiacritics(token));
+            if (folded.Length > 0 && !IgnoredWords.Contains(folded)) {
+                tokens.Add(folded);
+            }
+        }
+
+        return tokens;
+    }
+
+    /// <summary>
+    /// True when the target's comparison tokens appear as a contiguous run ANYWHERE in the release
+    /// title — the order-agnostic variant for kinds with no fixed leading convention (book releases
+    /// lead with the author as often as the title). An empty target matches everything.
+    /// </summary>
+    public static bool ContainsRun(string releaseTitle, string? targetTitle) {
+        var target = ComparableTokens(targetTitle);
+        if (target.Count == 0) {
+            return true;
+        }
+
+        var tokens = ComparableTokens(releaseTitle);
+        return ContainsTokenRun(tokens, target);
+    }
+
+    /// <summary>
+    /// The non-empty variant used when a match is positive evidence rather than an optional filter.
+    /// Empty or normalization-only target titles never match.
+    /// </summary>
+    public static bool ContainsMeaningfulRun(string releaseTitle, string? targetTitle) {
+        var target = ComparableTokens(targetTitle);
+        return target.Count > 0 && ContainsTokenRun(ComparableTokens(releaseTitle), target);
+    }
+
+    private static bool ContainsTokenRun(IReadOnlyList<string> tokens, IReadOnlyList<string> target) {
+        for (var start = 0; start <= tokens.Count - target.Count; start++) {
+            var matched = true;
+            for (var offset = 0; offset < target.Count; offset++) {
+                if (!string.Equals(tokens[start + offset], target[offset], StringComparison.Ordinal)) {
+                    matched = false;
+                    break;
+                }
+            }
+
+            if (matched) {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    private static string NormalizeNumericToken(string token) {
+        if (!token.All(char.IsDigit)) {
+            return token;
+        }
+
+        var normalized = token.TrimStart('0');
+        return normalized.Length == 0 ? "0" : normalized;
+    }
+
+    /// <summary>
+    /// True when every one of the target's comparison tokens appears somewhere in the release title,
+    /// in any order — the author check for book releases, whose "Author - Title" and "Title - Author"
+    /// orderings both occur. An empty target matches everything.
+    /// </summary>
+    public static bool ContainsAllTokens(string releaseTitle, string? targetText) {
+        var target = ComparableTokens(targetText);
+        if (target.Count == 0) {
+            return true;
+        }
+
+        var tokens = ComparableTokens(releaseTitle).ToHashSet(StringComparer.Ordinal);
+        return target.All(tokens.Contains);
+    }
+
+    /// <summary>
+    /// True when a Soulseek result's path-shaped display title contains the full artist/work identity.
+    /// Soulseek commonly exposes artist, album, and filename in separate slash-delimited segments, so
+    /// their identity is positional context rather than a scene-style leading title.
+    /// </summary>
+    public static bool MatchesSoulseekPath(string releasePathTitle, string? targetText) {
+        var target = ComparableSoulseekPathTokens(targetText);
+        if (target.Count == 0) {
+            return true;
+        }
+
+        var tokens = ComparableSoulseekPathTokens(releasePathTitle).ToHashSet(StringComparer.Ordinal);
+        return target.All(tokens.Contains);
+    }
+
+    /// <summary>
+    /// Comparison tokens specialized for Soulseek's remote path display. Quotes, slashes, backslashes,
+    /// and filename punctuation are structural delimiters here; changing the general release-title
+    /// normalizer would also weaken strict post-import audio-title reconciliation.
+    /// </summary>
+    private static IReadOnlyList<string> ComparableSoulseekPathTokens(string? value) {
+        if (string.IsNullOrWhiteSpace(value)) {
+            return [];
+        }
+
+        var pathWords = SoulseekPathTokenSeparators().Replace(value.Replace("&", " and "), " ");
+        return ComparableTokens(pathWords);
+    }
+
+    /// <summary>True when a tail-position token legitimately ends a title rather than extending it.</summary>
+    private static bool IsBoundaryToken(string token) =>
+        ReleaseTitleVocabulary.MetadataTokens.Contains(token)
+        || BoundaryTokens.Contains(token)
+        || ResolutionTokenRegex().IsMatch(token)
+        || BitDepthTokenRegex().IsMatch(token)
+        || TvUnitTokenRegex().IsMatch(token)
+        || AltTvUnitTokenRegex().IsMatch(token);
+
+    /// <summary>Strips combining marks so "Amélie" and "Amelie" compare equal (Sonarr folds diacritics the same way).</summary>
+    private static string FoldDiacritics(string token) {
+        if (token.IsNormalized(NormalizationForm.FormD) && !token.Any(ch => ch > 0x7F)) {
+            return token;
+        }
+
+        var decomposed = token.Normalize(NormalizationForm.FormD);
+        var builder = new StringBuilder(decomposed.Length);
+        foreach (var ch in decomposed) {
+            if (CharUnicodeInfo.GetUnicodeCategory(ch) != UnicodeCategory.NonSpacingMark) {
+                builder.Append(ch);
+            }
+        }
+
+        return builder.ToString().Normalize(NormalizationForm.FormC);
+    }
+
+    [GeneratedRegex(@"^(?:19|20)\d{2}$", RegexOptions.CultureInvariant)]
+    private static partial Regex YearTokenRegex();
+
+    [GeneratedRegex(@"^\d{3,4}[pi]$", RegexOptions.CultureInvariant)]
+    private static partial Regex ResolutionTokenRegex();
+
+    [GeneratedRegex(@"^\d+bit$", RegexOptions.CultureInvariant)]
+    private static partial Regex BitDepthTokenRegex();
+
+    [GeneratedRegex(@"^s\d{1,3}(?:e\d{1,4})*$", RegexOptions.CultureInvariant)]
+    private static partial Regex TvUnitTokenRegex();
+
+    [GeneratedRegex(@"^\d{1,2}x\d{2,4}$", RegexOptions.CultureInvariant)]
+    private static partial Regex AltTvUnitTokenRegex();
+
+    [GeneratedRegex(@"[\s\p{P}\p{S}]+", RegexOptions.CultureInvariant)]
+    private static partial Regex SoulseekPathTokenSeparators();
+}

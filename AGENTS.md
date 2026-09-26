@@ -1,0 +1,255 @@
+# Nitrate Overrides (read first)
+
+This repository is **Nitrate**, a private, personal, non-commercial snapshot fork of
+[Prismedia](https://github.com/pauljoda/Prismedia) taken at `627958a` (v3.7.2). It is never
+synced with upstream. The Prismedia contract below still applies **except** where this section
+overrides it.
+
+- **Spec and plans:** `docs/nitrate/VISION.md` (spec + decisions log), `docs/nitrate/ROADMAP.md`,
+  `docs/nitrate/plans/`. Work from the active plan; tick its checkboxes as you go.
+- **Overridden — do not follow:** "Release Channels", "Docker" publishing, GHCR images, and the
+  SemVer/`CHANGELOG.md` bump rules in "Commit & Changelog Policy". Nitrate has no releases. Do not
+  bump package versions. Do not edit `CHANGELOG.md`.
+- **Still follow:** small conventional commits (`feat(api): …`, `fix(web): …`, `docs: …`),
+  backend architecture contract, identifier discipline, UI composition rules, quality bar,
+  repository privacy.
+- **Tracked planning docs are allowed** under `docs/nitrate/` (this overrides the "keep roadmaps
+  outside tracked documentation" rule for that folder only).
+- **Target host:** native Windows on an AMD CPU/GPU. Keep code portable (no Linux-only paths or
+  shell assumptions in runtime code). Docker remains supported but is not the Windows path.
+- **Compatibility:** existing HTTP endpoints are used by the closed-source Prismedia iPhone/iPad/
+  Apple TV apps. Do not change or remove them; add new endpoints instead.
+- **Licensing:** never copy code from Readest (AGPL) or BookOrbit. Record every new third-party
+  dependency in `docs/THIRD_PARTY_LICENSES.md`.
+- **Verification:** before claiming a task done, run the relevant test commands and report their
+  real output. Anything needing the Windows PC or a physical device is marked **Owner-verified**
+  and must be listed for the owner, not claimed.
+
+---
+
+# Prismedia Repository Contract
+
+## Commit & Changelog Policy
+
+- Commit after every logical set of changes.
+- Keep commits small, reviewable, and intentionally scoped.
+- With every release-note-worthy change, update `CHANGELOG.md` under `## [Unreleased]`.
+- Keep changelog entries user-facing and high level. Internal cleanup belongs in git history, not the changelog.
+- Use Keep a Changelog sections: `What's New`, `Added`, `Changed`, `Fixed`, `Removed`, and `Docs`.
+- The root `package.json` version is the build version and the single source of truth. All workspace package versions must match it exactly.
+- Do not change the build version while publishing a channel image. Move the version forward when a new body of work starts, then let dev, alpha, beta, and release images publish that decided version.
+- The first release-note-worthy commit in a new body of work MUST include the appropriate SemVer bump in the root and every workspace package manifest. Do not commit user-facing work against the previous body's version.
+- Before choosing that bump, inspect every commit since the last manifest-version change and use the highest SemVer impact in the accumulated unreleased body: breaking change = MAJOR, feature = MINOR, fix-only = PATCH.
+- Later commits in the same unreleased body keep the already-decided version; versions advance once per body of work, not once per commit. The version-bump commit message or body must state the SemVer reason.
+- Before handing off any release-note-worthy commit, run `pnpm release:check` and report the resulting version.
+- Suggested commit style:
+  - `chore: bootstrap workspace`
+  - `docs: define repo contract`
+  - `feat(web): add media library shell`
+  - `feat(api): add health and jobs routes`
+  - `fix(worker): stabilize queue startup`
+
+## Versioning
+
+- Prismedia starts at `1.0.0`.
+- Versions are plain `X.Y.Z`; do not use development suffixes.
+- MAJOR: breaking API changes, schema changes that require user action, or config format changes.
+- MINOR: new features, new API endpoints, or new UI views.
+- PATCH: bug fixes, UI tweaks, dependency updates, and documentation.
+- Docker builds run `pnpm release:check`, which verifies changelog structure and workspace package version alignment.
+
+## Release Channels
+
+- Every push to `main` builds only `ghcr.io/pauljoda/prismedia:dev`.
+- Validation, documentation-site publishing, and channel image publishing are manual workflows.
+- Manual channel publishing is handled by `.github/workflows/publish-channel.yml`.
+- The manual workflow accepts `alpha`, `beta`, or `release`.
+- `alpha` publishes `alpha`, `alpha-<version>`, and `alpha-<version>-<short-sha>`.
+- `beta` publishes `beta`, `beta-<version>`, and `beta-<version>-<short-sha>`.
+- `release` publishes `release`, `release-<version>`, `release-<version>-<short-sha>`, and `latest`.
+- Publishing a channel image never edits package versions, rewrites changelog headings, creates git tags, or commits release artifacts.
+
+## Product
+
+Prismedia is a private media library for self-hosted collections. It is video-first, but images, galleries, books, comics, audio, performers, studios, tags, and collections are first-class library entities. It is optimized for a single trusted user or household on a private LAN and ships as a Docker image.
+
+Stash compatibility exists for plugin and metadata workflows. Prismedia should not be framed as a replacement for another app, and third-party schemas should not define Prismedia's persistence model.
+
+## Project Structure
+
+```text
+apps/web-svelte/       Svelte frontend only. Built as static assets and served by the .NET API.
+apps/backend/          .NET API, application/domain/infrastructure layers, EF Core persistence, and .NET worker.
+
+packages/ui-svelte/    Shared Svelte design tokens and UI primitives.
+
+infra/docker/          Dockerfiles and dev compose stack.
+scripts/release/       Version and changelog validation tooling.
+docs/                  Architecture and design language docs.
+```
+
+## Architecture
+
+- Monorepo with `pnpm` workspaces and `turbo`.
+- Runtime processes: .NET API/HTTP ingress, static Svelte frontend assets, and the .NET worker.
+- PostgreSQL 16 is the sole stateful dependency for application data and queue/job state.
+- Public HTTP contracts live in the .NET backend and are consumed by the generated Svelte client under `apps/web-svelte/src/lib/api/generated`.
+- Backend work must follow `docs/backend-architecture-contract.md`: Clean Architecture, DDD-lite domain behavior, CQRS-lite use cases, EF Core as infrastructure persistence, DTO API boundaries, and generated frontend clients.
+
+## Key Decisions
+
+1. .NET API + static Svelte UI: the .NET API owns endpoints, persistence, and server orchestration. Svelte is a frontend client only.
+2. PostgreSQL + EF Core: typed schema and EF migrations are managed from `apps/backend/src/Prismedia.Infrastructure/Persistence`.
+3. .NET background worker: scan, probe, thumbnail, sprite, HLS, and metadata work runs in `apps/backend/src/Prismedia.Worker`.
+4. HLS streaming: videos are transcoded to HLS on demand via ffmpeg and served by the .NET API.
+5. Typed contracts: .NET contracts are the server source of truth. The frontend should prefer generated OpenAPI types.
+6. No global EntityGraph: relationship links are EF persistence structures for bounded domain slices and read projections.
+
+## Database
+
+- Schema is defined by EF Core entity mappings in `apps/backend/src/Prismedia.Infrastructure/Persistence`.
+- Core entities: media entities, performers, studios, tags, fingerprints, library roots, settings, sources, files, and job runs.
+- EF migration files live under `apps/backend/src/Prismedia.Infrastructure/Persistence/Migrations` and are applied by the .NET runtime on startup.
+- Adding a schema change:
+  1. Edit the EF Core entity/model mapping.
+  2. Generate an EF migration from `apps/backend`.
+  3. Open the migration and review it before committing.
+  4. Commit the migration, model snapshot, entity/mapping changes, tests, and changelog entry together.
+  5. Apply locally by restarting the .NET API or worker and verify.
+- Never introduce Drizzle, SvelteKit `/api` routes, or a TypeScript worker.
+- Do not add broad compatibility bridges for abandoned schemas. If a breaking schema change needs user consent, add one explicit product flow for that exact change and remove it when it is no longer needed.
+
+## Design System Rules
+
+- Follow the prism visual system in `docs/design-language.md`: neutral Prismedia chrome, spectrum identity for entity families, and artwork-reactive detail atmosphere.
+- Controlled radii from a unified scale (`radius-xs: 4px` through `radius-2xl: 24px`). Tight, subtle softening — never bubbly or pill-shaped containers.
+- Keep true black and opaque neutral content surfaces as the ground layer; reserve frosted glass for navigation, toolbars, menus, sheets, dialogs, and floating controls.
+- Use neutral silver for app-level state and the canonical entity spectrum for sparse media markers and selected-state rails. Keep surrounding text, icons, cards, and controls neutral; do not introduce route-local accent palettes.
+- Give each page one muted accent moment that communicates its identity, such as an EntityGrid toolbar edge, a Settings section icon, or artwork atmosphere on detail pages. Do not repeat that accent across every element.
+- On detail pages, extract background/primary/secondary colors from already-loaded real artwork, preserve readable neutral text, and only render a hero when the API explicitly provides one.
+- Mobile first. Desktop expands the mobile layout.
+- Font voices: Cinzel for rare display/brand moments, Geist for product headings, Inter for body, JetBrains Mono for utility and metadata.
+- Shape, border, and animation express state. Entity color should read like flat material paint and occupy a small visual budget; reserve emitted-light glow for transient prism/loading energy.
+- Avoid generic SaaS styling and unmodified shadcn defaults.
+- Core actions must not depend on hover-only affordances.
+
+## Data & Integration Rules
+
+- Keep provider integrations behind stable adapter interfaces.
+- Do not embed a third-party application schema as Prismedia's application schema.
+- Normalize external hashes and metadata into Prismedia-owned tables and contracts.
+- Plugin development may use a separate Prismedia-Plugins checkout, but no
+  developer-specific checkout location belongs in tracked repository files.
+
+## Repository Privacy
+
+- Do not commit private hostnames, IP addresses, usernames, home-directory paths,
+  credentials, private media details, or deployment topology.
+- Keep dated audits, active roadmaps, campaign plans, submission packets, and
+  other working notes outside tracked documentation.
+- Tracked documentation must be durable project documentation or content intended
+  for publication. Use ignored local workspaces for private planning and audits.
+
+## Identifier Discipline (Magic-String Contract)
+
+Closed-set string identifiers are NEVER written as bare literals. Every kind code,
+relationship/credit/file-role code, job type, capability key, setting key, problem
+code, sort/filter/status/position/progress/date code, playback/stream mode, provider
+or runtime id, image-asset/meta-icon kind, and external wire scalar (Stash, ffprobe)
+has exactly one source of truth and is referenced from it.
+
+### The source of truth
+- Entity-kind codes and domain facts live in discovered `EntityKindDefinition`
+  implementations beside their concrete Entity types; the `EntityKind` enum is only the
+  typed identity. Other backend closed sets are `[Code("...")]` enums under
+  `Prismedia.Domain/Entities/Enums/**`. Both resolve through `CodecRegistry`
+  (e.g. `EntityKind.Video.ToCode()`, `RelationshipKind.Tags.ToCode()`,
+  `CreditRole.Director.ToCode()`, `JobType`, `PlaybackMode`, `EntityFileRole`).
+- Cross-cutting wire/path constants live in dedicated static classes
+  (e.g. `AppSettingKeys` and — as they are introduced —
+  `ApiProblemCodes`, `AssetPaths`, `MediaCodecs`, `MediaContainers`).
+- The frontend consumes code values ONLY from `src/lib/api/generated/codes.ts`
+  (re-exported via `$lib/entities/entity-codes.ts`): `ENTITY_KIND`,
+  `RELATIONSHIP_CODE`, `CREDIT_ROLE`, `ENTITY_FILE_ROLE`, `JOB_TYPE`,
+  `PLAYBACK_MODE`, `CAPABILITY_KIND`, `SETTING_KEYS`, `EXTERNAL_ID_PROVIDER`, and
+  any future codegen'd families. `codes.ts` is generated — never edit it by hand.
+
+### Rules
+1. Need a closed-set string? Find its Entity-kind definition, `[Code]` enum, or
+   constant class and reference it. Do NOT retype the literal. The definition code,
+   `[Code]` attribute, or const declaration is the only place the literal text appears.
+2. A new Entity kind requires its enum identity plus one discovered definition; do not
+   edit a registry. For any other new closed set with no home, CREATE a `[Code]` enum
+   (or a constant class for non-domain wire vocab), then surface it to the frontend: add the enum to
+   `ENUM_EXPORTS` in `apps/web-svelte/scripts/gen-codes.mjs` (or a constant group in
+   `Prismedia.Api/Codegen/CodesManifest.cs`), and run `pnpm api:generate` with the
+   dev API up. Never hand-maintain a parallel TS union of codes.
+3. Frontend types for codes come from orval-generated models or `codes.ts` — never a
+   hand-written `"a" | "b"` union that duplicates a backend set.
+4. External wire vocab (Stash, ffprobe) belongs in its protocol/constant
+   class, referenced — not retyped. External decode-boundary field names may stay
+   inline ONLY at the single parse site, annotated `// prism-vocab: external`.
+5. Problem/error codes: throwers and HTTP mappers both reference the shared
+   `ApiProblemCodes`; the frontend matches generated problem-code consts, never
+   English message text.
+6. NOT identifiers (leave inline): user-facing display text, log/exception messages,
+   CSS/Tailwind classes, ARIA labels, file paths, URLs, format strings, test
+   descriptions, and standard DOM key/MIME tokens.
+
+When in doubt, grep for the literal: if it already lives in an Entity-kind definition,
+a `[Code]` enum, or `codes.ts`, reference that. If it does not but is a closed set,
+you are adding the canonical home, not another copy. Enforcement belongs in Roslyn analyzers,
+architecture tests, `codes.ts` CI parity, and a frontend `no-magic-codes` lint; do
+not bypass it.
+
+## UI Composition Discipline (Shared Building Blocks)
+
+New pages are COMPOSED from shared building blocks, not hand-rolled. Before writing a
+control or layout, find the block that owns the pattern and use it.
+
+- Presentational, domain-free primitives live in `packages/ui-svelte`
+  (`Button`, `TextInput`, `Select`, `Checkbox`, `Toggle`, `Badge`, `Meter`,
+  plus shared overlays/inputs as they land). Membership test: no `$lib`,
+  `$app`, or `$lib/api` imports.
+- Domain-aware field wrappers live in `apps/web-svelte/src/lib/components/forms`
+  (`TextField`, `SearchSelect`, `TagSelect`, `EntityPicker`, `DateField`,
+  `ToggleChip`, `FormActions`, `EditFormShell`, …).
+- Entity scaffolds live in `apps/web-svelte/src/lib/components/entities`
+  (`EntityIndexPage`, `EntityGrid`, `EntityThumbnail`, and the config-driven detail
+  scaffolds as they are extracted).
+- Do NOT hand-roll raw `<input>/<select>/<button>`, search boxes, chips/badges,
+  dialogs, popovers, or detail-page scaffolding when a shared block exists or is
+  planned.
+
+## Quality Bar
+
+- TypeScript is required in the Svelte frontend and TypeScript packages.
+- C# is required for all server, persistence, and worker logic.
+- Prefer typed contracts over ad hoc object shapes.
+- When making layout, interaction, or styling changes, first look for the base component that owns the pattern and prefer changing that component unless the behavior is truly route-specific.
+- Public classes, records, interfaces, and non-trivial public methods should have documentation comments that explain domain meaning, parameters, return values, and important behavior.
+- Add tests with new logic when behavior can regress.
+- Keep app boundaries explicit: UI in `apps/web-svelte`, HTTP/persistence/worker logic in `apps/backend`, and frontend-only shared utilities in `packages/*`.
+
+## Docker
+
+- Development: `docker compose -f infra/docker/docker-compose.yml up` runs Vite, the .NET API, the .NET worker, and PostgreSQL with hot reload.
+- Production: single unified image (`ghcr.io/pauljoda/prismedia`) bundles PostgreSQL, ffmpeg, the built Svelte frontend, the .NET API, and the .NET worker.
+- The .NET API listens on port 8008, serves same-origin `/api/*` routes, and serves the built Svelte assets.
+- Always open and test Prismedia through the .NET app at `http://localhost:8008`; do not browse Vite directly because Vite is only the frontend dev server and does not provide the running app surface by itself.
+- Volumes: `/data` for database/cache/thumbnails and `/media` for the user's media library.
+
+## Tooling Expectations
+
+- Local dev stack restarts must reproduce the canonical workflow from the shell.
+- When the running stack needs to be refreshed, first tell the user the dev stack is being rebooted, run `pnpm dev:kill`, then run:
+  - `docker compose -f infra/docker/docker-compose.yml up -d postgres`
+  - `pnpm --filter @prismedia/web-svelte dev`
+  - `dotnet build apps/backend/Prismedia.slnx`
+  - `dotnet run --project apps/backend/src/Prismedia.Api/Prismedia.Api.csproj`
+  - `dotnet run --project apps/backend/src/Prismedia.Worker/Prismedia.Worker.csproj`
+- Keep Vite, API, and Worker in long-running shell sessions when handing off a refreshed stack.
+- Frontend-only Svelte changes can usually be tested through Vite/HMR. Backend, worker, database, EF migration, API contract, Docker/runtime, or other non-HMR changes require a full-stack restart before review.
+- Avoid destructive git commands unless explicitly requested.
+- Keep the repo runnable via Docker Compose.
+- Prefer lightweight validation commands before committing.

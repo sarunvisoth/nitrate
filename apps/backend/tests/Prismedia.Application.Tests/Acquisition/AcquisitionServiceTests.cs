@@ -1,0 +1,2990 @@
+using Microsoft.Extensions.Logging.Abstractions;
+using Prismedia.Application.Acquisition;
+using Prismedia.Application.Entities;
+using Prismedia.Application.Jobs;
+using Prismedia.Application.Jobs.Handlers;
+using Prismedia.Application.Requests;
+using Prismedia.Contracts.Acquisition;
+using Prismedia.Contracts.Plugins;
+using Prismedia.Contracts.System;
+using Prismedia.Domain.Entities;
+
+namespace Prismedia.Application.Tests.Acquisition;
+
+public sealed class AcquisitionServiceTests {
+    private static readonly Guid AcquisitionId = Guid.Parse("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa");
+    private static readonly Guid WantedEntityId = Guid.Parse("bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb");
+    private static readonly Guid DefaultClientId = Guid.Parse("11111111-1111-1111-1111-111111111111");
+    private static readonly Guid RecordedClientId = Guid.Parse("22222222-2222-2222-2222-222222222222");
+    private static readonly Guid CandidateId = Guid.Parse("33333333-3333-3333-3333-333333333333");
+    private static readonly Guid UsenetClientId = Guid.Parse("44444444-4444-4444-4444-444444444444");
+    private const string ClientItemId = "download-owned-by-recorded-client";
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task FreshAutomaticGrabsRevalidateWhileExplicitManualPicksKeepTheirAuthority(bool manualPick) {
+        var harness = Harness(new AcquisitionTransferInfo(AcquisitionStatus.AwaitingSelection, null, null, null));
+        PrepareQueueCandidate(harness.Store);
+        var validator = new RejectingCandidateValidator();
+        var queue = QueueService(harness, new RecordingTransferAddCoordinator(), candidateValidator: validator);
+        if (manualPick) {
+            await queue.QueueAsync(AcquisitionId, CandidateId, CancellationToken.None, manualPick: true);
+            Assert.Equal(0, validator.Calls);
+            Assert.Equal(1, harness.Downloads.AddCount);
+        } else {
+            await Assert.ThrowsAsync<AcquisitionConfigurationException>(() => queue.QueueAsync(AcquisitionId, CandidateId, CancellationToken.None));
+            Assert.Equal(1, validator.Calls);
+            Assert.Equal(0, harness.Downloads.AddCount);
+            Assert.Equal(AcquisitionStatus.AwaitingSelection, harness.Store.Status);
+        }
+    }
+
+    [Theory]
+    [InlineData(AcquisitionStatus.WaitingForRelease)]
+    [InlineData(AcquisitionStatus.ManualSearchRequired)]
+    public async Task ReleasedAcquisitionSchedulesAutomaticSearchOnce(AcquisitionStatus status) {
+        var harness = Harness(TransferInfo(RecordedClientId, status),
+            releaseTiming: new FixedReleaseTimingService(AcquisitionReleaseTimingDecision.Ready));
+        harness.Store.ImportContext = new AcquisitionImportContext(
+            AcquisitionId, "A released episode", null, null, null, null, null, null,
+            null, null, null, EntityKind.VideoEpisode, EntityId: WantedEntityId);
+        harness.Monitors.EntityMonitorStatus = MonitorStatus.Active;
+
+        Assert.True(await harness.Service.ResumeReleasedAsync(AcquisitionId, CancellationToken.None));
+        Assert.False(await harness.Service.ResumeReleasedAsync(AcquisitionId, CancellationToken.None));
+
+        Assert.Equal(AcquisitionStatus.Searching, harness.Store.Status);
+        var search = Assert.Single(harness.Queue.Requests);
+        Assert.Equal(JobType.AcquisitionSearch, search.Type);
+        Assert.Equal(JobGraphOrigin.Background, search.Origin);
+        Assert.False(AcquisitionJobPayload.Parse(search.PayloadJson!).ManualReview);
+    }
+
+    [Theory]
+    [InlineData(MonitorStatus.Paused)]
+    [InlineData(MonitorStatus.Stopping)]
+    [InlineData(MonitorStatus.DeletingFiles)]
+    [InlineData(MonitorStatus.Fulfilled)]
+    public async Task ReleasedAcquisitionPreservesInactiveMonitoring(MonitorStatus status) {
+        var harness = Harness(TransferInfo(RecordedClientId, AcquisitionStatus.WaitingForRelease),
+            releaseTiming: new FixedReleaseTimingService(AcquisitionReleaseTimingDecision.Ready));
+        harness.Store.ImportContext = new AcquisitionImportContext(
+            AcquisitionId, "A released episode", null, null, null, null, null, null,
+            null, null, null, EntityKind.VideoEpisode, EntityId: WantedEntityId);
+        harness.Monitors.EntityMonitorStatus = status;
+
+        Assert.False(await harness.Service.ResumeReleasedAsync(AcquisitionId, CancellationToken.None));
+        Assert.Empty(harness.Queue.Requests);
+        Assert.Equal(AcquisitionStatus.WaitingForRelease, harness.Store.Status);
+    }
+
+    [Fact]
+    public async Task FutureReleaseDoesNotResumeEvenWithActiveMonitor() {
+        var harness = Harness(TransferInfo(RecordedClientId, AcquisitionStatus.WaitingForRelease),
+            releaseTiming: new FixedReleaseTimingService(new AcquisitionReleaseTimingDecision(false)));
+        harness.Store.ImportContext = new AcquisitionImportContext(
+            AcquisitionId, "A released episode", null, null, null, null, null, null,
+            null, null, null, EntityKind.VideoEpisode, EntityId: WantedEntityId);
+        harness.Monitors.EntityMonitorStatus = MonitorStatus.Active;
+
+        Assert.False(await harness.Service.ResumeReleasedAsync(AcquisitionId, CancellationToken.None));
+        Assert.Empty(harness.Queue.Requests);
+    }
+
+    [Fact]
+    public async Task DateChangeResumesWaitingAcquisitionWithoutWaitingForMonitorDrain() {
+        var timing = new FixedReleaseTimingService(AcquisitionReleaseTimingDecision.Ready);
+        var harness = Harness(TransferInfo(RecordedClientId, AcquisitionStatus.WaitingForRelease), releaseTiming: timing);
+        harness.Store.ImportContext = new AcquisitionImportContext(
+            AcquisitionId, "A released episode", null, null, null, null, null, null,
+            null, null, null, EntityKind.VideoEpisode, EntityId: WantedEntityId);
+        harness.Monitors.EntityMonitorStatus = MonitorStatus.Active;
+        var handler = new AcquisitionReleaseDateChangeHandler(harness.Store, timing, harness.Monitors, harness.Service);
+
+        await handler.HandleAsync(WantedEntityId, CancellationToken.None);
+        await handler.HandleAsync(WantedEntityId, CancellationToken.None);
+
+        Assert.Equal(AcquisitionStatus.Searching, harness.Store.Status);
+        Assert.Equal(JobType.AcquisitionSearch, Assert.Single(harness.Queue.Requests).Type);
+    }
+
+    [Fact]
+    public async Task EnrichmentCompletionResumesAnAlreadyAvailableReleaseDate() {
+        var timing = new FixedReleaseTimingService(AcquisitionReleaseTimingDecision.Ready);
+        var harness = Harness(TransferInfo(RecordedClientId, AcquisitionStatus.WaitingForRelease), releaseTiming: timing);
+        harness.Store.ImportContext = new AcquisitionImportContext(
+            AcquisitionId, "A released episode", null, null, null, null, null, null,
+            null, null, null, EntityKind.VideoEpisode, EntityId: WantedEntityId);
+        harness.Monitors.EntityMonitorStatus = MonitorStatus.Active;
+        var provider = new UnusedMetadataProvider();
+        var handler = new AcquisitionEnrichJobHandler(
+            harness.Store, provider, provider, NullLogger<AcquisitionEnrichJobHandler>.Instance,
+            monitors: harness.Monitors, releaseTiming: timing, requests: harness.Service);
+        var job = new JobRunSnapshot(
+            Guid.NewGuid(), JobType.AcquisitionEnrich, JobRunStatus.Running, 0, null,
+            AcquisitionJobPayload.Serialize(AcquisitionId), null, null, null,
+            DateTimeOffset.UtcNow, DateTimeOffset.UtcNow, null);
+
+        await handler.HandleAsync(new JobContext(job, harness.Queue), CancellationToken.None);
+
+        Assert.Equal(AcquisitionStatus.Searching, harness.Store.Status);
+        Assert.Equal(JobType.AcquisitionSearch, Assert.Single(harness.Queue.Requests).Type);
+    }
+
+    [Theory]
+    [InlineData(AcquisitionStatus.Cancelled)]
+    [InlineData(AcquisitionStatus.Searching)]
+    [InlineData(AcquisitionStatus.Downloading)]
+    [InlineData(AcquisitionStatus.Imported)]
+    public async Task ReleaseNotificationDoesNotRestartOtherAcquisitionStates(AcquisitionStatus status) {
+        var harness = Harness(TransferInfo(RecordedClientId, status),
+            releaseTiming: new FixedReleaseTimingService(AcquisitionReleaseTimingDecision.Ready));
+        harness.Monitors.EntityMonitorStatus = MonitorStatus.Active;
+
+        Assert.False(await harness.Service.ResumeReleasedAsync(AcquisitionId, CancellationToken.None));
+        Assert.Equal(status, harness.Store.Status);
+        Assert.Empty(harness.Queue.Requests);
+    }
+
+    [Fact]
+    public async Task FilesReturnsTheRetainedCompletedLedger() {
+        var ledger = new AcquisitionImportFileLedger(
+            AcquisitionImportPhase.Imported,
+            [new AcquisitionImportFileLedgerEntry(
+                "stable-file", "Dune.epub", 42, "payload/Dune.epub", "Books/Dune.epub",
+                AcquisitionImportFileRole.Media, AcquisitionImportContentKind.Book,
+                AcquisitionImportFileStatus.Imported, AcquisitionImportDecision.PlaceNew, null)]);
+        var harness = Harness(new AcquisitionTransferInfo(
+            AcquisitionStatus.Imported, null, null, null, ImportResult: ledger));
+
+        var files = await harness.Service.GetFilesAsync(AcquisitionId, CancellationToken.None);
+
+        var file = Assert.Single(files.Files);
+        Assert.True(files.Imported);
+        Assert.Equal(AcquisitionImportPhase.Imported, files.Phase);
+        Assert.Equal("stable-file", file.Id);
+        Assert.Equal("payload/Dune.epub", file.SourceRelativePath);
+        Assert.Equal("Books/Dune.epub", file.DestinationRelativePath);
+    }
+
+    [Fact]
+    public async Task FilesMarksUnreadableActiveImportInformationUnavailable() {
+        var harness = Harness(new AcquisitionTransferInfo(
+            AcquisitionStatus.Importing, null, null, null, ImportResultUnavailable: true));
+
+        var files = await harness.Service.GetFilesAsync(AcquisitionId, CancellationToken.None);
+
+        Assert.False(files.Imported);
+        Assert.Empty(files.Files);
+        Assert.Equal(AcquisitionImportPhase.Importing, files.Phase);
+        Assert.True(files.ImportInformationUnavailable);
+    }
+
+    [Fact]
+    public async Task FilesReturnsPrivacySafeLiveDownloadDataBeforeImport() {
+        var harness = Harness(TransferInfo(RecordedClientId, AcquisitionStatus.Downloaded));
+        harness.Downloads.Files.Add(new DownloadItemFile("/private/downloads/Dune.epub", 42, 1));
+
+        var files = await harness.Service.GetFilesAsync(AcquisitionId, CancellationToken.None);
+
+        var file = Assert.Single(files.Files);
+        Assert.Equal(AcquisitionImportPhase.Downloaded, files.Phase);
+        Assert.Equal("Dune.epub", file.SourceRelativePath);
+        Assert.False(Path.IsPathFullyQualified(file.SourceRelativePath!));
+        Assert.Equal(AcquisitionImportFileStatus.Downloaded, file.Status);
+    }
+
+    [Fact]
+    public async Task TransferTelemetryDegradesWhenTheDownloadClientIsUnreachable() {
+        var harness = Harness(TransferInfo(RecordedClientId));
+        harness.Downloads.GetFailure = new HttpRequestException("connection refused");
+
+        var transfer = await harness.Service.GetTransferAsync(AcquisitionId, CancellationToken.None);
+
+        Assert.Null(transfer);
+    }
+
+    [Fact]
+    public async Task TransferTelemetryKeepsStatusWhenOptionalEnrichmentFails() {
+        var harness = Harness(TransferInfo(RecordedClientId));
+        harness.Downloads.PropertiesFailure = new HttpRequestException("properties unavailable");
+        harness.Downloads.PiecesFailure = new HttpRequestException("piece map unavailable");
+
+        var transfer = await harness.Service.GetTransferAsync(AcquisitionId, CancellationToken.None);
+
+        Assert.NotNull(transfer);
+        Assert.Equal(0.5, transfer.Progress);
+        Assert.Equal("downloading", transfer.State);
+        Assert.Equal(0, transfer.TotalSizeBytes);
+        Assert.Empty(transfer.PieceStates);
+    }
+
+    [Fact]
+    public async Task DownloadsUseTelemetryFromTheClientListingWithoutPerItemRequests() {
+        var harness = Harness(TransferInfo(RecordedClientId));
+        harness.Store.ActiveTransfers.Add(new ActiveTransfer(
+            Guid.NewGuid(), AcquisitionId, RecordedClientId, ClientItemId,
+            AcquisitionStatus.Downloading, 0.25, DateTimeOffset.UtcNow));
+        harness.Downloads.Items.Add(new DownloadItemStatus(
+            ClientItemId,
+            "Dune",
+            0.5,
+            "downloading",
+            false,
+            "/save",
+            "/save/Dune",
+            Properties: new DownloadItemProperties(1234, 456, 78, 90, 4, 5, "/save")));
+
+        var item = Assert.Single(await harness.Service.ListDownloadsAsync(CancellationToken.None));
+
+        Assert.Equal(1234, item.TotalSizeBytes);
+        Assert.Equal(456, item.DownloadSpeedBytesPerSecond);
+        Assert.Equal(4, item.Seeds);
+        Assert.Equal(5, item.Peers);
+        Assert.Equal(0, harness.Downloads.PropertiesCalls);
+    }
+
+    [Fact]
+    public async Task CreateNormalizesTheNamespaceAndPreservesAnOpaqueColonIdentityValue() {
+        var harness = Harness(TransferInfo(RecordedClientId));
+
+        var created = await harness.Service.CreateAndSearchAsync(
+            new AcquisitionCreateRequest(
+                "Show", null, null, null, null,
+                " TMDB ", " Series:Episode:AbC ",
+                Kind: EntityKind.VideoSeries),
+            CancellationToken.None);
+
+        Assert.Equal(
+            new ExternalIdentity("tmdb", "Series:Episode:AbC"),
+            harness.Store.CreatedMetadata!.ExternalIdentity);
+        Assert.Equal(
+            [JobType.AcquisitionSearch, JobType.AcquisitionEnrich],
+            harness.Queue.Requests.Select(request => request.Type).ToArray());
+        var search = harness.Queue.Requests[0];
+        Assert.Equal(JobGraphOrigin.Interactive, search.Origin);
+        var enrichment = harness.Queue.Requests[1];
+        Assert.Equal(JobGraphOrigin.Background, enrichment.Origin);
+        Assert.Equal(AcquisitionStatus.Searching, created.Status);
+        Assert.Equal(AcquisitionStatus.Searching, harness.Store.Status);
+        Assert.Equal(0, harness.Lifecycle.ExecuteCalls);
+    }
+
+    [Fact]
+    public async Task CreateDeclaresAndAttachesTheResolvedIndexerResourceBeforeEnqueue() {
+        var policy = new FixedAcquisitionSearchResourcePolicy(new JobResourceRequirement(
+            JobResourceKeys.AcquisitionIndexerSearch,
+            new JobExecutionPolicy(1, TimeSpan.FromMilliseconds(250))));
+        var harness = Harness(TransferInfo(RecordedClientId), searchResources: policy);
+
+        await harness.Service.CreateAndSearchAsync(
+            new AcquisitionCreateRequest(
+                "Album", null, null, null, null, null, null,
+                Kind: EntityKind.AudioLibrary),
+            CancellationToken.None);
+
+        var request = Assert.Single(harness.Queue.Requests);
+        Assert.Equal(JobResourceKeys.AcquisitionIndexerSearch, request.ResourceKey);
+        var declaration = Assert.Single(harness.Queue.ResourceDeclarations);
+        Assert.Equal(JobResourceKeys.AcquisitionIndexerSearch, declaration.Key);
+        Assert.Equal(1, declaration.MaxConcurrency);
+        Assert.Equal(TimeSpan.FromMilliseconds(250), declaration.MinimumStartInterval);
+    }
+
+    [Fact]
+    public async Task EntityBoundCreateHoldsLifecycleThroughPersistenceAndQueuePublication() {
+        var harness = Harness(TransferInfo(RecordedClientId));
+        harness.Store.BeforeCreate = () => Assert.True(harness.Lifecycle.IsHeld);
+        harness.Queue.BeforeEnqueue = () => Assert.True(harness.Lifecycle.IsHeld);
+
+        var created = await harness.Service.CreateAndSearchAsync(
+            new AcquisitionCreateRequest(
+                "Dune", null, null, null, null, null, null,
+                Kind: EntityKind.Book,
+                EntityId: WantedEntityId),
+            CancellationToken.None);
+
+        Assert.Equal(AcquisitionStatus.Searching, created.Status);
+        Assert.Equal(1, harness.Lifecycle.ExecuteCalls);
+        Assert.False(harness.Lifecycle.IsHeld);
+        Assert.Equal(JobType.AcquisitionSearch, Assert.Single(harness.Queue.Requests).Type);
+    }
+
+    [Fact]
+    public async Task ReleaseGatedCreateWaitsWithoutRefreshingAKnownDate() {
+        var timing = new FixedReleaseTimingService(new AcquisitionReleaseTimingDecision(
+            false,
+            EntityDateType.DigitalRelease,
+            SearchNotBefore: new DateOnly(2026, 8, 16),
+            Message: "Waiting for digital release."));
+        var harness = Harness(TransferInfo(RecordedClientId), releaseTiming: timing);
+
+        var created = await harness.Service.CreateAndSearchAsync(
+            new AcquisitionCreateRequest(
+                "Toy Story 5", null, null, 2026, null, "tmdb", "1084242",
+                Kind: EntityKind.Movie,
+                EntityId: WantedEntityId),
+            CancellationToken.None);
+
+        Assert.Equal(AcquisitionStatus.WaitingForRelease, created.Status);
+        Assert.Equal(AcquisitionStatus.WaitingForRelease, harness.Store.Status);
+        Assert.Empty(harness.Queue.Requests);
+        Assert.Equal(WantedEntityId, timing.EntityId);
+    }
+
+    [Fact]
+    public async Task MissingReleaseDateSchedulesOneMetadataRefresh() {
+        var timing = new FixedReleaseTimingService(new AcquisitionReleaseTimingDecision(
+            false,
+            EntityDateType.StreamingRelease,
+            WaitingForMetadata: true,
+            Message: "Waiting for streaming release date metadata."));
+        var harness = Harness(TransferInfo(RecordedClientId), releaseTiming: timing);
+
+        var created = await harness.Service.CreateAndSearchAsync(
+            new AcquisitionCreateRequest(
+                "Toy Story 5", null, null, 2026, null, "tmdb", "1084242",
+                Kind: EntityKind.Movie,
+                EntityId: WantedEntityId),
+            CancellationToken.None);
+
+        Assert.Equal(AcquisitionStatus.WaitingForRelease, created.Status);
+        Assert.Equal(JobType.AcquisitionEnrich, Assert.Single(harness.Queue.Requests).Type);
+    }
+
+    [Fact]
+    public async Task MissingReleaseDateWithoutProviderIdentityRemainsWaitingAndEnablesDatePrompt() {
+        var timing = new FixedReleaseTimingService(new AcquisitionReleaseTimingDecision(
+            false,
+            EntityDateType.PhysicalRelease,
+            WaitingForMetadata: true,
+            Message: "Waiting for physical release date metadata."));
+        var harness = Harness(TransferInfo(RecordedClientId), releaseTiming: timing);
+
+        var created = await harness.Service.CreateAndSearchAsync(
+            new AcquisitionCreateRequest(
+                "Unknown Movie", null, null, null, null, null, null,
+                Kind: EntityKind.Movie,
+                EntityId: WantedEntityId),
+            CancellationToken.None);
+
+        Assert.Equal(AcquisitionStatus.WaitingForRelease, created.Status);
+        Assert.True(created.ReleaseDateMetadataUnavailable);
+        Assert.Contains("did not return", created.StatusMessage);
+        Assert.Contains("enter the date", created.StatusMessage);
+        Assert.Empty(harness.Queue.Requests);
+    }
+
+    [Fact]
+    public async Task AlreadyLeasedCreateSeamDoesNotReenterTheEntityLifecycleLease() {
+        var harness = Harness(TransferInfo(RecordedClientId));
+
+        var created = await harness.Service.CreateAndSearchWithinEntityLifecycleAsync(
+            new AcquisitionCreateRequest(
+                "Dune", null, null, null, null, null, null,
+                Kind: EntityKind.Book,
+                EntityId: WantedEntityId),
+            CancellationToken.None);
+
+        Assert.Equal(AcquisitionStatus.Searching, created.Status);
+        Assert.Equal(0, harness.Lifecycle.ExecuteCalls);
+        Assert.Equal(JobType.AcquisitionSearch, Assert.Single(harness.Queue.Requests).Type);
+    }
+
+    [Fact]
+    public async Task CreatePublishesSearchingBeforeAnEnqueueFailure() {
+        var harness = Harness(TransferInfo(RecordedClientId));
+        harness.Queue.EnqueueFailure = new IOException("queue unavailable");
+
+        await Assert.ThrowsAsync<IOException>(() =>
+            harness.Service.CreateAndSearchAsync(
+                new AcquisitionCreateRequest(
+                    "Dune", null, null, null, null, null, null,
+                    Kind: EntityKind.Book),
+                CancellationToken.None));
+
+        Assert.Equal(AcquisitionStatus.Searching, harness.Store.Status);
+        Assert.Empty(harness.Queue.Requests);
+    }
+
+    [Fact]
+    public async Task CreateRejectsAPartialExternalIdentity() {
+        var harness = Harness(TransferInfo(RecordedClientId));
+
+        var exception = await Assert.ThrowsAsync<AcquisitionConfigurationException>(() =>
+            harness.Service.CreateAndSearchAsync(
+                new AcquisitionCreateRequest(
+                    "Show", null, null, null, null,
+                    IdentityNamespace: "tmdb", IdentityValue: null),
+                CancellationToken.None));
+
+        Assert.Equal(ApiProblemCodes.AcquisitionInvalid, exception.Code);
+        Assert.Null(harness.Store.CreatedMetadata);
+        Assert.Empty(harness.Queue.Requests);
+    }
+
+    [Fact]
+    public async Task CreateRejectsWorkWhenTheEntityLifecycleLeaseIsOwnedByCleanup() {
+        var harness = Harness(TransferInfo(RecordedClientId));
+        harness.Lifecycle.Allow = false;
+
+        var exception = await Assert.ThrowsAsync<AcquisitionConfigurationException>(() =>
+            harness.Service.CreateAndSearchAsync(
+                new AcquisitionCreateRequest(
+                    "Book", null, null, null, null, null, null,
+                    Kind: EntityKind.Book, EntityId: WantedEntityId),
+                CancellationToken.None));
+
+        Assert.Contains("cleanup", exception.Message, StringComparison.OrdinalIgnoreCase);
+        Assert.Null(harness.Store.CreatedMetadata);
+        Assert.Empty(harness.Queue.Requests);
+    }
+
+    [Fact]
+    public async Task CancelAsyncRemovesTransferFromTheRecordedClient() {
+        var harness = Harness(TransferInfo(RecordedClientId));
+
+        await harness.Service.CancelAsync(AcquisitionId, CancellationToken.None);
+
+        Assert.Equal([(RecordedClientId, ClientItemId, true)], harness.Downloads.Removals);
+        Assert.Equal(AcquisitionStatus.Cancelled, harness.Store.Status);
+        // Cancel stops the download only — the wanted placeholder and its monitor stay untouched.
+        Assert.Empty(harness.Monitors.Retargets);
+        var entry = Assert.Single(harness.History.Entries);
+        Assert.Equal(AcquisitionHistoryEvent.Removed, entry.Event);
+        Assert.Equal("Cancelled by user.", entry.Message);
+    }
+
+    [Fact]
+    public async Task ImportingAcquisitionRejectsCancelDeleteAndResearchWithoutExternalEffects() {
+        var harness = Harness(TransferInfo(RecordedClientId, AcquisitionStatus.Importing));
+
+        await Assert.ThrowsAsync<AcquisitionConfigurationException>(() =>
+            harness.Service.CancelAsync(AcquisitionId, CancellationToken.None));
+        await Assert.ThrowsAsync<AcquisitionConfigurationException>(() =>
+            harness.Service.DeleteAsync(AcquisitionId, CancellationToken.None));
+        var research = await harness.Service.ReSearchAsync(AcquisitionId, CancellationToken.None);
+
+        Assert.Equal(AcquisitionStatus.Importing, research?.Summary.Status);
+        Assert.Empty(harness.Downloads.Removals);
+        Assert.Empty(harness.Queue.Requests);
+        Assert.False(harness.Store.Deleted);
+    }
+
+    [Fact]
+    public async Task DeleteAsyncRemovesTransferFromTheRecordedClient() {
+        var harness = Harness(TransferInfo(RecordedClientId));
+
+        Assert.True(await harness.Service.DeleteAsync(AcquisitionId, CancellationToken.None));
+
+        Assert.Equal([(RecordedClientId, ClientItemId, true)], harness.Downloads.Removals);
+        Assert.True(harness.Store.Deleted);
+        Assert.Equal([AcquisitionId], harness.JobCleanup.Cancelled);
+        var entry = Assert.Single(harness.History.Entries);
+        Assert.Equal(AcquisitionHistoryEvent.Removed, entry.Event);
+        Assert.Equal("Removed by user.", entry.Message);
+    }
+
+    [Fact]
+    public async Task StrictUnmonitorDeleteKeepsTheAcquisitionWhenClientRemovalFails() {
+        var harness = Harness(TransferInfo(RecordedClientId));
+        harness.Downloads.GetFailure = new IOException("client offline");
+
+        var exception = await Assert.ThrowsAsync<AcquisitionConfigurationException>(() =>
+            harness.Service.DeleteForUnmonitorAsync(AcquisitionId, CancellationToken.None));
+
+        Assert.Contains("client offline", exception.Message, StringComparison.OrdinalIgnoreCase);
+        Assert.False(harness.Store.Deleted);
+        Assert.Equal(AcquisitionStatus.Stopping, harness.Store.Status);
+        Assert.Equal(
+            new AcquisitionTeardownClaim(AcquisitionTeardownIntent.Remove, AcquisitionStatus.Downloading),
+            harness.Store.TeardownClaim);
+        Assert.Contains(
+            harness.Store.StatusChanges,
+            change => change.Status == AcquisitionStatus.Stopping);
+        Assert.Equal([AcquisitionId], harness.JobCleanup.Cancelled);
+        Assert.Empty(harness.Downloads.Removals);
+        Assert.Empty(harness.History.Entries);
+    }
+
+    [Fact]
+    public async Task StrictUnmonitorDeleteTreatsAnAlreadyMissingClientItemAsSuccess() {
+        var harness = Harness(TransferInfo(RecordedClientId));
+        harness.Downloads.ItemExists = false;
+
+        Assert.True(await harness.Service.DeleteForUnmonitorAsync(AcquisitionId, CancellationToken.None));
+
+        Assert.True(harness.Store.Deleted);
+        Assert.Empty(harness.Downloads.Removals);
+        var entry = Assert.Single(harness.History.Entries);
+        Assert.Equal(AcquisitionHistoryEvent.Removed, entry.Event);
+    }
+
+    [Fact]
+    public async Task EntityDeletionDiscardIgnoresAMissingRecordedClient() {
+        var harness = Harness(TransferInfo(RecordedClientId), includeRecordedClient: false);
+
+        await harness.Service.DiscardTransferForEntityDeletionAsync(AcquisitionId, CancellationToken.None);
+
+        Assert.Empty(harness.Downloads.Removals);
+        Assert.NotNull(harness.Store.TransferPointer);
+    }
+
+    [Fact]
+    public async Task EntityDeletionDiscardIgnoresAnOfflineRecordedClient() {
+        var harness = Harness(TransferInfo(RecordedClientId));
+        harness.Downloads.RemoveFailure = new IOException("client offline");
+
+        await harness.Service.DiscardTransferForEntityDeletionAsync(AcquisitionId, CancellationToken.None);
+
+        Assert.Equal([(RecordedClientId, ClientItemId, true)], harness.Downloads.Removals);
+        Assert.NotNull(harness.Store.TransferPointer);
+    }
+
+    [Fact]
+    public async Task CancelAsyncDoesNotRemoveFromDefaultWhenRecordedClientIsMissing() {
+        var harness = Harness(TransferInfo(RecordedClientId), includeRecordedClient: false);
+
+        await harness.Service.CancelAsync(AcquisitionId, CancellationToken.None);
+
+        Assert.Empty(harness.Downloads.Removals);
+        Assert.Equal(AcquisitionStatus.Cancelled, harness.Store.Status);
+        Assert.Empty(harness.Monitors.Retargets);
+        var entry = Assert.Single(harness.History.Entries);
+        Assert.Equal(AcquisitionHistoryEvent.Removed, entry.Event);
+        Assert.Equal("Cancelled by user.", entry.Message);
+    }
+
+    [Fact]
+    public async Task DeleteAsyncKeepsThePointerWhenRecordedClientIsMissing() {
+        var harness = Harness(TransferInfo(RecordedClientId), includeRecordedClient: false);
+
+        var exception = await Assert.ThrowsAsync<AcquisitionConfigurationException>(() =>
+            harness.Service.DeleteAsync(AcquisitionId, CancellationToken.None));
+
+        Assert.Contains("recorded download client", exception.Message, StringComparison.OrdinalIgnoreCase);
+        Assert.Empty(harness.Downloads.Removals);
+        Assert.False(harness.Store.Deleted);
+        Assert.NotNull(harness.Store.TransferPointer);
+        Assert.Equal(AcquisitionStatus.Stopping, harness.Store.Status);
+        Assert.Equal(AcquisitionTeardownIntent.Remove, harness.Store.TeardownClaim?.Intent);
+        Assert.Empty(harness.History.Entries);
+    }
+
+    [Fact]
+    public async Task DeleteAsyncWithPreserveWantedLoopRetargetsTheMonitorAtTheClone() {
+        var harness = Harness(TransferInfo(RecordedClientId));
+        var cloneId = Guid.NewGuid();
+        harness.Store.CloneResult = cloneId;
+
+        Assert.True(await harness.Service.DeleteAsync(AcquisitionId, CancellationToken.None, preserveWantedLoop: true));
+
+        // The download and record are gone, but the monitoring loop survives on the fresh clone.
+        Assert.True(harness.Store.Deleted);
+        Assert.Equal([(AcquisitionId, cloneId)], harness.Monitors.Retargets);
+        Assert.Equal(cloneId, harness.Store.TeardownReplacementId);
+    }
+
+    [Fact]
+    public async Task PreserveWantedDeleteClearsLocalStateWhenTheRemoteClientIsOffline() {
+        var harness = Harness(TransferInfo(RecordedClientId));
+        var replacementId = Guid.NewGuid();
+        harness.Store.CloneResult = replacementId;
+        harness.Downloads.RemoveFailure = new IOException("client offline");
+
+        Assert.True(await harness.Service.DeleteAsync(
+            AcquisitionId,
+            CancellationToken.None,
+            preserveWantedLoop: true));
+
+        Assert.True(harness.Store.Deleted);
+        Assert.Equal(replacementId, harness.Store.TeardownReplacementId);
+        Assert.Equal([(AcquisitionId, replacementId)], harness.Monitors.Retargets);
+        Assert.Equal(0, harness.Store.CloneCalls);
+    }
+
+    [Fact]
+    public async Task PreserveWantedDeleteDestructivelyClearsAPartialImportBeforeStartingOver() {
+        var harness = Harness(TransferInfo(RecordedClientId, AcquisitionStatus.Failed));
+        var import = PartialBookImportContext();
+        var replacementId = Guid.NewGuid();
+        harness.Store.ImportContext = import;
+        harness.Store.HasResumableImport = true;
+        harness.Store.CloneResult = replacementId;
+
+        Assert.True(await harness.Service.DeleteAsync(
+            AcquisitionId,
+            CancellationToken.None,
+            preserveWantedLoop: true));
+
+        Assert.Equal([import], harness.ImportCleanup.Cleaned);
+        Assert.Equal([AcquisitionId], harness.JobCleanup.Cancelled);
+        Assert.Equal([(AcquisitionId, replacementId)], harness.Monitors.Retargets);
+        Assert.True(harness.Store.Deleted);
+    }
+
+    [Fact]
+    public async Task RejectManualImportBlocklistsSelectedReleaseAndStartsFreshSearch() {
+        var harness = Harness(TransferInfo(RecordedClientId, AcquisitionStatus.ManualImportRequired));
+        var replacementId = Guid.NewGuid();
+        var selected = new SelectedRelease(
+            "Sesame Street Season 9",
+            "Prowlarr",
+            "ABC123");
+        harness.Store.CloneResult = replacementId;
+        await harness.Store.SetSelectedReleaseAsync(AcquisitionId, selected, CancellationToken.None);
+
+        Assert.True(await harness.Service.RejectManualImportAsync(AcquisitionId, CancellationToken.None));
+
+        var rejected = Assert.Single(harness.Blocklist.Requests);
+        Assert.Equal(selected.Identity, rejected.Identity);
+        Assert.Equal(BlocklistReason.Manual, rejected.Reason);
+        Assert.Equal(AcquisitionId, rejected.AcquisitionId);
+        Assert.Equal("Rejected during manual import review.", rejected.Message);
+        Assert.Equal([(RecordedClientId, ClientItemId, true)], harness.Downloads.Removals);
+        Assert.Equal([(AcquisitionId, replacementId)], harness.Monitors.Retargets);
+        Assert.Equal(AcquisitionStatus.Searching, harness.Store.ReplacementStatus);
+        var search = Assert.Single(harness.Queue.Requests);
+        Assert.Equal(JobType.AcquisitionSearch, search.Type);
+        Assert.Equal(replacementId.ToString(), search.TargetEntityId);
+        Assert.True(harness.Store.Deleted);
+    }
+
+    [Fact]
+    public async Task PreserveWantedDeleteCanStopAndClearAStuckImportingAttempt() {
+        var harness = Harness(TransferInfo(RecordedClientId, AcquisitionStatus.Importing));
+        var import = PartialBookImportContext();
+        var replacementId = Guid.NewGuid();
+        harness.Store.ImportContext = import;
+        harness.Store.HasResumableImport = true;
+        harness.Store.CloneResult = replacementId;
+
+        Assert.True(await harness.Service.DeleteAsync(
+            AcquisitionId,
+            CancellationToken.None,
+            preserveWantedLoop: true));
+
+        Assert.Equal([import], harness.ImportCleanup.Cleaned);
+        Assert.Equal(AcquisitionStatus.Stopping, harness.Store.Status);
+        Assert.True(harness.Store.Deleted);
+    }
+
+    [Fact]
+    public async Task EntityRemovalClaimCanTakeOverAStuckImportAndClearItsPartialArtifacts() {
+        var harness = Harness(TransferInfo(RecordedClientId, AcquisitionStatus.Importing));
+        var import = PartialBookImportContext();
+        harness.Store.ImportContext = import;
+
+        Assert.True(await harness.Service.ClaimEntityRemovalTeardownAsync(
+            AcquisitionId,
+            CancellationToken.None));
+
+        Assert.Equal(
+            new AcquisitionTeardownClaim(AcquisitionTeardownIntent.Remove, AcquisitionStatus.Importing),
+            harness.Store.TeardownClaim);
+        Assert.Equal(AcquisitionStatus.Stopping, harness.Store.Status);
+        Assert.Equal([AcquisitionId], harness.JobCleanup.Cancelled);
+        Assert.Equal([import], harness.ImportCleanup.Cleaned);
+    }
+
+    [Fact]
+    public async Task EntityRemovalClaimOverridesAStuckReacquireClaim() {
+        var harness = Harness(TransferInfo(RecordedClientId, AcquisitionStatus.Stopping));
+        harness.Store.ForceTeardownClaim(new AcquisitionTeardownClaim(
+            AcquisitionTeardownIntent.Reacquire,
+            AcquisitionStatus.Imported));
+
+        Assert.True(await harness.Service.ClaimEntityRemovalTeardownAsync(
+            AcquisitionId,
+            CancellationToken.None));
+
+        Assert.Equal(
+            new AcquisitionTeardownClaim(AcquisitionTeardownIntent.Remove, AcquisitionStatus.Imported),
+            harness.Store.TeardownClaim);
+        Assert.Equal([AcquisitionId], harness.JobCleanup.Cancelled);
+    }
+
+    [Fact]
+    public async Task PreserveWantedDeleteRemovesCloneWhenStoppingClaimWinsRetargetRace() {
+        var harness = Harness(TransferInfo(RecordedClientId));
+        var cloneId = Guid.NewGuid();
+        harness.Store.CloneResult = cloneId;
+        harness.Monitors.RetargetSucceeds = false;
+
+        Assert.True(await harness.Service.DeleteAsync(
+            AcquisitionId, CancellationToken.None, preserveWantedLoop: true));
+
+        Assert.Equal([cloneId, AcquisitionId], harness.Store.DeletedIds);
+        Assert.Equal([(AcquisitionId, cloneId)], harness.Monitors.Retargets);
+        Assert.Equal([(RecordedClientId, ClientItemId, true)], harness.Downloads.Removals);
+    }
+
+    [Fact]
+    public async Task DeleteAsyncWithoutPreserveNeverClonesOrRetargets() {
+        var harness = Harness(TransferInfo(RecordedClientId));
+        harness.Store.CloneResult = Guid.NewGuid();
+
+        Assert.True(await harness.Service.DeleteAsync(AcquisitionId, CancellationToken.None));
+
+        Assert.True(harness.Store.Deleted);
+        Assert.Empty(harness.Monitors.Retargets);
+    }
+
+    [Fact]
+    public async Task QueueNeverContactsTheClientWhenTeardownWinsBeforeTheTransferAddLease() {
+        var harness = Harness(new AcquisitionTransferInfo(
+            AcquisitionStatus.AwaitingSelection, null, null, null));
+        PrepareQueueCandidate(harness.Store);
+        var transferAdds = new RecordingTransferAddCoordinator {
+            OnAcquire = () => harness.Store.ForceStatus(AcquisitionStatus.Stopping),
+            Allow = false
+        };
+        var queue = QueueService(harness, transferAdds);
+
+        var exception = await Assert.ThrowsAsync<AcquisitionConfigurationException>(() =>
+            queue.QueueAsync(AcquisitionId, CandidateId, CancellationToken.None));
+
+        Assert.Contains("began cleanup", exception.Message, StringComparison.OrdinalIgnoreCase);
+        Assert.Equal(0, harness.Downloads.AddCount);
+        Assert.Null(harness.Store.TransferPointer?.ClientItemId);
+        Assert.Null(harness.Store.TransferPointer?.State);
+        Assert.Equal(AcquisitionStatus.Stopping, harness.Store.Status);
+        Assert.Equal(1, transferAdds.AcquireCount);
+    }
+
+    [Fact]
+    public async Task AutomaticQueueCannotReviveACancelledSearchResult() {
+        var harness = Harness(new AcquisitionTransferInfo(
+            AcquisitionStatus.Cancelled, null, null, null));
+        PrepareQueueCandidate(harness.Store);
+
+        var exception = await Assert.ThrowsAsync<AcquisitionConfigurationException>(() =>
+            QueueService(harness, new RecordingTransferAddCoordinator())
+                .QueueAsync(
+                    AcquisitionId,
+                    CandidateId,
+                    CancellationToken.None,
+                    requiredStatus: AcquisitionStatus.AwaitingSelection));
+
+        Assert.Contains("changed", exception.Message, StringComparison.OrdinalIgnoreCase);
+        Assert.Equal(AcquisitionStatus.Cancelled, harness.Store.Status);
+        Assert.Equal(0, harness.Downloads.AddCount);
+        Assert.Empty(harness.Store.StatusChanges);
+    }
+
+    [Fact]
+    public async Task OfflineDownloadClientWaitsAndRetainsTheExactHandoffForRetry() {
+        var harness = Harness(new AcquisitionTransferInfo(
+            AcquisitionStatus.AwaitingSelection,
+            null,
+            null,
+            null));
+        PrepareQueueCandidate(harness.Store);
+        harness.Downloads.AddFailure = new HttpRequestException("connection refused");
+
+        var exception = await Assert.ThrowsAsync<AcquisitionConfigurationException>(() =>
+            QueueService(harness, new RecordingTransferAddCoordinator())
+                .QueueAsync(AcquisitionId, CandidateId, CancellationToken.None));
+
+        Assert.Equal(ApiProblemCodes.DownloadClientUnreachable, exception.Code);
+        Assert.Equal(AcquisitionStatus.WaitingForDownloadClient, harness.Store.Status);
+        Assert.Equal("abc123", harness.Store.TransferPointer?.ClientItemId);
+        Assert.Equal(TransferOwnershipState.Adding.ToCode(), harness.Store.TransferPointer?.State);
+        Assert.Null(harness.Store.SelectedRelease);
+    }
+
+    [Fact]
+    public async Task RecoveredDownloadClientCompletesTheWaitingHandoff() {
+        var harness = Harness(new AcquisitionTransferInfo(
+            AcquisitionStatus.AwaitingSelection,
+            null,
+            null,
+            null));
+        PrepareQueueCandidate(harness.Store);
+        harness.Downloads.AddFailure = new HttpRequestException("connection refused");
+        var queue = QueueService(harness, new RecordingTransferAddCoordinator());
+        await Assert.ThrowsAsync<AcquisitionConfigurationException>(() =>
+            queue.QueueAsync(AcquisitionId, CandidateId, CancellationToken.None));
+
+        harness.Downloads.AddFailure = null;
+        await QueueService(harness, new RecordingTransferAddCoordinator())
+            .QueueAsync(AcquisitionId, CandidateId, CancellationToken.None);
+
+        Assert.Equal(AcquisitionStatus.Queued, harness.Store.Status);
+        Assert.Equal(1, harness.Downloads.AddCount);
+        Assert.Equal("abc123", harness.Store.TransferPointer?.ClientItemId);
+        Assert.Null(harness.Store.TransferPointer?.State);
+        Assert.Equal("Dune.2021.1080p", harness.Store.SelectedRelease?.Title);
+    }
+
+    [Fact]
+    public async Task QueueOpensTransferWaitBeforeResolvingTheLastReviewSignal() {
+        var harness = Harness(new AcquisitionTransferInfo(
+            AcquisitionStatus.AwaitingSelection,
+            null,
+            null,
+            null));
+        PrepareQueueCandidate(harness.Store);
+        var graphId = Guid.NewGuid();
+        harness.Store.JobGraphId = graphId;
+        var graphs = new RecordingHandoffGraph(graphId, AcquisitionId);
+
+        var detail = await QueueService(harness, new RecordingTransferAddCoordinator(), graphs)
+            .QueueAsync(AcquisitionId, CandidateId, CancellationToken.None);
+
+        Assert.Equal(AcquisitionStatus.Queued, detail?.Summary.Status);
+        Assert.Equal(["open:external-transfer", "resolve:review"], graphs.Operations);
+        Assert.Equal(1, harness.Downloads.AddCount);
+    }
+
+    [Fact]
+    public async Task TerminalLinkedGraphDoesNotTurnADurableHandoffIntoAClientOutage() {
+        var harness = Harness(new AcquisitionTransferInfo(
+            AcquisitionStatus.AwaitingSelection,
+            null,
+            null,
+            null));
+        PrepareQueueCandidate(harness.Store);
+        var graphId = Guid.NewGuid();
+        harness.Store.JobGraphId = graphId;
+        var graphs = new RecordingHandoffGraph(graphId, AcquisitionId, JobGraphStatus.Completed);
+
+        var detail = await QueueService(harness, new RecordingTransferAddCoordinator(), graphs)
+            .QueueAsync(AcquisitionId, CandidateId, CancellationToken.None);
+
+        Assert.Equal(AcquisitionStatus.Queued, detail?.Summary.Status);
+        Assert.Empty(graphs.Operations);
+        Assert.Equal("new-client-item", harness.Store.TransferPointer?.ClientItemId);
+    }
+
+    [Fact]
+    public async Task QueueRetainsACrashRecoveryPointerWhenTeardownWinsBeforeItsRecoveryLease() {
+        var harness = Harness(new AcquisitionTransferInfo(
+            AcquisitionStatus.Queued,
+            null,
+            "abc123",
+            RecordedClientId,
+            "prismedia",
+            TransferOwnershipState.Adding.ToCode()));
+        PrepareQueueCandidate(harness.Store);
+        var transferAdds = new RecordingTransferAddCoordinator {
+            OnAcquire = () => harness.Store.ForceStatus(AcquisitionStatus.Stopping),
+            Allow = false
+        };
+
+        await Assert.ThrowsAsync<AcquisitionConfigurationException>(() =>
+            QueueService(harness, transferAdds)
+                .QueueAsync(AcquisitionId, CandidateId, CancellationToken.None));
+
+        Assert.Equal(0, harness.Downloads.AddCount);
+        Assert.Equal("abc123", harness.Store.TransferPointer?.ClientItemId);
+        Assert.Equal(TransferOwnershipState.Adding.ToCode(), harness.Store.TransferPointer?.State);
+        Assert.Equal(AcquisitionStatus.Stopping, harness.Store.Status);
+    }
+
+    [Fact]
+    public async Task QueueKeepsDurableCorrelationWhenCompletionLosesCallerCancellation() {
+        var harness = Harness(new AcquisitionTransferInfo(
+            AcquisitionStatus.AwaitingSelection, null, null, null));
+        PrepareQueueCandidate(harness.Store);
+        harness.Store.CreateTransferResult = false;
+        using var callerCancellation = new CancellationTokenSource();
+        harness.Downloads.OnAdd = callerCancellation.Cancel;
+        var transferAdds = new RecordingTransferAddCoordinator();
+        var queue = QueueService(harness, transferAdds);
+
+        await Assert.ThrowsAsync<AcquisitionConfigurationException>(() =>
+            queue.QueueAsync(AcquisitionId, CandidateId, callerCancellation.Token));
+
+        Assert.Equal(1, harness.Downloads.AddCount);
+        Assert.False(harness.Store.CreateTransferCancellationToken.CanBeCanceled);
+        Assert.Empty(harness.Downloads.RemovalCancellationTokens);
+        Assert.Equal("abc123", harness.Store.TransferPointer?.ClientItemId);
+        Assert.Equal(TransferOwnershipState.Adding.ToCode(), harness.Store.TransferPointer?.State);
+        Assert.False(transferAdds.Lease.Committed);
+    }
+
+    [Fact]
+    public async Task QueueCompensatesANewRemoteAddWhenCancellationWinsFinalization() {
+        var harness = Harness(new AcquisitionTransferInfo(
+            AcquisitionStatus.AwaitingSelection, null, null, null));
+        PrepareQueueCandidate(harness.Store);
+        harness.Store.CreateTransferResult = false;
+        harness.Store.BeforeCreateTransfer = () => harness.Store.ForceStatus(AcquisitionStatus.Cancelled);
+
+        var exception = await Assert.ThrowsAsync<AcquisitionConfigurationException>(() =>
+            QueueService(harness, new RecordingTransferAddCoordinator())
+                .QueueAsync(AcquisitionId, CandidateId, CancellationToken.None));
+
+        Assert.Contains("changed", exception.Message, StringComparison.OrdinalIgnoreCase);
+        Assert.Equal(AcquisitionStatus.Cancelled, harness.Store.Status);
+        Assert.Equal([(RecordedClientId, "new-client-item", true)], harness.Downloads.Removals);
+        Assert.Null(harness.Store.TransferPointer?.ClientItemId);
+        Assert.Null(harness.Store.TransferPointer?.State);
+    }
+
+    [Fact]
+    public async Task QueueRetainsDurableOwnershipWhenCancellationCompensationCannotReachTheClient() {
+        var harness = Harness(new AcquisitionTransferInfo(
+            AcquisitionStatus.AwaitingSelection, null, null, null));
+        PrepareQueueCandidate(harness.Store);
+        harness.Store.CreateTransferResult = false;
+        harness.Store.BeforeCreateTransfer = () => harness.Store.ForceStatus(AcquisitionStatus.Cancelled);
+        harness.Downloads.RemoveFailure = new IOException("client offline");
+
+        var exception = await Assert.ThrowsAsync<AcquisitionConfigurationException>(() =>
+            QueueService(harness, new RecordingTransferAddCoordinator())
+                .QueueAsync(AcquisitionId, CandidateId, CancellationToken.None));
+
+        Assert.Equal(ApiProblemCodes.DownloadClientUnreachable, exception.Code);
+        Assert.Contains("durable ownership marker", exception.Message, StringComparison.OrdinalIgnoreCase);
+        Assert.Equal(AcquisitionStatus.Cancelled, harness.Store.Status);
+        Assert.Equal("abc123", harness.Store.TransferPointer?.ClientItemId);
+        Assert.Equal(TransferOwnershipState.Adding.ToCode(), harness.Store.TransferPointer?.State);
+    }
+
+    [Fact]
+    public async Task ManualTorrentQueueCompensatesANewRemoteAddWhenCancellationWinsFinalization() {
+        var harness = Harness(new AcquisitionTransferInfo(
+            AcquisitionStatus.AwaitingSelection, null, null, null));
+        harness.Store.CreateTransferResult = false;
+        harness.Store.BeforeCreateTransfer = () => harness.Store.ForceStatus(AcquisitionStatus.Cancelled);
+
+        var exception = await Assert.ThrowsAsync<AcquisitionConfigurationException>(() =>
+            QueueService(harness, new RecordingTransferAddCoordinator())
+                .QueueManualTorrentAsync(
+                    AcquisitionId,
+                    "Dune.torrent",
+                    [1, 2, 3],
+                    CancellationToken.None));
+
+        Assert.Contains("changed", exception.Message, StringComparison.OrdinalIgnoreCase);
+        Assert.Equal(AcquisitionStatus.Cancelled, harness.Store.Status);
+        Assert.Equal([(RecordedClientId, "new-client-item", true)], harness.Downloads.Removals);
+        Assert.Null(harness.Store.TransferPointer?.ClientItemId);
+        Assert.Null(harness.Store.TransferPointer?.State);
+    }
+
+    [Fact]
+    public async Task QueueRetryRecoversTheRemoteItemWithoutASecondPlaceholderOrAdd() {
+        var harness = Harness(new AcquisitionTransferInfo(
+            AcquisitionStatus.AwaitingSelection, null, null, null));
+        PrepareQueueCandidate(harness.Store);
+        harness.Store.CreateTransferResult = false;
+        var firstLease = new RecordingTransferAddCoordinator();
+        var queue = QueueService(harness, firstLease);
+        await Assert.ThrowsAsync<AcquisitionConfigurationException>(() =>
+            queue.QueueAsync(AcquisitionId, CandidateId, CancellationToken.None));
+
+        harness.Store.CreateTransferResult = true;
+        var retryLease = new RecordingTransferAddCoordinator();
+        await QueueService(harness, retryLease)
+            .QueueAsync(AcquisitionId, CandidateId, CancellationToken.None);
+
+        Assert.Equal(1, harness.Store.BeginTransferAddCalls);
+        Assert.Equal(1, harness.Downloads.AddCount);
+        Assert.Null(harness.Store.TransferPointer?.State);
+        Assert.Equal("abc123", harness.Store.TransferPointer?.ClientItemId);
+        Assert.True(retryLease.Lease.Committed);
+    }
+
+    [Fact]
+    public async Task CompletedQueueReplayReturnsTheSameDurableHandoffWithoutAnotherAdd() {
+        var harness = Harness(new AcquisitionTransferInfo(
+            AcquisitionStatus.AwaitingSelection, null, null, null));
+        PrepareQueueCandidate(harness.Store);
+        var queue = QueueService(harness, new RecordingTransferAddCoordinator());
+
+        var first = await queue.QueueAsync(AcquisitionId, CandidateId, CancellationToken.None);
+        harness.Store.SetTransferRuntimeState(AcquisitionStatus.Downloading.ToCode());
+        var replay = await queue.QueueAsync(AcquisitionId, CandidateId, CancellationToken.None);
+
+        Assert.Equal(first, replay);
+        Assert.Equal(1, harness.Store.BeginTransferAddCalls);
+        Assert.Equal(1, harness.Downloads.AddCount);
+        Assert.Equal("new-client-item", harness.Store.TransferPointer?.ClientItemId);
+        Assert.Equal(AcquisitionStatus.Downloading.ToCode(), harness.Store.TransferPointer?.State);
+    }
+
+    [Fact]
+    public async Task ReviewedSoulseekReleaseCompletesTheDurableTransferHandoff() {
+        var harness = Harness(new AcquisitionTransferInfo(
+            AcquisitionStatus.AwaitingSelection, null, null, null));
+        PrepareQueueCandidate(harness.Store);
+        harness.Store.QueueCandidate = harness.Store.QueueCandidate! with {
+            Title = "Hamilton album",
+            IndexerName = "Soulseek",
+            DownloadUrl = "slskd://reviewed-release",
+            InfoHash = null,
+            Protocol = DownloadProtocol.Soulseek
+        };
+
+        var detail = await QueueService(harness, new RecordingTransferAddCoordinator())
+            .QueueAsync(
+                AcquisitionId,
+                CandidateId,
+                CancellationToken.None,
+                manualPick: true);
+
+        Assert.Equal(AcquisitionStatus.Queued, detail?.Summary.Status);
+        Assert.Equal(1, harness.Store.BeginTransferAddCalls);
+        Assert.Equal(1, harness.Downloads.AddCount);
+        Assert.Equal("new-client-item", harness.Store.TransferPointer?.ClientItemId);
+        Assert.Null(harness.Store.TransferPointer?.State);
+        Assert.Equal("Hamilton album", harness.Store.SelectedRelease?.Title);
+        Assert.True(harness.Store.SelectedRelease?.ManualPick);
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task InstalledUpgradeCannotQueueAnotherReleaseBeforeReadinessFinishes(bool manualPick) {
+        var harness = Harness(new AcquisitionTransferInfo(AcquisitionStatus.Failed, null, ClientItemId, RecordedClientId));
+        PrepareQueueCandidate(harness.Store);
+        harness.Store.ImportContext = PartialBookImportContext() with {
+            ImportPlacementCheckpoint = null,
+            UpgradeOfAcquisitionId = Guid.NewGuid(),
+            FinalSourcePath = "/library/Dune.epub"
+        };
+        harness.Store.HasResumableImport = true;
+
+        var exception = await Assert.ThrowsAsync<AcquisitionConfigurationException>(() =>
+            QueueService(harness, new RecordingTransferAddCoordinator()).QueueAsync(
+                AcquisitionId, CandidateId, CancellationToken.None, manualPick: manualPick));
+
+        Assert.Contains("partially applied import", exception.Message, StringComparison.OrdinalIgnoreCase);
+        Assert.Empty(harness.ImportCleanup.Cleaned);
+        Assert.Empty(harness.Downloads.Removals);
+        Assert.Equal(0, harness.Downloads.AddCount);
+        Assert.Equal(AcquisitionStatus.Failed, harness.Store.Status);
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task PreparedAtomicReplacementCannotBeOverriddenOrCleanedByAnotherRelease(bool manualPick) {
+        var harness = Harness(new AcquisitionTransferInfo(AcquisitionStatus.Failed, null, ClientItemId, RecordedClientId));
+        PrepareQueueCandidate(harness.Store);
+        var parentId = Guid.NewGuid();
+        var checkpoint = new AtomicUpgradeCheckpoint(Guid.NewGuid(), Guid.NewGuid(), parentId, Guid.NewGuid(), Guid.NewGuid(),
+            EntityKind.Book, new("/library/Dune.epub", "/downloads/Dune.epub", new(10, DateTime.UtcNow),
+                new(20, DateTime.UtcNow), BookFormatTier.Reflowable), "/downloads/Dune.epub", ClientItemId,
+            new("Dune (retail) (epub)", null, null));
+        harness.Store.ImportContext = PartialBookImportContext() with {
+            ImportPlacementCheckpoint = null, UpgradeOfAcquisitionId = parentId, AtomicUpgradeCheckpoint = checkpoint
+        };
+        harness.Store.HasResumableImport = true;
+        Assert.False(await ImportCheckpointLifecycle.CanAbandonAsync(harness.Store.ImportContext, default));
+
+        var exception = await Assert.ThrowsAsync<AcquisitionConfigurationException>(() =>
+            QueueService(harness, new RecordingTransferAddCoordinator()).QueueAsync(
+                AcquisitionId, CandidateId, CancellationToken.None, manualPick: manualPick));
+
+        Assert.Contains("partially applied import", exception.Message, StringComparison.OrdinalIgnoreCase);
+        Assert.Empty(harness.ImportCleanup.Cleaned);
+        Assert.Empty(harness.Downloads.Removals);
+        Assert.Equal(0, harness.Downloads.AddCount);
+        Assert.Equal(AcquisitionStatus.Failed, harness.Store.Status);
+    }
+
+    [Theory]
+    [InlineData(false, "cancel")]
+    [InlineData(true, "cancel")]
+    [InlineData(false, "search")]
+    [InlineData(true, "search")]
+    [InlineData(false, "remove")]
+    [InlineData(true, "remove")]
+    public async Task AtomicRecoveryCannotBeDiscardedByOrdinaryAcquisitionActions(bool installed, string action) {
+        var harness = Harness(TransferInfo(RecordedClientId, AcquisitionStatus.Failed));
+        var parent = Guid.NewGuid();
+        harness.Store.ImportContext = PartialBookImportContext() with {
+            ImportPlacementCheckpoint = null,
+            UpgradeOfAcquisitionId = parent,
+            FinalSourcePath = installed ? "/library/Dune.epub" : null,
+            AtomicUpgradeCheckpoint = installed ? null : new(Guid.NewGuid(), Guid.NewGuid(), parent, Guid.NewGuid(), Guid.NewGuid(),
+                EntityKind.Book, new("/library/Dune.epub", "/downloads/Dune.epub", new(10, DateTime.UtcNow),
+                    new(20, DateTime.UtcNow), BookFormatTier.Reflowable), "/downloads/Dune.epub", ClientItemId,
+                new("Dune (retail) (epub)", null, null))
+        };
+        if (action == "remove") {
+            var eligibility = await harness.Service.GetRemovalEligibilityAsync(AcquisitionId, default);
+            Assert.False(eligibility.CanRemove);
+            Assert.Contains("partially applied import", eligibility.Message, StringComparison.OrdinalIgnoreCase);
+        } else {
+            var error = await Assert.ThrowsAsync<AcquisitionConfigurationException>(() => action == "cancel"
+                ? harness.Service.CancelAsync(AcquisitionId, default) : harness.Service.ReSearchAsync(AcquisitionId, default));
+            Assert.Contains("partially applied import", error.Message, StringComparison.OrdinalIgnoreCase);
+        }
+        Assert.Empty(harness.Store.StatusChanges);
+        Assert.Empty(harness.Downloads.Removals);
+        Assert.Empty(harness.Queue.Requests);
+        Assert.False(harness.Store.Deleted);
+    }
+
+    [Fact]
+    public async Task ManualReleasePickDiscardsPartialImportBeforeQueueingTheOverride() {
+        var harness = Harness(new AcquisitionTransferInfo(
+            AcquisitionStatus.AwaitingSelection,
+            FinalSourcePath: null,
+            ClientItemId,
+            RecordedClientId));
+        PrepareQueueCandidate(harness.Store);
+        var import = PartialBookImportContext();
+        harness.Store.ImportContext = import;
+        harness.Store.HasResumableImport = true;
+
+        var detail = await QueueService(harness, new RecordingTransferAddCoordinator())
+            .QueueAsync(
+                AcquisitionId,
+                CandidateId,
+                CancellationToken.None,
+                manualPick: true);
+
+        Assert.Equal(AcquisitionStatus.Queued, detail?.Summary.Status);
+        Assert.Equal([import], harness.ImportCleanup.Cleaned);
+        Assert.Equal(1, harness.Store.ClearedPlacementCheckpoints);
+        Assert.Equal([(RecordedClientId, ClientItemId, true)], harness.Downloads.Removals);
+        Assert.Equal(1, harness.Downloads.AddCount);
+        Assert.Equal("Dune.2021.1080p", harness.Store.SelectedRelease?.Title);
+        Assert.True(harness.Store.SelectedRelease?.ManualPick);
+    }
+
+    [Fact]
+    public async Task AutomaticQueueStillRefusesToSupersedeAPartialImport() {
+        var harness = Harness(new AcquisitionTransferInfo(
+            AcquisitionStatus.AwaitingSelection,
+            FinalSourcePath: null,
+            ClientItemId,
+            RecordedClientId));
+        PrepareQueueCandidate(harness.Store);
+        harness.Store.ImportContext = PartialBookImportContext();
+        harness.Store.HasResumableImport = true;
+
+        var exception = await Assert.ThrowsAsync<AcquisitionConfigurationException>(() =>
+            QueueService(harness, new RecordingTransferAddCoordinator())
+                .QueueAsync(
+                    AcquisitionId,
+                    CandidateId,
+                    CancellationToken.None,
+                    manualPick: false));
+
+        Assert.Contains("partially applied import", exception.Message, StringComparison.OrdinalIgnoreCase);
+        Assert.Empty(harness.ImportCleanup.Cleaned);
+        Assert.Equal(0, harness.Store.ClearedPlacementCheckpoints);
+        Assert.Empty(harness.Downloads.Removals);
+        Assert.Equal(0, harness.Downloads.AddCount);
+        Assert.Equal(AcquisitionStatus.AwaitingSelection, harness.Store.Status);
+    }
+
+    [Fact]
+    public async Task QueueRecoveryDoesNotAddAgainWhenTheOriginalHandoffFinishesWhileItWaitsForTheLease() {
+        var harness = Harness(new AcquisitionTransferInfo(
+            AcquisitionStatus.Queued,
+            null,
+            "abc123",
+            RecordedClientId,
+            "prismedia",
+            TransferOwnershipState.Adding.ToCode()));
+        PrepareQueueCandidate(harness.Store);
+        harness.Downloads.ItemExists = false;
+        var transferAdds = new RecordingTransferAddCoordinator {
+            OnAcquire = () => harness.Store.CompleteTransferAddAsync(
+                AcquisitionId,
+                RecordedClientId,
+                "abc123",
+                "original-client-item",
+                new SelectedRelease("Dune", "Indexer", "abc123"),
+                "Sent to download client.",
+                CancellationToken.None).GetAwaiter().GetResult()
+        };
+
+        var validator = new RejectingCandidateValidator();
+        await QueueService(harness, transferAdds, candidateValidator: validator)
+            .QueueAsync(AcquisitionId, CandidateId, CancellationToken.None);
+
+        Assert.Equal(0, harness.Downloads.AddCount);
+        Assert.Equal("original-client-item", harness.Store.TransferPointer?.ClientItemId);
+        Assert.True(transferAdds.Lease.Committed);
+        Assert.Equal(0, validator.Calls);
+    }
+
+    [Fact]
+    public async Task UnresolvedInitialAddReleasesThePlaceholderAndRestoresSelection() {
+        var harness = Harness(new AcquisitionTransferInfo(
+            AcquisitionStatus.AwaitingSelection, null, null, null));
+        PrepareQueueCandidate(harness.Store);
+        harness.Downloads.AddFailure = new DownloadClientAddUnresolvedException("Duplicate add could not be identified.");
+        var transferAdds = new RecordingTransferAddCoordinator();
+
+        var exception = await Assert.ThrowsAsync<AcquisitionConfigurationException>(() =>
+            QueueService(harness, transferAdds)
+                .QueueAsync(AcquisitionId, CandidateId, CancellationToken.None));
+
+        Assert.Equal(ApiProblemCodes.AcquisitionInvalid, exception.Code);
+        Assert.Equal(AcquisitionStatus.AwaitingSelection, harness.Store.Status);
+        Assert.Null(harness.Store.TransferPointer?.ClientItemId);
+        Assert.Null(harness.Store.TransferPointer?.State);
+        Assert.True(transferAdds.Lease.Committed);
+    }
+
+    [Fact]
+    public async Task UnresolvedRecoveredAddReleasesThePlaceholderAndFailsForMonitorFallback() {
+        var harness = Harness(new AcquisitionTransferInfo(
+            AcquisitionStatus.Queued,
+            null,
+            "abc123",
+            RecordedClientId,
+            "prismedia",
+            TransferOwnershipState.Adding.ToCode()));
+        PrepareQueueCandidate(harness.Store);
+        harness.Downloads.ItemExists = false;
+        harness.Downloads.AddFailure = new DownloadClientAddUnresolvedException("Duplicate add could not be identified.");
+        var transferAdds = new RecordingTransferAddCoordinator();
+
+        await Assert.ThrowsAsync<AcquisitionConfigurationException>(() =>
+            QueueService(harness, transferAdds)
+                .QueueAsync(AcquisitionId, CandidateId, CancellationToken.None));
+
+        Assert.Equal(AcquisitionStatus.Failed, harness.Store.Status);
+        Assert.Null(harness.Store.TransferPointer?.ClientItemId);
+        Assert.Null(harness.Store.TransferPointer?.State);
+        Assert.True(transferAdds.Lease.Committed);
+    }
+
+    [Fact]
+    public async Task TeardownRecoversOneTitleCorrelatedAddButFailsClosedOnAmbiguity() {
+        var unique = Harness(new AcquisitionTransferInfo(
+            AcquisitionStatus.Queued,
+            null,
+            "Dune Release",
+            RecordedClientId,
+            "prismedia",
+            TransferOwnershipState.Adding.ToCode()));
+        unique.Downloads.Items.Add(new DownloadItemStatus(
+            "nzo-1", "Dune.Release", 0.2, "downloading", false, null, null));
+
+        Assert.True(await unique.Service.DeleteForUnmonitorAsync(AcquisitionId, CancellationToken.None));
+        Assert.Contains(unique.Downloads.Removals, removal => removal.ClientItemId == "nzo-1");
+
+        var ambiguous = Harness(new AcquisitionTransferInfo(
+            AcquisitionStatus.Queued,
+            null,
+            "Dune Release",
+            RecordedClientId,
+            "prismedia",
+            TransferOwnershipState.Adding.ToCode()));
+        ambiguous.Downloads.Items.AddRange([
+            new DownloadItemStatus("nzo-1", "Dune.Release", 0.2, "downloading", false, null, null),
+            new DownloadItemStatus("nzo-2", "Dune Release", 0.3, "downloading", false, null, null)
+        ]);
+
+        var exception = await Assert.ThrowsAsync<AcquisitionConfigurationException>(() =>
+            ambiguous.Service.DeleteForUnmonitorAsync(AcquisitionId, CancellationToken.None));
+
+        Assert.Contains("multiple client items", exception.Message, StringComparison.OrdinalIgnoreCase);
+        Assert.False(ambiguous.Store.Deleted);
+        Assert.NotNull(ambiguous.Store.TransferPointer);
+        Assert.Empty(ambiguous.Downloads.Removals);
+    }
+
+    [Fact]
+    public async Task TeardownFailsClosedWhenAnUnfinishedAddCannotBeResolved() {
+        var harness = Harness(new AcquisitionTransferInfo(
+            AcquisitionStatus.Queued,
+            null,
+            "Dune Release",
+            RecordedClientId,
+            "prismedia",
+            TransferOwnershipState.Adding.ToCode()));
+        harness.Downloads.ItemExists = false;
+
+        var exception = await Assert.ThrowsAsync<AcquisitionConfigurationException>(() =>
+            harness.Service.DeleteForUnmonitorAsync(AcquisitionId, CancellationToken.None));
+
+        Assert.Contains("could not be resolved", exception.Message, StringComparison.OrdinalIgnoreCase);
+        Assert.False(harness.Store.Deleted);
+        Assert.NotNull(harness.Store.TransferPointer);
+        Assert.Equal(AcquisitionStatus.Stopping, harness.Store.Status);
+        Assert.Empty(harness.Downloads.Removals);
+    }
+
+    [Fact]
+    public async Task RequeuePriorRemovalFailurePreservesTheOldPointerAndAbortsBeforeAdd() {
+        var harness = Harness(new AcquisitionTransferInfo(
+            AcquisitionStatus.Failed, null, ClientItemId, RecordedClientId));
+        PrepareQueueCandidate(harness.Store);
+        harness.Downloads.RemoveFailure = new IOException("client offline");
+        var transferAdds = new RecordingTransferAddCoordinator();
+        var queue = QueueService(harness, transferAdds);
+
+        var exception = await Assert.ThrowsAsync<AcquisitionConfigurationException>(() =>
+            queue.QueueAsync(AcquisitionId, CandidateId, CancellationToken.None));
+
+        Assert.Contains("replacement was not queued", exception.Message, StringComparison.OrdinalIgnoreCase);
+        Assert.Equal(AcquisitionStatus.Failed, harness.Store.Status);
+        Assert.Equal(ClientItemId, harness.Store.TransferPointer?.ClientItemId);
+        Assert.Equal(0, harness.Downloads.AddCount);
+        Assert.Equal(0, transferAdds.AcquireCount);
+    }
+
+    [Fact]
+    public async Task ManualUsenetPickDetachesUnavailableTorrentCleanupAndQueuesReplacement() {
+        var harness = Harness(new AcquisitionTransferInfo(
+            AcquisitionStatus.Failed, null, ClientItemId, RecordedClientId));
+        PrepareQueueCandidate(harness.Store);
+        harness.Store.QueueCandidate = harness.Store.QueueCandidate! with {
+            Protocol = DownloadProtocol.Usenet
+        };
+        harness.Downloads.RemoveFailure = new IOException("torrent client offline");
+        var detachedCleanups = new RecordingDetachedDownloadCleanupStore();
+        var queue = QueueService(
+            harness,
+            new RecordingTransferAddCoordinator(),
+            detachedCleanups: detachedCleanups);
+
+        var detail = await queue.QueueAsync(
+            AcquisitionId,
+            CandidateId,
+            CancellationToken.None,
+            manualPick: true);
+
+        var detached = Assert.Single(detachedCleanups.Detachments);
+        Assert.Equal((AcquisitionId, RecordedClientId, ClientItemId), detached);
+        Assert.Equal(AcquisitionStatus.Queued, detail?.Summary.Status);
+        Assert.Equal(UsenetClientId, harness.Store.TransferPointer?.DownloadClientConfigId);
+        Assert.Equal("new-client-item", harness.Store.TransferPointer?.ClientItemId);
+        Assert.Equal(1, harness.Downloads.AddCount);
+    }
+
+    [Fact]
+    public async Task ManualPickDetachFailureRestoresPriorStateAndDoesNotQueueReplacement() {
+        var harness = Harness(new AcquisitionTransferInfo(
+            AcquisitionStatus.Failed, null, ClientItemId, RecordedClientId));
+        PrepareQueueCandidate(harness.Store);
+        harness.Store.QueueCandidate = harness.Store.QueueCandidate! with {
+            Protocol = DownloadProtocol.Usenet
+        };
+        harness.Downloads.RemoveFailure = new IOException("torrent client offline");
+        var detachedCleanups = new RecordingDetachedDownloadCleanupStore {
+            Failure = new IOException("database unavailable")
+        };
+        var queue = QueueService(
+            harness,
+            new RecordingTransferAddCoordinator(),
+            detachedCleanups: detachedCleanups);
+
+        await Assert.ThrowsAsync<IOException>(() => queue.QueueAsync(
+            AcquisitionId,
+            CandidateId,
+            CancellationToken.None,
+            manualPick: true));
+
+        Assert.Single(detachedCleanups.Detachments);
+        Assert.Equal(AcquisitionStatus.Failed, harness.Store.Status);
+        Assert.Equal(RecordedClientId, harness.Store.TransferPointer?.DownloadClientConfigId);
+        Assert.Equal(ClientItemId, harness.Store.TransferPointer?.ClientItemId);
+        Assert.Equal(0, harness.Downloads.AddCount);
+    }
+
+    [Fact]
+    public async Task ReacquireEligibilityRejectsAnActiveAcquisitionWithoutSideEffects() {
+        var harness = Harness(TransferInfo(RecordedClientId, AcquisitionStatus.Downloading));
+
+        var result = await harness.Service.GetReacquireEligibilityAsync(AcquisitionId, CancellationToken.None);
+
+        Assert.False(result.CanReacquire);
+        Assert.Contains("downloading", result.Message, StringComparison.OrdinalIgnoreCase);
+        Assert.Empty(harness.Downloads.Removals);
+        Assert.Empty(harness.Store.StatusChanges);
+        Assert.Empty(harness.Queue.Requests);
+        Assert.Empty(harness.Monitors.Retargets);
+        Assert.False(harness.Store.Deleted);
+    }
+
+    [Fact]
+    public async Task RemovalEligibilityRejectsImportingWithoutAnyCleanupSideEffects() {
+        var harness = Harness(TransferInfo(RecordedClientId, AcquisitionStatus.Importing));
+
+        var result = await harness.Service.GetRemovalEligibilityAsync(AcquisitionId, CancellationToken.None);
+
+        Assert.False(result.CanRemove);
+        Assert.Contains("importing", result.Message, StringComparison.OrdinalIgnoreCase);
+        Assert.Empty(harness.JobCleanup.Cancelled);
+        Assert.Empty(harness.Downloads.Removals);
+        Assert.Empty(harness.Store.StatusChanges);
+        Assert.False(harness.Store.Deleted);
+    }
+
+    [Fact]
+    public async Task RemovalEligibilityRejectsPartiallyPlacedBookCheckpoint() {
+        var harness = Harness(TransferInfo(RecordedClientId, AcquisitionStatus.Failed));
+        harness.Store.ImportContext = PartialBookImportContext();
+
+        var result = await harness.Service.GetRemovalEligibilityAsync(AcquisitionId, CancellationToken.None);
+
+        Assert.False(result.CanRemove);
+        Assert.Contains("partially applied import", result.Message, StringComparison.OrdinalIgnoreCase);
+        Assert.Empty(harness.Store.StatusChanges);
+        Assert.False(harness.Store.Deleted);
+    }
+
+    [Fact]
+    public async Task ReSearchRejectsPartiallyPlacedBookCheckpointWithoutQueueing() {
+        var harness = Harness(TransferInfo(RecordedClientId, AcquisitionStatus.Failed));
+        harness.Store.ImportContext = PartialBookImportContext();
+
+        var exception = await Assert.ThrowsAsync<AcquisitionConfigurationException>(() =>
+            harness.Service.ReSearchAsync(AcquisitionId, CancellationToken.None));
+
+        Assert.Contains("partially applied import", exception.Message, StringComparison.OrdinalIgnoreCase);
+        Assert.Empty(harness.Store.StatusChanges);
+        Assert.Empty(harness.Queue.Requests);
+    }
+
+    [Fact]
+    public async Task ReSearchClearsUntouchedBookCheckpointThenQueuesNormally() {
+        var harness = Harness(TransferInfo(RecordedClientId, AcquisitionStatus.Failed));
+        harness.Store.ImportContext = PartialBookImportContext(mutationCompleted: false);
+
+        var refreshed = await harness.Service.ReSearchAsync(AcquisitionId, CancellationToken.None);
+
+        Assert.Equal(1, harness.Store.ClearedPlacementCheckpoints);
+        Assert.Equal(AcquisitionStatus.Searching, refreshed?.Summary.Status);
+        Assert.Contains(
+            (AcquisitionId, AcquisitionStatus.Searching, (string?)null),
+            harness.Store.StatusChanges);
+        Assert.Single(harness.Queue.Requests);
+    }
+
+    [Fact]
+    public async Task ExplicitResearchRevivesCancelledBeforeEnqueueing() {
+        var harness = Harness(TransferInfo(RecordedClientId, AcquisitionStatus.Cancelled));
+
+        var refreshed = await harness.Service.ReSearchAsync(AcquisitionId, CancellationToken.None);
+
+        Assert.Equal(AcquisitionStatus.Searching, harness.Store.Status);
+        Assert.Equal(AcquisitionStatus.Searching, refreshed?.Summary.Status);
+        Assert.Contains(
+            (AcquisitionId, AcquisitionStatus.Searching, (string?)null),
+            harness.Store.StatusChanges);
+        var search = Assert.Single(harness.Queue.Requests);
+        Assert.Equal(JobType.AcquisitionSearch, search.Type);
+        Assert.Equal(JobGraphOrigin.Interactive, search.Origin);
+        var payload = AcquisitionJobPayload.Parse(search.PayloadJson!);
+        Assert.True(payload.ManualReview);
+        Assert.Null(payload.CustomQuery);
+    }
+
+    [Fact]
+    public async Task MissingChildFallbackRequeuesAnExistingBarrenAcquisitionForAutoSelection() {
+        var harness = Harness(TransferInfo(RecordedClientId, AcquisitionStatus.AwaitingSelection));
+
+        var covered = await harness.Service.EnsureOpenEntitySearchAsync(
+            WantedEntityId,
+            bookRendition: null,
+            CancellationToken.None);
+
+        Assert.True(covered);
+        Assert.Equal(AcquisitionStatus.Searching, harness.Store.Status);
+        var search = Assert.Single(harness.Queue.Requests);
+        Assert.Equal(JobType.AcquisitionSearch, search.Type);
+        Assert.Equal(JobGraphOrigin.Interactive, search.Origin);
+        var payload = AcquisitionJobPayload.Parse(search.PayloadJson!);
+        Assert.False(payload.ManualReview);
+        Assert.Null(payload.CustomQuery);
+    }
+
+    [Theory]
+    [InlineData(AcquisitionStatus.Downloading, true)]
+    [InlineData(AcquisitionStatus.ManualImportRequired, true)]
+    [InlineData(AcquisitionStatus.Cancelled, false)]
+    [InlineData(AcquisitionStatus.Imported, false)]
+    public async Task MissingChildFallbackPreservesActiveManualAndTerminalAcquisitions(
+        AcquisitionStatus status,
+        bool covered) {
+        var harness = Harness(TransferInfo(RecordedClientId, status));
+
+        var result = await harness.Service.EnsureOpenEntitySearchAsync(
+            WantedEntityId,
+            bookRendition: null,
+            CancellationToken.None);
+
+        Assert.Equal(covered, result);
+        Assert.Equal(status, harness.Store.Status);
+        Assert.Empty(harness.Queue.Requests);
+    }
+
+    [Theory]
+    [InlineData(AcquisitionStatus.Pending)]
+    [InlineData(AcquisitionStatus.AwaitingSelection)]
+    [InlineData(AcquisitionStatus.Failed)]
+    [InlineData(AcquisitionStatus.ManualImportRequired)]
+    [InlineData(AcquisitionStatus.Cancelled)]
+    public async Task RedeliveredSearchWithoutSearchingIntentPreservesCurrentState(
+        AcquisitionStatus status) {
+        var harness = Harness(TransferInfo(RecordedClientId, status));
+        harness.Store.SearchInput = new AcquisitionSearchInput(
+            AcquisitionId,
+            "Dune",
+            "Frank Herbert",
+            EntityKind.Book,
+            WantedEntityId);
+        var now = DateTimeOffset.UtcNow;
+        var job = new JobRunSnapshot(
+            Guid.NewGuid(),
+            JobType.AcquisitionSearch,
+            JobRunStatus.Running,
+            0,
+            null,
+            AcquisitionJobPayload.Serialize(AcquisitionId),
+            null,
+            AcquisitionId.ToString(),
+            "Dune",
+            now,
+            now,
+            null);
+        var handler = new AcquisitionSearchJobHandler(
+            harness.Store,
+            runner: null!,
+            profiles: null!,
+            queue: null!,
+            downloadClients: null!,
+            settings: null!,
+            missingChildren: null!,
+            NullLogger<AcquisitionSearchJobHandler>.Instance);
+
+        await handler.HandleAsync(
+            new JobContext(job, harness.Queue),
+            CancellationToken.None);
+
+        Assert.Equal(status, harness.Store.Status);
+        Assert.Empty(harness.Store.StatusChanges);
+        Assert.Empty(harness.Queue.Requests);
+    }
+
+    [Fact]
+    public async Task AutomaticSearchJobRechecksReleaseTimingBeforeCallingIndexers() {
+        var harness = Harness(TransferInfo(RecordedClientId, AcquisitionStatus.Searching));
+        harness.Store.SearchInput = new AcquisitionSearchInput(
+            AcquisitionId,
+            "Curiouser and Curiouser",
+            null,
+            EntityKind.VideoEpisode,
+            WantedEntityId);
+        var timing = new FixedReleaseTimingService(new AcquisitionReleaseTimingDecision(
+            CanSearch: false,
+            DateType: EntityDateType.Air,
+            SearchNotBefore: new DateOnly(2026, 8, 11),
+            Message: "Waiting until 2026-08-11, after the air date."));
+        var now = DateTimeOffset.UtcNow;
+        var job = new JobRunSnapshot(
+            Guid.NewGuid(),
+            JobType.AcquisitionSearch,
+            JobRunStatus.Running,
+            0,
+            null,
+            AcquisitionJobPayload.Serialize(AcquisitionId),
+            null,
+            AcquisitionId.ToString(),
+            "Curiouser and Curiouser",
+            now,
+            now,
+            null);
+        var handler = new AcquisitionSearchJobHandler(
+            harness.Store,
+            runner: null!,
+            profiles: null!,
+            queue: null!,
+            downloadClients: null!,
+            settings: null!,
+            missingChildren: null!,
+            NullLogger<AcquisitionSearchJobHandler>.Instance,
+            releaseTiming: timing);
+
+        await handler.HandleAsync(
+            new JobContext(job, harness.Queue),
+            CancellationToken.None);
+
+        Assert.Equal(AcquisitionStatus.WaitingForRelease, harness.Store.Status);
+        Assert.Contains(
+            (AcquisitionId, AcquisitionStatus.WaitingForRelease, "Waiting until 2026-08-11, after the air date."),
+            harness.Store.StatusChanges);
+        Assert.Equal(WantedEntityId, timing.EntityId);
+        Assert.Empty(harness.Queue.Requests);
+    }
+
+    [Fact]
+    public async Task ReacquireEligibilityAllowsAnImportedAcquisitionWithoutSideEffects() {
+        var harness = Harness(TransferInfo(RecordedClientId, AcquisitionStatus.Imported));
+
+        var result = await harness.Service.GetReacquireEligibilityAsync(AcquisitionId, CancellationToken.None);
+
+        Assert.True(result.CanReacquire);
+        Assert.Null(result.Message);
+        Assert.Empty(harness.Downloads.Removals);
+        Assert.Empty(harness.Store.StatusChanges);
+        Assert.Empty(harness.Queue.Requests);
+        Assert.Empty(harness.Monitors.Retargets);
+        Assert.False(harness.Store.Deleted);
+    }
+
+    [Fact]
+    public async Task ReacquireAsyncReplacesImportedStateAndImmediatelySearchesTheClone() {
+        var harness = Harness(TransferInfo(RecordedClientId, AcquisitionStatus.Imported));
+        var replacementId = Guid.NewGuid();
+        harness.Store.CloneResult = replacementId;
+
+        var result = await harness.Service.ReacquireAsync(AcquisitionId, CancellationToken.None);
+
+        Assert.Equal(replacementId, result);
+        Assert.Equal([(RecordedClientId, ClientItemId, true)], harness.Downloads.Removals);
+        Assert.Equal([(AcquisitionId, replacementId)], harness.Monitors.Retargets);
+        Assert.Contains(
+            (replacementId, AcquisitionStatus.Searching, (string?)null),
+            harness.Store.StatusChanges);
+        var search = Assert.Single(harness.Queue.Requests);
+        Assert.Equal(JobType.AcquisitionSearch, search.Type);
+        Assert.Equal(replacementId.ToString(), search.TargetEntityId);
+        Assert.Equal(replacementId, AcquisitionJobPayload.Parse(search.PayloadJson!).AcquisitionId);
+        Assert.Equal(JobGraphOrigin.Interactive, search.Origin);
+        Assert.True(harness.Store.Deleted);
+        var history = Assert.Single(harness.History.Entries);
+        Assert.Equal(AcquisitionHistoryEvent.Removed, history.Event);
+        Assert.Equal("Files deleted; searching again.", history.Message);
+    }
+
+    [Fact]
+    public async Task ReacquireRemovesPendingCloneAndQueuesNothingWhenStoppingClaimWins() {
+        var harness = Harness(TransferInfo(RecordedClientId, AcquisitionStatus.Imported));
+        var replacementId = Guid.NewGuid();
+        harness.Store.CloneResult = replacementId;
+        harness.Monitors.RetargetSucceeds = false;
+
+        var result = await harness.Service.ReacquireAsync(AcquisitionId, CancellationToken.None);
+
+        Assert.Null(result);
+        Assert.Equal([replacementId, AcquisitionId], harness.Store.DeletedIds);
+        Assert.Empty(harness.Queue.Requests);
+        Assert.DoesNotContain(
+            harness.Store.StatusChanges,
+            change => change.Id == replacementId && change.Status == AcquisitionStatus.Searching);
+    }
+
+    [Fact]
+    public async Task ReacquireAsyncCloneFailureRemovesTheUnusableImportedStateAndMonitor() {
+        var harness = Harness(TransferInfo(RecordedClientId, AcquisitionStatus.Imported));
+        harness.Store.CloneResult = null;
+
+        var result = await harness.Service.ReacquireAsync(AcquisitionId, CancellationToken.None);
+
+        Assert.Null(result);
+        Assert.True(harness.Store.Deleted);
+        Assert.Equal([harness.Monitors.MonitorId], harness.Monitors.Deleted);
+        Assert.Empty(harness.Monitors.Retargets);
+        Assert.Empty(harness.Queue.Requests);
+        var history = Assert.Single(harness.History.Entries);
+        Assert.Equal(AcquisitionHistoryEvent.Removed, history.Event);
+        Assert.Equal("Files deleted; retry could not be initialized.", history.Message);
+    }
+
+    [Fact]
+    public async Task ReacquireClientOutagePreservesImportedStateAndDoesNotStartAReplacement() {
+        var harness = Harness(TransferInfo(RecordedClientId, AcquisitionStatus.Imported));
+        harness.Downloads.GetFailure = new IOException("client offline");
+
+        var exception = await Assert.ThrowsAsync<AcquisitionConfigurationException>(() =>
+            harness.Service.ReacquireAsync(AcquisitionId, CancellationToken.None));
+
+        Assert.Contains("client offline", exception.Message, StringComparison.OrdinalIgnoreCase);
+        Assert.Equal(AcquisitionStatus.Stopping, harness.Store.Status);
+        Assert.Equal(
+            new AcquisitionTeardownClaim(AcquisitionTeardownIntent.Reacquire, AcquisitionStatus.Imported),
+            harness.Store.TeardownClaim);
+        Assert.Contains(
+            harness.Store.StatusChanges,
+            change => change.Status == AcquisitionStatus.Stopping);
+        Assert.Equal([AcquisitionId], harness.JobCleanup.Cancelled);
+        Assert.False(harness.Store.Deleted);
+        Assert.Empty(harness.Downloads.Removals);
+        Assert.Empty(harness.Monitors.Retargets);
+        Assert.Empty(harness.Monitors.Deleted);
+        Assert.Empty(harness.Queue.Requests);
+        Assert.Empty(harness.History.Entries);
+    }
+
+    [Theory]
+    [InlineData(EntityKind.Movie, null, JobType.AcquisitionUpgradeReplace)]
+    [InlineData(EntityKind.VideoEpisode, null, JobType.AcquisitionUpgradeReplace)]
+    [InlineData(EntityKind.Book, null, JobType.AcquisitionUpgradeReplace)]
+    [InlineData(EntityKind.Book, BookRendition.Audiobook, JobType.AcquisitionImport)]
+    public async Task ExplicitUpgradeRetryUsesTheKindsReplacementContract(EntityKind kind, BookRendition? rendition, JobType expectedJob) {
+        var harness = Harness(TransferInfo(RecordedClientId, AcquisitionStatus.ManualImportRequired));
+        harness.Store.ImportContext = new AcquisitionImportContext(
+            AcquisitionId, "Owned work", null, null, null, null, null, null, "/downloads/upgrade", null, null,
+            kind, BookRendition: rendition, UpgradeOfAcquisitionId: Guid.NewGuid());
+
+        await harness.Service.RetryImportAsync(AcquisitionId, allowFormatChange: false, default);
+
+        Assert.Equal(expectedJob, Assert.Single(harness.Queue.Requests).Type);
+        Assert.Equal(expectedJob == JobType.AcquisitionUpgradeReplace ? AcquisitionStatus.Downloaded : AcquisitionStatus.ManualImportRequired,
+            harness.Store.Status);
+    }
+
+    [Theory]
+    [InlineData(false, false)]
+    [InlineData(false, true)]
+    [InlineData(true, false)]
+    [InlineData(true, true)]
+    public async Task NewImportAttemptsRelinkTheirGraphWithoutOverwritingANewerAttempt(bool completion, bool raced) {
+        var harness = Harness(TransferInfo(RecordedClientId,
+            completion ? AcquisitionStatus.Downloaded : AcquisitionStatus.ManualImportRequired));
+        var original = Guid.NewGuid();
+        var concurrent = Guid.NewGuid();
+        var next = Guid.NewGuid();
+        harness.Store.JobGraphId = original;
+        harness.Queue.ResultGraphId = next;
+        if (raced) harness.Queue.BeforeEnqueue = () => harness.Store.JobGraphId = concurrent;
+        if (completion) await new AcquisitionCompletionService(harness.Store, harness.Queue).ScheduleAsync(AcquisitionId, default);
+        else await harness.Service.RetryImportAsync(AcquisitionId, false, default);
+        Assert.Equal(raced ? concurrent : next, harness.Store.JobGraphId);
+    }
+
+    [Fact]
+    public async Task FailedDurableImportCanEnqueueAnExplicitResume() {
+        var harness = Harness(TransferInfo(RecordedClientId, AcquisitionStatus.Failed));
+        harness.Store.HasResumableImport = true;
+
+        var detail = await harness.Service.RetryImportAsync(
+            AcquisitionId,
+            allowFormatChange: false,
+            CancellationToken.None);
+
+        Assert.True(detail?.Summary.HasResumableImport);
+        var retry = Assert.Single(harness.Queue.Requests);
+        Assert.Equal(JobType.AcquisitionImport, retry.Type);
+        Assert.Equal(JobGraphOrigin.Interactive, retry.Origin);
+        var payload = AcquisitionJobPayload.Parse(retry.PayloadJson!);
+        Assert.Equal(AcquisitionId, payload.AcquisitionId);
+        Assert.True(payload.ManualRetry);
+    }
+
+    [Fact]
+    public async Task ReviewedDurableImportCanEnqueueAnExplicitResume() {
+        var harness = Harness(TransferInfo(RecordedClientId, AcquisitionStatus.AwaitingSelection));
+        harness.Store.HasResumableImport = true;
+
+        var detail = await harness.Service.RetryImportAsync(
+            AcquisitionId,
+            allowFormatChange: false,
+            CancellationToken.None);
+
+        Assert.True(detail?.Summary.HasResumableImport);
+        var retry = Assert.Single(harness.Queue.Requests);
+        Assert.Equal(JobType.AcquisitionImport, retry.Type);
+        var payload = AcquisitionJobPayload.Parse(retry.PayloadJson!);
+        Assert.Equal(AcquisitionId, payload.AcquisitionId);
+        Assert.True(payload.ManualRetry);
+    }
+
+    [Fact]
+    public async Task ManualTvImportReviewBlocksDangerousFilesWhileQueuingExactSafeMappings() {
+        var firstEpisodeId = Guid.NewGuid();
+        var secondEpisodeId = Guid.NewGuid();
+        var payloads = new FixedDownloadPayloadReader(new DownloadPayload("/downloads/sesame", [
+            new ImportCandidateFile("pack/Sesame Street - S09E01.mp4", 1_000),
+            new ImportCandidateFile("pack/Sesame Street 1317 Season 9.mp4", 2_000),
+            new ImportCandidateFile("pack/poster.jpg", 300),
+            new ImportCandidateFile("pack/RARBG_DO_NOT_MIRROR.exe", 400),
+        ]));
+        var targets = new FixedImportTargetIndex([
+            new TvEpisodeTitle(1, "First Day", firstEpisodeId),
+            new TvEpisodeTitle(2, "Episode 1317", secondEpisodeId, AbsoluteEpisode: 1317),
+        ]);
+        var harness = Harness(
+            TransferInfo(RecordedClientId, AcquisitionStatus.ManualImportRequired),
+            manualImportPayloads: payloads,
+            manualImportTargets: targets);
+        harness.Store.ImportContext = new AcquisitionImportContext(
+            AcquisitionId,
+            "Season 9",
+            Author: null,
+            Series: "Sesame Street",
+            Year: 1977,
+            PosterUrl: null,
+            ExternalIdentity: null,
+            ProfileId: null,
+            ContentPath: "/downloads/sesame",
+            ClientItemId,
+            RecordedClientId,
+            EntityKind.VideoSeason,
+            EntityId: WantedEntityId,
+            SeasonNumber: 9);
+
+        var review = await harness.Service.GetManualImportReviewAsync(AcquisitionId, CancellationToken.None);
+
+        Assert.True(review.Available);
+        Assert.Equal(firstEpisodeId, review.Files[0].SuggestedTargetEntityId);
+        Assert.Equal(secondEpisodeId, review.Files[1].SuggestedTargetEntityId);
+        Assert.False(review.Files[2].CanMap);
+        Assert.False(review.Files[3].CanMap);
+        Assert.True(review.Files[3].IsDangerous);
+        Assert.NotNull(review.Warning);
+        Assert.Contains("RARBG_DO_NOT_MIRROR.exe", review.Warning);
+        Assert.Equal([firstEpisodeId, secondEpisodeId], review.Targets.Select(target => target.EntityId).ToArray());
+
+        await Assert.ThrowsAsync<AcquisitionConfigurationException>(() =>
+            harness.Service.SubmitManualImportAsync(
+                AcquisitionId,
+                new AcquisitionManualImportRequest([
+                    new AcquisitionManualImportSelection("pack/RARBG_DO_NOT_MIRROR.exe", firstEpisodeId),
+                ]),
+                CancellationToken.None));
+        Assert.Empty(harness.Queue.Requests);
+
+        await harness.Service.SubmitManualImportAsync(
+            AcquisitionId,
+            new AcquisitionManualImportRequest([
+                new AcquisitionManualImportSelection("pack/Sesame Street - S09E01.mp4", firstEpisodeId),
+                new AcquisitionManualImportSelection("pack/Sesame Street - S09E01.mp4", secondEpisodeId),
+            ]),
+            CancellationToken.None);
+
+        var queued = Assert.Single(harness.Queue.Requests);
+        Assert.Equal(JobType.AcquisitionImport, queued.Type);
+        var jobPayload = AcquisitionJobPayload.Parse(queued.PayloadJson!);
+        Assert.True(jobPayload.ManualRetry);
+        Assert.Equal([
+            new ManualImportFileMapping("pack/Sesame Street - S09E01.mp4", firstEpisodeId, 9, 1),
+            new ManualImportFileMapping("pack/Sesame Street - S09E01.mp4", secondEpisodeId, 9, 2),
+        ], jobPayload.ManualFileMappings);
+    }
+
+    [Theory]
+    [InlineData(false, false)]
+    [InlineData(true, false)]
+    [InlineData(false, true)]
+    public async Task ReviewedMappingsSupersedeOnlyAnUntouchedCurrentTvCheckpoint(bool placementStarted, bool concurrentChange) {
+        var root = Directory.CreateTempSubdirectory("prismedia-reviewed-plan-");
+        try {
+            const string fileName = "Show.S01E01.mkv";
+            var source = Path.Combine(root.FullName, fileName);
+            var target = Path.Combine(root.FullName, "library", fileName);
+            await File.WriteAllTextAsync(source, "download bytes");
+            if (placementStarted) {
+                Directory.CreateDirectory(Path.GetDirectoryName(target)!);
+                File.Copy(source, target);
+            }
+            var episodeId = Guid.NewGuid();
+            var harness = Harness(TransferInfo(RecordedClientId, AcquisitionStatus.ManualImportRequired),
+                manualImportPayloads: new FixedDownloadPayloadReader(new DownloadPayload(root.FullName, [new(fileName, 14)])),
+                manualImportTargets: new FixedImportTargetIndex([new TvEpisodeTitle(1, "First Story", episodeId)]));
+            var checkpoint = new TvImportCheckpoint(Guid.NewGuid(), root.FullName, ImportMode.Copy,
+                false, "Imported", false, [new(fileName, target, 1, 1, [], SourceAbsolutePath: source)]);
+            harness.Store.ImportContext = new AcquisitionImportContext(AcquisitionId, "Season 1", null, "Show", null,
+                null, null, null, root.FullName, ClientItemId, RecordedClientId, EntityKind.VideoSeason,
+                SeasonNumber: 1, EntityId: WantedEntityId, TvImportCheckpoint: checkpoint);
+            harness.Store.RefuseTvCheckpointClear = concurrentChange;
+            var request = new AcquisitionManualImportRequest([new(fileName, episodeId)]);
+
+            if (placementStarted || concurrentChange) {
+                await Assert.ThrowsAsync<AcquisitionConfigurationException>(() =>
+                    harness.Service.SubmitManualImportAsync(AcquisitionId, request, default));
+                Assert.Empty(harness.Queue.Requests);
+                Assert.Equal(checkpoint, harness.Store.ImportContext.TvImportCheckpoint);
+            } else {
+                await harness.Service.SubmitManualImportAsync(AcquisitionId, request, default);
+                Assert.Null(harness.Store.ImportContext.TvImportCheckpoint);
+                Assert.Single(harness.Queue.Requests);
+            }
+            Assert.Equal("download bytes", await File.ReadAllTextAsync(source));
+            if (placementStarted) Assert.Equal("download bytes", await File.ReadAllTextAsync(target));
+        } finally {
+            root.Delete(true);
+        }
+    }
+
+    [Fact]
+    public async Task ManualTvImportReviewUsesUniqueProviderTitleToCorrectSceneNumbering() {
+        var numberedEpisodeId = Guid.NewGuid();
+        var titledEpisodeId = Guid.NewGuid();
+        var payloads = new FixedDownloadPayloadReader(new DownloadPayload("/downloads/sesame", [
+            new ImportCandidateFile("Sesame Street S42E19 The Flood 1080i.ts", 1_000),
+        ]));
+        var targets = new FixedImportTargetIndex([
+            new TvEpisodeTitle(19, "Super Maria", numberedEpisodeId),
+            new TvEpisodeTitle(20, "The Flood", titledEpisodeId),
+        ]);
+        var harness = Harness(
+            TransferInfo(RecordedClientId, AcquisitionStatus.ManualImportRequired),
+            manualImportPayloads: payloads,
+            manualImportTargets: targets);
+        harness.Store.ImportContext = new AcquisitionImportContext(
+            AcquisitionId,
+            "Super Maria",
+            Author: null,
+            Series: "Sesame Street",
+            Year: 2011,
+            PosterUrl: null,
+            ExternalIdentity: null,
+            ProfileId: null,
+            ContentPath: "/downloads/sesame",
+            ClientItemId,
+            RecordedClientId,
+            EntityKind.VideoEpisode,
+            EntityId: WantedEntityId,
+            SeasonNumber: 42,
+            EpisodeNumber: 19);
+
+        var review = await harness.Service.GetManualImportReviewAsync(AcquisitionId, CancellationToken.None);
+
+        Assert.Equal(titledEpisodeId, Assert.Single(review.Files).SuggestedTargetEntityId);
+    }
+
+    [Fact]
+    public async Task DeleteAsyncUsesDefaultClientOnlyForLegacyTransfersWithoutRecordedClient() {
+        var harness = Harness(TransferInfo(downloadClientConfigId: null));
+
+        Assert.True(await harness.Service.DeleteAsync(AcquisitionId, CancellationToken.None));
+
+        Assert.Equal([(DefaultClientId, ClientItemId, true)], harness.Downloads.Removals);
+        Assert.True(harness.Store.Deleted);
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task ManualReviewDoesNotSuggestTheWrongSlotForForeignSeasonTitles(bool providerOnly) {
+        var first = Guid.NewGuid();
+        var targets = new FixedImportTargetIndex([new(1, "Known Story", first), new(49, "Show - S02E49", Guid.NewGuid())]);
+        var foreign = new TvSeasonEpisodeCatalog(providerOnly ? null : Guid.NewGuid(), 3, [
+            new TvEpisodeTitle(56, "Hidden Garden", providerOnly ? null : Guid.NewGuid()) { ProviderIdentity = new("test-episode", "56") },
+            new TvEpisodeTitle(57, "Mountain Journey", providerOnly ? null : Guid.NewGuid()) { ProviderIdentity = new("test-episode", "57") }
+        ]) { ProviderIdentity = new("test-season", "3") };
+        targets.Catalog = providerOnly ? [] : [foreign];
+        var evidence = new FixedCatalogEvidence([foreign]);
+        var harness = Harness(TransferInfo(RecordedClientId, AcquisitionStatus.ManualImportRequired),
+            manualImportPayloads: new FixedDownloadPayloadReader(new("/downloads/show", [new("Show.S02E01.mkv", 1000),
+                new("Show.S02E49-E50.Hidden.Garden.&.Mountain.Journey.mkv", 1000)])),
+            manualImportTargets: targets, manualCatalogEvidence: providerOnly ? evidence : null);
+        harness.Store.ImportContext = new(AcquisitionId, "Season 2", null, "Show", null, null, null, null,
+            "/downloads/show", ClientItemId, RecordedClientId, EntityKind.VideoSeason, EntityId: WantedEntityId, SeasonNumber: 2);
+
+        var review = await harness.Service.GetManualImportReviewAsync(AcquisitionId, default);
+
+        Assert.True(review.Available);
+        Assert.Equal(first, review.Files[0].SuggestedTargetEntityId);
+        Assert.Null(review.Files[1].SuggestedTargetEntityId);
+        Assert.Contains("another season", review.Warning);
+        Assert.Empty(harness.Queue.Requests);
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task ManualReviewDoesNotPrefillFailedOrAlreadyImportedFiles(bool imported) {
+        const string source = "Show.S01E01.mkv";
+        var episode = Guid.NewGuid();
+        var ledger = new AcquisitionImportFileLedger(AcquisitionImportPhase.Imported, [
+            new("failed-file", source, 1000, source, null, AcquisitionImportFileRole.Media,
+                AcquisitionImportContentKind.Video, imported ? AcquisitionImportFileStatus.Imported : AcquisitionImportFileStatus.Skipped,
+                imported ? AcquisitionImportDecision.PlaceNew : AcquisitionImportDecision.HoldVerification,
+                imported ? null : "The video could not be decoded completely.")
+        ]);
+        var harness = Harness(TransferInfo(RecordedClientId, AcquisitionStatus.ManualImportRequired) with { ImportResult = ledger },
+            manualImportPayloads: new FixedDownloadPayloadReader(new("/downloads/show", [new(source, 1000)])),
+            manualImportTargets: new FixedImportTargetIndex([new(1, "First Story", episode)]));
+        harness.Store.ImportContext = new(AcquisitionId, "Season 1", null, "Show", null, null, null, null,
+            "/downloads/show", ClientItemId, RecordedClientId, EntityKind.VideoSeason, EntityId: WantedEntityId, SeasonNumber: 1);
+
+        var review = await harness.Service.GetManualImportReviewAsync(AcquisitionId, default);
+
+        Assert.Null(Assert.Single(review.Files).SuggestedTargetEntityId);
+        Assert.Equal(imported ? null : "The video could not be decoded completely.", review.Files[0].VerificationFailure);
+        Assert.True(review.Files[0].CanMap); // A repaired payload may be explicitly retried, with full verification again.
+    }
+
+    private static AcquisitionTransferInfo TransferInfo(
+        Guid? downloadClientConfigId,
+        AcquisitionStatus status = AcquisitionStatus.Downloading) =>
+        new(status, FinalSourcePath: null, ClientItemId, downloadClientConfigId);
+
+    private static AcquisitionImportContext PartialBookImportContext(bool mutationCompleted = true) {
+        var boundary = Path.GetFullPath(Path.Combine(
+            Path.GetTempPath(),
+            $"prismedia-partial-book-{Guid.NewGuid():N}"));
+        var payloadRoot = Path.Combine(boundary, "payload");
+        var libraryRoot = Path.Combine(boundary, "library");
+        var source = Path.Combine(payloadRoot, "Dune.epub");
+        var target = Path.Combine(libraryRoot, "Frank Herbert", "Dune.epub");
+        if (!mutationCompleted) {
+            Directory.CreateDirectory(payloadRoot);
+            File.WriteAllText(source, "download-bytes");
+        }
+        var checkpoint = new ImportPlacementCheckpoint(
+            EntityKind.Book,
+            Guid.NewGuid(),
+            libraryRoot,
+            payloadRoot,
+            ImportMode.Move,
+            Path.GetDirectoryName(target)!,
+            Path.GetDirectoryName(target)!,
+            "Imported into the library.",
+            [new ImportPlacementCheckpointUnit(
+                "Dune.epub",
+                source,
+                target,
+                IsMedia: true,
+                FinalPath: mutationCompleted ? target : null)],
+            AttemptId: Guid.NewGuid(),
+            ClaimJobId: Guid.NewGuid());
+        return new AcquisitionImportContext(
+            AcquisitionId,
+            "Dune",
+            "Frank Herbert",
+            Series: null,
+            Year: 1965,
+            PosterUrl: null,
+            ExternalIdentity: null,
+            ProfileId: null,
+            ContentPath: payloadRoot,
+            ClientItemId: ClientItemId,
+            DownloadClientConfigId: RecordedClientId,
+            Kind: EntityKind.Book,
+            EntityId: WantedEntityId,
+            ImportPlacementCheckpoint: checkpoint);
+    }
+
+    private static TestHarness Harness(
+        AcquisitionTransferInfo transfer,
+        bool includeRecordedClient = true,
+        IAcquisitionSearchResourcePolicy? searchResources = null,
+        IAcquisitionReleaseTimingService? releaseTiming = null,
+        IDownloadPayloadReader? manualImportPayloads = null,
+        IImportTargetIndex? manualImportTargets = null,
+        ITvEpisodeCatalogEvidenceSource? manualCatalogEvidence = null) {
+        var store = new FakeAcquisitionStore(transfer);
+        var downloads = new RecordingDownloadClientFactory();
+        var configs = new FakeDownloadClientConfigStore(includeRecordedClient);
+        var history = new FakeAcquisitionHistoryStore();
+        var monitors = new RecordingMonitorStore();
+        var queue = new RecordingJobQueue();
+        var jobCleanup = new RecordingAcquisitionJobCleanup();
+        var lifecycle = new RecordingEntityLifecycleLease();
+        var importCleanup = new RecordingImportResetCleanup();
+        var blocklist = new RecordingBlocklistStore();
+        var service = new AcquisitionService(
+            store,
+            blocklist,
+            queue,
+            configs,
+            downloads,
+            new EmptyImportedFilesReader(),
+            history,
+            NullLogger<AcquisitionService>.Instance,
+            monitors,
+            jobCleanup,
+            lifecycle,
+            importCleanup,
+            searchResources: searchResources,
+            releaseTiming: releaseTiming,
+            manualImportPayloads: manualImportPayloads,
+            manualImportTargets: manualImportTargets,
+            manualCatalogEvidence: manualCatalogEvidence);
+
+        return new TestHarness(service, store, downloads, history, monitors, queue, jobCleanup, lifecycle, importCleanup, blocklist);
+    }
+
+    private static void PrepareQueueCandidate(FakeAcquisitionStore store) {
+        store.QueueCandidate = new AcquisitionQueueCandidate(
+            CandidateId,
+            "Dune.2021.1080p",
+            "Indexer",
+            "https://indexer.test/download",
+            null,
+            "ABC123",
+            null,
+            DownloadProtocol.Torrent);
+        store.SearchInput = new AcquisitionSearchInput(
+            AcquisitionId,
+            "Dune",
+            "Frank Herbert",
+            EntityKind.Book,
+            WantedEntityId);
+    }
+
+    private static AcquisitionQueueService QueueService(
+        TestHarness harness,
+        IAcquisitionTransferAddCoordinator transferAdds,
+        IJobGraphService? graphs = null,
+        IDetachedDownloadCleanupStore? detachedCleanups = null,
+        IAcquisitionCandidateValidator? candidateValidator = null) =>
+        new(
+            harness.Store,
+            new ThrowingBlocklistStore(),
+            new FakeDownloadClientConfigStore(includeRecordedClient: true),
+            harness.Downloads,
+            new NullAcquisitionProfileStore(),
+            new NullIndexerConfigStore(),
+            new NullReleaseLinkResolver(),
+            transferAdds,
+            harness.ImportCleanup,
+            detachedCleanups ?? new RecordingDetachedDownloadCleanupStore(),
+            harness.History,
+            NullLogger<AcquisitionQueueService>.Instance,
+            graphs: graphs,
+            candidateValidator: candidateValidator);
+
+    private sealed class RejectingCandidateValidator : IAcquisitionCandidateValidator {
+        public int Calls { get; private set; }
+        public Task<IReadOnlyList<ReleaseRejectionReason>> ValidateAsync(Guid acquisitionId, AcquisitionQueueCandidate candidate, CancellationToken cancellationToken) {
+            Calls++;
+            return Task.FromResult<IReadOnlyList<ReleaseRejectionReason>>([ReleaseRejectionReason.QualityNotAllowed]);
+        }
+    }
+
+    private sealed record TestHarness(
+        AcquisitionService Service,
+        FakeAcquisitionStore Store,
+        RecordingDownloadClientFactory Downloads,
+        FakeAcquisitionHistoryStore History,
+        RecordingMonitorStore Monitors,
+        RecordingJobQueue Queue,
+        RecordingAcquisitionJobCleanup JobCleanup,
+        RecordingEntityLifecycleLease Lifecycle,
+        RecordingImportResetCleanup ImportCleanup,
+        RecordingBlocklistStore Blocklist);
+
+    private sealed class RecordingEntityLifecycleLease : IEntityLifecycleMutationLease {
+        public bool Allow { get; set; } = true;
+        public int ExecuteCalls { get; private set; }
+        public bool IsHeld { get; private set; }
+
+        public async Task<bool> ExecuteAsync(
+            Guid entityId,
+            Func<CancellationToken, Task> mutation,
+            CancellationToken cancellationToken) {
+            ExecuteCalls++;
+            if (!Allow) {
+                return false;
+            }
+
+            IsHeld = true;
+            try {
+                await mutation(cancellationToken);
+            } finally {
+                IsHeld = false;
+            }
+            return true;
+        }
+    }
+
+    private sealed class RecordingTransferAddCoordinator : IAcquisitionTransferAddCoordinator {
+        public bool Allow { get; set; } = true;
+        public Action? OnAcquire { get; set; }
+        public int AcquireCount { get; private set; }
+        public RecordingTransferAddLease Lease { get; } = new();
+
+        public Task<IAcquisitionTransferAddLease?> AcquireAsync(
+            Guid acquisitionId,
+            Guid downloadClientConfigId,
+            string category,
+            CancellationToken cancellationToken) {
+            AcquireCount++;
+            OnAcquire?.Invoke();
+            return Task.FromResult<IAcquisitionTransferAddLease?>(Allow ? Lease : null);
+        }
+    }
+
+    private sealed class RecordingTransferAddLease : IAcquisitionTransferAddLease {
+        public bool Committed { get; private set; }
+        public bool Disposed { get; private set; }
+
+        public Task CommitAsync(CancellationToken cancellationToken) {
+            Committed = true;
+            return Task.CompletedTask;
+        }
+
+        public ValueTask DisposeAsync() {
+            Disposed = true;
+            return ValueTask.CompletedTask;
+        }
+    }
+
+    private sealed class RecordingAcquisitionJobCleanup : IAcquisitionJobCleanup {
+        public List<Guid> Cancelled { get; } = [];
+
+        public Task<int> CancelAsync(Guid acquisitionId, CancellationToken cancellationToken) {
+            Cancelled.Add(acquisitionId);
+            return Task.FromResult(1);
+        }
+    }
+
+    private sealed class RecordingImportResetCleanup : IAcquisitionImportResetCleanup {
+        public List<AcquisitionImportContext> Cleaned { get; } = [];
+
+        public Task CleanupAsync(AcquisitionImportContext import, CancellationToken cancellationToken) {
+            Cleaned.Add(import);
+            return Task.CompletedTask;
+        }
+    }
+
+    private sealed class FakeAcquisitionStore(AcquisitionTransferInfo transfer) : IAcquisitionStore {
+        private readonly AcquisitionSummary _summary = new(
+            AcquisitionId,
+            AcquisitionStatus.Downloading,
+            null,
+            "Dune",
+            "Frank Herbert",
+            null,
+            1965,
+            null,
+            0.25,
+            DateTimeOffset.UtcNow,
+            DateTimeOffset.UtcNow,
+            Kind: EntityKind.Book,
+            EntityId: WantedEntityId);
+
+        public AcquisitionStatus? Status { get; private set; } = transfer.Status;
+        public AcquisitionTeardownClaim? TeardownClaim { get; private set; }
+        public AcquisitionStatus? ReplacementStatus { get; private set; }
+        public List<(Guid Id, AcquisitionStatus Status, string? Message)> StatusChanges { get; } = [];
+        public bool Deleted { get; private set; }
+        public List<Guid> DeletedIds { get; } = [];
+        public bool HasResumableImport { get; set; }
+        public AcquisitionMetadata? CreatedMetadata { get; private set; }
+        public Action? BeforeCreate { get; set; }
+        public AcquisitionTransferInfo? TransferPointer { get; private set; } = transfer;
+        public AcquisitionQueueCandidate? QueueCandidate { get; set; }
+        public AcquisitionSearchInput? SearchInput { get; set; }
+        public bool CreateTransferResult { get; set; } = true;
+        public bool PersistRejectedTransfer { get; set; }
+        public Action? BeforeCreateTransfer { get; set; }
+        public CancellationToken CreateTransferCancellationToken { get; private set; }
+        public SelectedRelease? SelectedRelease { get; private set; }
+        public int CloneCalls { get; private set; }
+        public Guid? TeardownReplacementId { get; private set; }
+        public int BeginTransferAddCalls { get; private set; }
+        public AcquisitionImportContext? ImportContext { get; set; }
+        public bool RefuseTvCheckpointClear { get; set; }
+        public int ClearedPlacementCheckpoints { get; private set; }
+        public List<ActiveTransfer> ActiveTransfers { get; } = [];
+        public Guid? JobGraphId { get; set; }
+
+        public Task<AcquisitionDetail?> GetAsync(Guid id, CancellationToken cancellationToken) =>
+            Task.FromResult<AcquisitionDetail?>(id == AcquisitionId
+                ? new AcquisitionDetail(_summary with {
+                    Status = Status ?? _summary.Status,
+                    HasResumableImport = HasResumableImport,
+                    JobGraphId = JobGraphId,
+                }, [])
+                : null);
+
+        public Task<Guid?> GetJobGraphIdAsync(Guid id, CancellationToken cancellationToken) =>
+            Task.FromResult(id == AcquisitionId ? JobGraphId : null);
+
+        public Task<bool> TryRelinkJobGraphIdAsync(Guid id, Guid? expectedGraphId, Guid graphId, CancellationToken cancellationToken) {
+            if (id != AcquisitionId || JobGraphId != expectedGraphId) return Task.FromResult(false);
+            JobGraphId = graphId;
+            return Task.FromResult(true);
+        }
+
+        public Task SetStatusAsync(Guid id, AcquisitionStatus status, string? message, CancellationToken cancellationToken) {
+            StatusChanges.Add((id, status, message));
+            if (id == AcquisitionId) {
+                Status = status;
+            } else if (id == CloneResult) {
+                ReplacementStatus = status;
+            }
+            return Task.CompletedTask;
+        }
+
+        public void ForceStatus(AcquisitionStatus status) => Status = status;
+
+        public void ForceTeardownClaim(AcquisitionTeardownClaim claim) => TeardownClaim = claim;
+
+        public void SetTransferRuntimeState(string state) =>
+            TransferPointer = TransferPointer! with { State = state };
+
+        public async Task<bool> TryTransitionStatusAsync(
+            Guid id,
+            IReadOnlyCollection<AcquisitionStatus> expectedStatuses,
+            AcquisitionStatus status,
+            string? message,
+            CancellationToken cancellationToken) {
+            var current = id == AcquisitionId ? Status : id == CloneResult ? ReplacementStatus : null;
+            if (current is null || !expectedStatuses.Contains(current.Value)) {
+                return false;
+            }
+
+            await SetStatusAsync(id, status, message, cancellationToken);
+            return true;
+        }
+
+        public async Task<bool> TryClaimFailedRecoveryAsync(
+            Guid id,
+            IReadOnlyCollection<AcquisitionStatus> expectedStatuses,
+            SelectedRelease? expectedSelectedRelease,
+            string message,
+            CancellationToken cancellationToken) {
+            if (id != AcquisitionId
+                || Status is not { } current
+                || !expectedStatuses.Contains(current)
+                || SelectedRelease != expectedSelectedRelease) {
+                return false;
+            }
+
+            await SetStatusAsync(id, AcquisitionStatus.Failed, message, cancellationToken);
+            return true;
+        }
+
+        public Task<AcquisitionTeardownClaim?> GetTeardownClaimAsync(Guid id, CancellationToken cancellationToken) =>
+            Task.FromResult(id == AcquisitionId ? TeardownClaim : null);
+
+        public async Task<bool> TryClaimTeardownAsync(
+            Guid id,
+            AcquisitionStatus expectedStatus,
+            AcquisitionTeardownIntent intent,
+            string message,
+            CancellationToken cancellationToken) {
+            if (id != AcquisitionId || Status != expectedStatus || TeardownClaim is not null) {
+                return false;
+            }
+
+            TeardownClaim = new AcquisitionTeardownClaim(intent, expectedStatus);
+            await SetStatusAsync(id, AcquisitionStatus.Stopping, message, cancellationToken);
+            return true;
+        }
+
+        public async Task<bool> TryClaimEntityRemovalTeardownAsync(
+            Guid id,
+            string message,
+            CancellationToken cancellationToken) {
+            if (id != AcquisitionId || Status is null) {
+                return false;
+            }
+
+            var originalStatus = TeardownClaim?.OriginalStatus ?? Status.Value;
+            TeardownClaim = new AcquisitionTeardownClaim(AcquisitionTeardownIntent.Remove, originalStatus);
+            await SetStatusAsync(id, AcquisitionStatus.Stopping, message, cancellationToken);
+            return true;
+        }
+
+        public Task<bool> DeleteAsync(Guid id, CancellationToken cancellationToken) {
+            DeletedIds.Add(id);
+            if (id == AcquisitionId) {
+                Deleted = true;
+            }
+            return Task.FromResult(true);
+        }
+
+        /// <summary>What CloneForRetryAsync returns — set by tests exercising the preserve-wanted-loop path.</summary>
+        public Guid? CloneResult { get; set; }
+
+        public Task<Guid?> CloneForRetryAsync(Guid id, CancellationToken cancellationToken) {
+            Assert.Equal(AcquisitionId, id);
+            CloneCalls++;
+            return Task.FromResult(CloneResult);
+        }
+
+        public Task<Guid?> GetOrCreateTeardownReplacementAsync(Guid id, CancellationToken cancellationToken) {
+            Assert.Equal(AcquisitionId, id);
+            if (!TeardownReplacementId.HasValue && CloneResult.HasValue) {
+                TeardownReplacementId = CloneResult;
+                ReplacementStatus ??= AcquisitionStatus.Pending;
+            }
+            return Task.FromResult(TeardownReplacementId);
+        }
+
+        public Task<AcquisitionTransferInfo?> GetTransferInfoAsync(Guid acquisitionId, CancellationToken cancellationToken) =>
+            Task.FromResult(acquisitionId == AcquisitionId ? TransferPointer : null);
+
+        public Task<AcquisitionSummary> CreateAsync(AcquisitionMetadata metadata, CancellationToken cancellationToken) {
+            BeforeCreate?.Invoke();
+            CreatedMetadata = metadata;
+            Status = AcquisitionStatus.Pending;
+            return Task.FromResult(_summary with {
+                Status = AcquisitionStatus.Pending,
+                Title = metadata.Title,
+                Kind = metadata.Kind,
+                EntityId = metadata.EntityId
+            });
+        }
+        public Task<IReadOnlyList<Guid>> ListStaleSearchingAsync(TimeSpan olderThan, CancellationToken cancellationToken) => throw new NotSupportedException();
+        public Task<IReadOnlyList<AcquisitionSummary>> ListAsync(CancellationToken cancellationToken) =>
+            Task.FromResult<IReadOnlyList<AcquisitionSummary>>([
+                _summary with { Status = Status ?? _summary.Status }
+            ]);
+        public Task<AcquisitionSearchInput?> GetSearchInputAsync(Guid id, CancellationToken cancellationToken) =>
+            Task.FromResult(id == AcquisitionId ? SearchInput : null);
+        public Task<AcquisitionStatus?> GetStatusAsync(Guid id, CancellationToken cancellationToken) =>
+            Task.FromResult(id == AcquisitionId ? Status : id == CloneResult ? ReplacementStatus : null);
+        public Task<UpgradeOwnedQuality?> GetUpgradeOwnedQualityAsync(Guid acquisitionId, CancellationToken cancellationToken) => Task.FromResult<UpgradeOwnedQuality?>(null);
+        public Task<UpgradeReplaceTarget?> GetUpgradeReplaceTargetAsync(Guid childId, CancellationToken cancellationToken) => throw new NotSupportedException();
+        public Task UpdateOwnedQualityAsync(Guid acquisitionId, BookQualityRank ownedQuality, CancellationToken cancellationToken) => throw new NotSupportedException();
+        public Task UpdateOwnedMediaQualityAsync(Guid acquisitionId, string ownedMediaQuality, int ownedMediaRevision, int ownedFormatScore, CancellationToken cancellationToken) => throw new NotSupportedException();
+        public Task EnrichMetadataAsync(Guid acquisitionId, string? description, string? posterUrl, int? year, CancellationToken cancellationToken) => throw new NotSupportedException();
+        public Task MarkImportedWithQualityAsync(Guid id, BookQualityRank ownedQuality, string? message, CancellationToken cancellationToken, string? ownedMediaQuality = null, int ownedMediaRevision = 1, int ownedFormatScore = 0) => throw new NotSupportedException();
+        public Task<bool> TryCompleteSearchAsync(Guid id, IReadOnlyList<ScoredRelease> candidates, string? message, CancellationToken cancellationToken) =>
+            TryTransitionStatusAsync(
+                id,
+                [AcquisitionStatus.Searching],
+                AcquisitionStatus.AwaitingSelection,
+                message,
+                cancellationToken);
+        public Task<AcquisitionQueueCandidate?> GetQueueCandidateAsync(Guid acquisitionId, Guid candidateId, CancellationToken cancellationToken) =>
+            Task.FromResult(acquisitionId == AcquisitionId && QueueCandidate?.CandidateId == candidateId
+                ? QueueCandidate
+                : null);
+        public Task<IReadOnlyList<AcquisitionCandidateRef>> ListAcceptedCandidatesAsync(Guid acquisitionId, CancellationToken cancellationToken) => throw new NotSupportedException();
+        public Task MarkCandidatesBlocklistedAsync(Guid acquisitionId, string identity, CancellationToken cancellationToken) => throw new NotSupportedException();
+        public Task SetSelectedReleaseAsync(Guid acquisitionId, SelectedRelease selected, CancellationToken cancellationToken) {
+            SelectedRelease = selected;
+            return Task.CompletedTask;
+        }
+        public Task<SelectedRelease?> GetSelectedReleaseAsync(Guid acquisitionId, CancellationToken cancellationToken) =>
+            Task.FromResult(SelectedRelease);
+        public Task<bool> BeginTransferAddAsync(
+            Guid acquisitionId,
+            Guid downloadClientConfigId,
+            string correlation,
+            string? category,
+            TransferSeedGoal? seedGoal,
+            CancellationToken cancellationToken) {
+            BeginTransferAddCalls++;
+            TransferPointer = new AcquisitionTransferInfo(
+                Status ?? AcquisitionStatus.Queued,
+                FinalSourcePath: null,
+                correlation,
+                downloadClientConfigId,
+                category,
+                TransferOwnershipState.Adding.ToCode());
+            return Task.FromResult(true);
+        }
+        public Task<bool> CompleteTransferAddAsync(
+            Guid acquisitionId,
+            Guid downloadClientConfigId,
+            string correlation,
+            string clientItemId,
+            SelectedRelease selectedRelease,
+            string queuedMessage,
+            CancellationToken cancellationToken) {
+            BeforeCreateTransfer?.Invoke();
+            CreateTransferCancellationToken = cancellationToken;
+            if (CreateTransferResult) {
+                Status = AcquisitionStatus.Queued;
+                SelectedRelease = selectedRelease;
+                TransferPointer = new AcquisitionTransferInfo(
+                    Status ?? AcquisitionStatus.Queued,
+                    FinalSourcePath: null,
+                    clientItemId,
+                    downloadClientConfigId,
+                    TransferPointer?.Category,
+                    State: null);
+            }
+            return Task.FromResult(CreateTransferResult);
+        }
+        public Task AbandonTransferAddAsync(
+            Guid acquisitionId,
+            Guid downloadClientConfigId,
+            string correlation,
+            CancellationToken cancellationToken) {
+            if (TransferPointer?.State == TransferOwnershipState.Adding.ToCode()
+                && TransferPointer.DownloadClientConfigId == downloadClientConfigId
+                && TransferPointer.ClientItemId == correlation) {
+                TransferPointer = TransferPointer with {
+                    ClientItemId = null,
+                    DownloadClientConfigId = null,
+                    Category = null,
+                    State = null
+                };
+            }
+            return Task.CompletedTask;
+        }
+        public Task<bool> CreateTransferAsync(Guid acquisitionId, Guid? downloadClientConfigId, string clientItemId, string? category, CancellationToken cancellationToken, TransferSeedGoal? seedGoal = null) {
+            BeforeCreateTransfer?.Invoke();
+            CreateTransferCancellationToken = cancellationToken;
+            if (CreateTransferResult || PersistRejectedTransfer) {
+                TransferPointer = new AcquisitionTransferInfo(
+                    Status ?? AcquisitionStatus.Queued,
+                    FinalSourcePath: null,
+                    clientItemId,
+                    downloadClientConfigId);
+            }
+            return Task.FromResult(CreateTransferResult);
+        }
+        public Task<IReadOnlyList<SeedingTransfer>> ListSeedingTransfersAsync(CancellationToken cancellationToken) => throw new NotSupportedException();
+        public Task<bool> MarkTransferSeedingAsync(Guid acquisitionId, DateTimeOffset since, CancellationToken cancellationToken) => throw new NotSupportedException();
+        public Task ClearTransferSeedingAsync(Guid transferId, CancellationToken cancellationToken) => throw new NotSupportedException();
+        public Task<IReadOnlyList<ActiveTransfer>> ListActiveTransfersAsync(CancellationToken cancellationToken) =>
+            Task.FromResult<IReadOnlyList<ActiveTransfer>>(ActiveTransfers.ToArray());
+        public Task<bool> HasActiveTransfersAsync(CancellationToken cancellationToken) => throw new NotSupportedException();
+        public Task UpdateTransferAsync(Guid transferId, double progress, string? state, string? contentPath, CancellationToken cancellationToken) => throw new NotSupportedException();
+        public Task MarkTransferStalledAsync(Guid transferId, DateTimeOffset? stalledSince, CancellationToken cancellationToken) => throw new NotSupportedException();
+        public Task<AcquisitionImportContext?> GetImportContextAsync(Guid acquisitionId, CancellationToken cancellationToken) =>
+            Task.FromResult(acquisitionId == AcquisitionId ? ImportContext : null);
+        public Task<bool> TryClaimInitialImportAsync(Guid id, Guid claimJobId, bool allowManualRetry, CancellationToken cancellationToken) => throw new NotSupportedException();
+        public Task<bool> TryHoldCorruptImportCheckpointAsync(Guid id, Guid claimJobId, string message, CancellationToken cancellationToken) => throw new NotSupportedException();
+        public Task SetFinalSourcePathAsync(Guid acquisitionId, string finalSourcePath, CancellationToken cancellationToken) => throw new NotSupportedException();
+        public Task SetTvImportCheckpointAsync(Guid acquisitionId, TvImportCheckpoint? checkpoint, CancellationToken cancellationToken) => throw new NotSupportedException();
+        public Task<bool> TryCreateTvImportCheckpointAsync(Guid acquisitionId, TvImportCheckpoint checkpoint, CancellationToken cancellationToken) => throw new NotSupportedException();
+        public Task<bool> TryClaimTvImportCheckpointAsync(Guid acquisitionId, TvImportCheckpoint checkpoint, Guid claimJobId, CancellationToken cancellationToken) => throw new NotSupportedException();
+        public Task<bool> TryClearTvImportCheckpointAsync(Guid acquisitionId, TvImportCheckpoint checkpoint, CancellationToken cancellationToken) {
+            if (RefuseTvCheckpointClear || acquisitionId != AcquisitionId || ImportContext?.TvImportCheckpoint != checkpoint) return Task.FromResult(false);
+            ImportContext = ImportContext with { TvImportCheckpoint = null };
+            return Task.FromResult(true);
+        }
+        public Task<bool> IsCurrentTvImportCheckpointAsync(Guid acquisitionId, TvImportCheckpoint checkpoint, CancellationToken cancellationToken) => throw new NotSupportedException();
+        public Task<bool> TryCreateImportPlacementCheckpointAsync(Guid acquisitionId, ImportPlacementCheckpoint checkpoint, CancellationToken cancellationToken) => throw new NotSupportedException();
+        public Task<bool> TryAdvanceImportPlacementCheckpointAsync(Guid acquisitionId, ImportPlacementCheckpoint expected, ImportPlacementCheckpoint advanced, CancellationToken cancellationToken) => throw new NotSupportedException();
+        public Task<bool> TryClaimImportPlacementCheckpointAsync(Guid acquisitionId, ImportPlacementCheckpoint checkpoint, Guid claimJobId, CancellationToken cancellationToken) => throw new NotSupportedException();
+        public Task<bool> TryClearImportPlacementCheckpointAsync(Guid acquisitionId, ImportPlacementCheckpoint checkpoint, CancellationToken cancellationToken) {
+            if (acquisitionId != AcquisitionId || ImportContext?.ImportPlacementCheckpoint != checkpoint) {
+                return Task.FromResult(false);
+            }
+
+            ClearedPlacementCheckpoints++;
+            ImportContext = ImportContext with { ImportPlacementCheckpoint = null };
+            return Task.FromResult(true);
+        }
+        public Task<bool> IsCurrentImportPlacementCheckpointAsync(Guid acquisitionId, ImportPlacementCheckpoint checkpoint, CancellationToken cancellationToken) => throw new NotSupportedException();
+        public Task WriteImportHintAsync(Guid acquisitionId, string sourcePath, AcquisitionImportContext context, BookQualityRank ownedQuality, CancellationToken cancellationToken) => throw new NotSupportedException();
+        public Task<bool> AnyOpenForEntityAsync(Guid entityId, CancellationToken cancellationToken) =>
+            Task.FromResult(entityId == WantedEntityId
+                && Status is not AcquisitionStatus.Imported and not AcquisitionStatus.Cancelled);
+
+        public Task<AcquisitionDetail?> GetLatestForEntityAsync(Guid entityId, CancellationToken cancellationToken) =>
+            entityId == WantedEntityId
+                ? GetAsync(AcquisitionId, cancellationToken)
+                : Task.FromResult<AcquisitionDetail?>(null);
+        public Task<IReadOnlyList<Guid>> ListIdsForEntityAsync(Guid entityId, CancellationToken cancellationToken) => throw new NotSupportedException();
+    }
+
+    private sealed class RecordingHandoffGraph(
+        Guid graphId,
+        Guid acquisitionId,
+        JobGraphStatus status = JobGraphStatus.Waiting) : IJobGraphService {
+        private readonly DateTimeOffset _now = DateTimeOffset.UtcNow;
+        private readonly string _reviewKey = AcquisitionGraphSignals.Review(acquisitionId);
+        private bool _externalOpen;
+
+        public List<string> Operations { get; } = [];
+
+        public Task<JobGraphDetailSnapshot?> GetAsync(Guid id, CancellationToken cancellationToken) =>
+            Task.FromResult<JobGraphDetailSnapshot?>(id == graphId
+                ? new JobGraphDetailSnapshot(
+                    Snapshot(),
+                    [],
+                    [],
+                    [new JobGraphSignalSnapshot(
+                        Guid.NewGuid(), graphId, _reviewKey, JobGraphSignalKind.IdentifyReview,
+                        acquisitionId.ToString(), "Choose release", _now, null, null)])
+                : null);
+
+        public Task<JobGraphSignalSnapshot> OpenSignalAsync(
+            Guid id,
+            string key,
+            JobGraphSignalKind kind,
+            string? correlationId,
+            string? message,
+            CancellationToken cancellationToken) {
+            Assert.Equal(graphId, id);
+            _externalOpen = true;
+            Operations.Add("open:external-transfer");
+            return Task.FromResult(new JobGraphSignalSnapshot(
+                Guid.NewGuid(), id, key, kind, correlationId, message, _now, null, null));
+        }
+
+        public Task<JobGraphSignalSnapshot> ResolveSignalAsync(
+            Guid id,
+            string key,
+            IReadOnlyList<GraphJobNodeRequest> continuationNodes,
+            CancellationToken cancellationToken) {
+            Assert.True(_externalOpen, "Resolving the last review signal before opening transfer wait would terminalize the graph.");
+            Assert.Equal(_reviewKey, key);
+            Operations.Add("resolve:review");
+            return Task.FromResult(new JobGraphSignalSnapshot(
+                Guid.NewGuid(), id, key, JobGraphSignalKind.IdentifyReview,
+                acquisitionId.ToString(), "Choose release", _now, _now, null));
+        }
+
+        private JobGraphSnapshot Snapshot() => new(
+            graphId,
+            graphId,
+            JobGraphOrigin.Interactive,
+            status,
+            "Acquisition",
+            Guid.NewGuid(),
+            null,
+            null,
+            acquisitionId.ToString(),
+            _now,
+            _now);
+
+        public Task<JobGraphSnapshot> StartAsync(StartJobGraphRequest request, CancellationToken cancellationToken) => throw new NotSupportedException();
+        public Task<JobRunSnapshot> AppendNodeAsync(Guid id, GraphJobNodeRequest request, CancellationToken cancellationToken) => throw new NotSupportedException();
+        public Task<IReadOnlyList<JobGraphSnapshot>> ListAsync(CancellationToken cancellationToken) => throw new NotSupportedException();
+        public Task<bool> CancelAsync(Guid id, CancellationToken cancellationToken) => throw new NotSupportedException();
+    }
+
+    private sealed class FakeDownloadClientConfigStore(bool includeRecordedClient) : IDownloadClientConfigStore {
+        private static readonly DownloadClientDetail Default = new(
+            DefaultClientId, DownloadClientKind.QBittorrent, "Default qBittorrent", "http://qbit", "admin", "prismedia", true, true, "secret");
+        private static readonly DownloadClientDetail Recorded = new(
+            RecordedClientId, DownloadClientKind.Transmission, "Recorded Transmission", "http://transmission", "user", "prismedia", true, true, "secret");
+        private static readonly DownloadClientDetail Usenet = new(
+            UsenetClientId, DownloadClientKind.Sabnzbd, "SABnzbd", "http://sabnzbd", null, "prismedia", true, false, null, ApiKey: "secret");
+
+        public Task<DownloadClientDetail?> GetAsync(Guid id, CancellationToken cancellationToken) =>
+            Task.FromResult<DownloadClientDetail?>(includeRecordedClient && id == RecordedClientId ? Recorded : null);
+
+        public Task<DownloadClientDetail?> GetDefaultAsync(CancellationToken cancellationToken) =>
+            Task.FromResult<DownloadClientDetail?>(Default);
+
+        public Task<IReadOnlyList<DownloadClientSummary>> ListAsync(CancellationToken cancellationToken) => throw new NotSupportedException();
+        public Task<IReadOnlyList<DownloadClientDetail>> ListDetailsAsync(CancellationToken cancellationToken) => throw new NotSupportedException();
+        public Task<DownloadClientDetail?> GetDefaultAsync(DownloadProtocol protocol, CancellationToken cancellationToken) => throw new NotSupportedException();
+        public Task<IReadOnlyList<DownloadClientDetail>> ListEnabledAsync(DownloadProtocol protocol, CancellationToken cancellationToken) =>
+            Task.FromResult<IReadOnlyList<DownloadClientDetail>>(protocol == DownloadProtocol.Usenet
+                ? [Usenet]
+                : includeRecordedClient ? [Recorded] : [Default]);
+        public Task<IReadOnlyList<DownloadProtocol>> GetEnabledProtocolsAsync(CancellationToken cancellationToken) => throw new NotSupportedException();
+        public Task<DownloadClientSummary> SaveAsync(DownloadClientSaveCommand command, CancellationToken cancellationToken) => throw new NotSupportedException();
+        public Task<bool> DeleteAsync(Guid id, CancellationToken cancellationToken) => throw new NotSupportedException();
+    }
+
+    private sealed class RecordingDetachedDownloadCleanupStore : IDetachedDownloadCleanupStore {
+        public Task<bool> PreserveUpgradeAsync(Guid acquisitionId, CancellationToken cancellationToken) => throw new NotSupportedException();
+        public List<(Guid AcquisitionId, Guid DownloadClientConfigId, string ClientItemId)> Detachments { get; } = [];
+        public Exception? Failure { get; init; }
+        public bool DetachResult { get; init; } = true;
+
+        public Task<bool> DetachAsync(
+            Guid acquisitionId,
+            Guid downloadClientConfigId,
+            string clientItemId,
+            CancellationToken cancellationToken) {
+            Detachments.Add((acquisitionId, downloadClientConfigId, clientItemId));
+            return Failure is null
+                ? Task.FromResult(DetachResult)
+                : Task.FromException<bool>(Failure);
+        }
+
+        public Task<IReadOnlyList<DetachedDownloadCleanup>> ListAsync(CancellationToken cancellationToken) =>
+            throw new NotSupportedException();
+
+        public Task CompleteAsync(Guid cleanupId, CancellationToken cancellationToken) =>
+            throw new NotSupportedException();
+    }
+
+    private sealed class RecordingDownloadClientFactory : IDownloadClientFactory {
+        private readonly RecordingDownloadClient _client = new();
+        public List<(Guid ClientId, string ClientItemId, bool DeleteData)> Removals => _client.Removals;
+        public IReadOnlyList<CancellationToken> RemovalCancellationTokens => _client.RemovalCancellationTokens;
+        public int AddCount => _client.AddCount;
+        public Exception? GetFailure { set => _client.GetFailure = value; }
+        public Exception? PropertiesFailure { set => _client.PropertiesFailure = value; }
+        public Exception? PiecesFailure { set => _client.PiecesFailure = value; }
+        public Exception? RemoveFailure { get => _client.RemoveFailure; set => _client.RemoveFailure = value; }
+        public bool ItemExists { set => _client.ItemExists = value; }
+        public Exception? AddFailure { set => _client.AddFailure = value; }
+        public Action? OnAdd { get => _client.OnAdd; set => _client.OnAdd = value; }
+        public List<DownloadItemStatus> Items => _client.Items;
+        public List<DownloadItemFile> Files => _client.Files;
+        public int PropertiesCalls => _client.PropertiesCalls;
+        public IDownloadClient Get(DownloadClientKind kind) => _client;
+    }
+
+    private sealed class RecordingDownloadClient : IDownloadClient {
+        public DownloadClientKind Kind => DownloadClientKind.QBittorrent;
+        public List<(Guid ClientId, string ClientItemId, bool DeleteData)> Removals { get; } = [];
+        public List<CancellationToken> RemovalCancellationTokens { get; } = [];
+        public Exception? GetFailure { get; set; }
+        public Exception? PropertiesFailure { get; set; }
+        public Exception? PiecesFailure { get; set; }
+        public Exception? RemoveFailure { get; set; }
+        public bool ItemExists { get; set; } = true;
+        public Action? OnAdd { get; set; }
+        public Exception? AddFailure { get; set; }
+        public int AddCount { get; private set; }
+        public int PropertiesCalls { get; private set; }
+        public List<DownloadItemStatus> Items { get; } = [];
+        public List<DownloadItemFile> Files { get; } = [];
+
+        public Task RemoveAsync(DownloadClientConnection connection, string clientItemId, bool deleteData, CancellationToken cancellationToken) {
+            Removals.Add((connection.Id, clientItemId, deleteData));
+            RemovalCancellationTokens.Add(cancellationToken);
+            if (RemoveFailure is not null) {
+                throw RemoveFailure;
+            }
+            Items.RemoveAll(item => string.Equals(
+                item.ClientItemId,
+                clientItemId,
+                StringComparison.OrdinalIgnoreCase));
+            ItemExists = false;
+            return Task.CompletedTask;
+        }
+
+        public Task<string> AddAsync(DownloadClientConnection connection, DownloadAddRequest request, CancellationToken cancellationToken) {
+            AddCount++;
+            OnAdd?.Invoke();
+            if (AddFailure is not null) {
+                throw AddFailure;
+            }
+            ItemExists = true;
+            return Task.FromResult("new-client-item");
+        }
+        public Task<string> AddTorrentFileAsync(DownloadClientConnection connection, string fileName, byte[] torrent, CancellationToken cancellationToken) =>
+            AddAsync(connection, new DownloadAddRequest(fileName, null, connection.Category, fileName), cancellationToken);
+        public Task<DownloadItemStatus?> GetItemAsync(DownloadClientConnection connection, string clientItemId, CancellationToken cancellationToken) {
+            if (GetFailure is not null) {
+                throw GetFailure;
+            }
+
+            if (Items.Count > 0) {
+                return Task.FromResult<DownloadItemStatus?>(Items.FirstOrDefault(item => string.Equals(
+                    item.ClientItemId,
+                    clientItemId,
+                    StringComparison.OrdinalIgnoreCase)));
+            }
+
+            return Task.FromResult<DownloadItemStatus?>(ItemExists
+                ? new DownloadItemStatus(clientItemId, "Book", 0.5, "downloading", false, "/save", "/save/book")
+                : null);
+        }
+        public Task<IReadOnlyList<DownloadItemStatus>> ListItemsAsync(DownloadClientConnection connection, CancellationToken cancellationToken) =>
+            Task.FromResult<IReadOnlyList<DownloadItemStatus>>(Items.ToArray());
+        public Task<IReadOnlyList<DownloadItemFile>> GetFilesAsync(DownloadClientConnection connection, string clientItemId, CancellationToken cancellationToken) =>
+            Task.FromResult<IReadOnlyList<DownloadItemFile>>(Files.ToArray());
+        public Task<DownloadItemProperties?> GetPropertiesAsync(DownloadClientConnection connection, string clientItemId, CancellationToken cancellationToken) {
+            PropertiesCalls++;
+            return PropertiesFailure is null
+                ? Task.FromResult<DownloadItemProperties?>(null)
+                : Task.FromException<DownloadItemProperties?>(PropertiesFailure);
+        }
+        public Task<byte[]> GetPieceStatesAsync(DownloadClientConnection connection, string clientItemId, CancellationToken cancellationToken) =>
+            PiecesFailure is null
+                ? Task.FromResult(Array.Empty<byte>())
+                : Task.FromException<byte[]>(PiecesFailure);
+        public Task<DownloadClientConnectionTest> TestAsync(DownloadClientConnection connection, CancellationToken cancellationToken) => throw new NotSupportedException();
+    }
+
+    private sealed class FakeAcquisitionHistoryStore : IAcquisitionHistoryStore {
+        public List<AcquisitionHistoryEntry> Entries { get; } = [];
+        public Task AddAsync(AcquisitionHistoryEntry entry, CancellationToken cancellationToken) {
+            Entries.Add(entry);
+            return Task.CompletedTask;
+        }
+
+        public Task<IReadOnlyList<AcquisitionHistoryView>> ListAsync(int limit, Guid? entityId, CancellationToken cancellationToken) => throw new NotSupportedException();
+    }
+
+    /// <summary>Minimal monitor-store fake recording retargets — the only member the service's delete path uses.</summary>
+    private sealed class UnusedMetadataProvider : IRequestMetadataEnricher, IRequestChildHydrator {
+        public Task<RequestMetadataEnrichment?> LookupByIdAsync(
+            EntityKind kind, ExternalIdentity identity, bool hideNsfw, CancellationToken cancellationToken) =>
+            throw new InvalidOperationException("No provider lookup is needed without an external identity.");
+
+        public Task<RequestChildHydrationResult?> HydrateAsync(
+            Guid entityId, bool hideNsfw, CancellationToken cancellationToken) =>
+            throw new InvalidOperationException("No provider hydration is needed without an external identity.");
+    }
+
+    private sealed class RecordingMonitorStore : IMonitorStore {
+        public Guid MonitorId { get; } = Guid.NewGuid();
+        public List<(Guid From, Guid To)> Retargets { get; } = [];
+        public List<Guid> Deleted { get; } = [];
+        public MonitorStatus? EntityMonitorStatus { get; set; }
+        public bool RetargetSucceeds { get; set; } = true;
+
+        public Task<bool> RetargetAsync(Guid fromAcquisitionId, Guid toAcquisitionId, CancellationToken cancellationToken) {
+            Retargets.Add((fromAcquisitionId, toAcquisitionId));
+            return Task.FromResult(RetargetSucceeds);
+        }
+
+        public Task<bool> RetargetAfterFileDeletionAsync(
+            Guid fromAcquisitionId,
+            Guid toAcquisitionId,
+            CancellationToken cancellationToken) =>
+            Task.FromResult(false);
+
+        public Task<MonitorView> StartAsync(Guid acquisitionId, EntityKind kind, string title, string? author, CancellationToken cancellationToken) => throw new NotSupportedException();
+        public Task<MonitorView> StartForEntityAsync(Guid entityId, EntityKind kind, string title, AcquisitionTargeting? targeting, MonitorPreset? preset, CancellationToken cancellationToken) => throw new NotSupportedException();
+        public Task<MonitorView?> GetByEntityAsync(Guid entityId, CancellationToken cancellationToken) =>
+            Task.FromResult<MonitorView?>(EntityMonitorStatus is { } status
+                ? new MonitorView(
+                    MonitorId, EntityKind.Book, null, status, "Book", null, null,
+                    DateTimeOffset.UtcNow, DateTimeOffset.UtcNow, entityId)
+                : null);
+        public Task<AcquisitionTargeting?> GetTargetingByEntityAsync(Guid entityId, CancellationToken cancellationToken) => throw new NotSupportedException();
+        public Task<MonitorPreset?> GetPresetByEntityAsync(Guid entityId, CancellationToken cancellationToken) => throw new NotSupportedException();
+        public Task<bool> DeleteAsync(Guid monitorId, CancellationToken cancellationToken) {
+            Deleted.Add(monitorId);
+            return Task.FromResult(true);
+        }
+        public Task<bool> SetStatusAsync(Guid monitorId, MonitorStatus status, CancellationToken cancellationToken) => throw new NotSupportedException();
+        public Task<IReadOnlyList<MonitorView>> ListAsync(CancellationToken cancellationToken) => throw new NotSupportedException();
+        public Task<WantedPage> ListMissingAsync(int page, int pageSize, EntityKind? kind, CancellationToken cancellationToken) => throw new NotSupportedException();
+        public Task<WantedPage> ListCutoffUnmetAsync(int page, int pageSize, EntityKind? kind, CancellationToken cancellationToken) => throw new NotSupportedException();
+        public Task<MonitorView?> GetByAcquisitionAsync(Guid acquisitionId, CancellationToken cancellationToken) =>
+            Task.FromResult<MonitorView?>(acquisitionId == AcquisitionId
+                ? new MonitorView(
+                    MonitorId, EntityKind.Book, AcquisitionId, EntityMonitorStatus ?? MonitorStatus.Fulfilled, "Dune", "Frank Herbert",
+                    AcquisitionStatus.Imported, DateTimeOffset.UtcNow, DateTimeOffset.UtcNow, WantedEntityId)
+                : null);
+        public Task<bool> HasActiveMonitorsAsync(CancellationToken cancellationToken) => throw new NotSupportedException();
+        public Task<IReadOnlyList<DueMonitor>> ListDueMonitorsAsync(int defaultIntervalMinutes, CancellationToken cancellationToken) => throw new NotSupportedException();
+        public Task MarkSearchedAsync(Guid monitorId, CancellationToken cancellationToken) => throw new NotSupportedException();
+        public Task<Guid?> CreateUpgradeChildAsync(Guid monitorId, CancellationToken cancellationToken) => throw new NotSupportedException();
+        public Task ResolveUpgradeChildAsync(Guid childId, bool succeeded, CancellationToken cancellationToken) => throw new NotSupportedException();
+    }
+
+    private sealed class EmptyImportedFilesReader : IImportedFilesReader {
+        public IReadOnlyList<DownloadItemFile> List(string path) => [];
+    }
+
+    private sealed class FixedDownloadPayloadReader(DownloadPayload payload) : IDownloadPayloadReader {
+        public DownloadPayload? Read(string contentPath) => payload;
+    }
+
+    private sealed class FixedCatalogEvidence(IReadOnlyList<TvSeasonEpisodeCatalog> catalog) : ITvEpisodeCatalogEvidenceSource {
+        public Task<IReadOnlyList<TvSeasonEpisodeCatalog>> ReadAsync(Guid linkedEntityId, int requestedSeason,
+            IReadOnlyList<ImportCandidateFile> files, CancellationToken cancellationToken) => Task.FromResult(catalog);
+    }
+
+    private sealed class FixedImportTargetIndex(IReadOnlyList<TvEpisodeTitle> episodes) : IImportTargetIndex {
+        public IReadOnlyList<TvSeasonEpisodeCatalog> Catalog { get; set; } = [];
+        public Task<IReadOnlyList<TvSeasonEpisodeCatalog>> GetSeriesEpisodeCatalogAsync(Guid entityId, CancellationToken cancellationToken) =>
+            Task.FromResult(Catalog);
+        public Task<TvSeriesDiskLayout?> GetTvLayoutAsync(Guid entityId, CancellationToken cancellationToken) =>
+            Task.FromResult<TvSeriesDiskLayout?>(null);
+        public Task<IReadOnlyList<TvEpisodeTitle>> GetSeasonEpisodeTitlesAsync(
+            Guid entityId,
+            int seasonNumber,
+            CancellationToken cancellationToken) => Task.FromResult(episodes);
+        public Task<MovieDiskTarget?> GetMovieTargetAsync(Guid entityId, CancellationToken cancellationToken) =>
+            Task.FromResult<MovieDiskTarget?>(null);
+        public Task<AlbumDiskTarget?> GetAlbumTargetAsync(Guid entityId, CancellationToken cancellationToken) =>
+            Task.FromResult<AlbumDiskTarget?>(null);
+    }
+
+    private sealed class NullAcquisitionProfileStore : IBookAcquisitionProfileStore {
+        public Task<string?> GetDownloadCategoryAsync(Guid? profileId, EntityKind kind, CancellationToken cancellationToken) =>
+            Task.FromResult<string?>(null);
+        public Task<BookAcquisitionRules> GetRulesAsync(Guid? profileId, EntityKind kind, CancellationToken cancellationToken) => throw new NotSupportedException();
+        public Task<BookImportProfile?> GetImportProfileAsync(Guid? profileId, EntityKind kind, CancellationToken cancellationToken) => throw new NotSupportedException();
+        public Task<bool> GetAutoPickAsync(Guid? profileId, EntityKind kind, CancellationToken cancellationToken) => throw new NotSupportedException();
+        public Task<bool> GetAutoRedownloadAsync(Guid? profileId, EntityKind kind, CancellationToken cancellationToken) => throw new NotSupportedException();
+        public Task<IReadOnlyList<BookAcquisitionProfileView>> ListAsync(
+            bool hideNsfw,
+            IReadOnlySet<Guid>? allowedRootIds,
+            CancellationToken cancellationToken) => throw new NotSupportedException();
+        public Task<BookAcquisitionProfileView?> GetAsync(Guid id, CancellationToken cancellationToken) => throw new NotSupportedException();
+        public Task<BookAcquisitionProfileView> SaveAsync(BookAcquisitionProfileSaveCommand command, CancellationToken cancellationToken) => throw new NotSupportedException();
+        public Task<bool> DeleteAsync(Guid id, CancellationToken cancellationToken) => throw new NotSupportedException();
+    }
+
+    private sealed class NullIndexerConfigStore : IIndexerConfigStore {
+        public Task<IndexerConfigDetail?> GetAsync(Guid id, CancellationToken cancellationToken) =>
+            Task.FromResult<IndexerConfigDetail?>(null);
+        public Task<IReadOnlyList<IndexerConfigSummary>> ListAsync(CancellationToken cancellationToken) => throw new NotSupportedException();
+        public Task<IReadOnlyList<IndexerConfigDetail>> ListDetailsAsync(CancellationToken cancellationToken) => throw new NotSupportedException();
+        public Task<IndexerConfigSummary> SaveAsync(IndexerConfigSaveCommand command, CancellationToken cancellationToken) => throw new NotSupportedException();
+        public Task<bool> DeleteAsync(Guid id, CancellationToken cancellationToken) => throw new NotSupportedException();
+    }
+
+    private sealed class FixedReleaseTimingService(AcquisitionReleaseTimingDecision decision)
+        : IAcquisitionReleaseTimingService {
+        public Guid? EntityId { get; private set; }
+
+        public Task<AcquisitionReleaseTimingDecision> EvaluateAsync(
+            Guid? entityId,
+            Guid? profileId,
+            EntityKind kind,
+            CancellationToken cancellationToken) {
+            EntityId = entityId;
+            return Task.FromResult(decision);
+        }
+    }
+
+    private sealed class NullReleaseLinkResolver : IReleaseLinkResolver {
+        public Task<string?> ResolveMagnetAsync(string infoUrl, CancellationToken cancellationToken) =>
+            Task.FromResult<string?>(null);
+    }
+
+    private sealed class FixedAcquisitionSearchResourcePolicy(JobResourceRequirement? requirement)
+        : IAcquisitionSearchResourcePolicy {
+        public Task<JobResourceRequirement?> ResolveAsync(CancellationToken cancellationToken) =>
+            Task.FromResult(requirement);
+    }
+
+    private sealed class ThrowingBlocklistStore : IAcquisitionBlocklistStore {
+        public Task<IReadOnlySet<string>> GetIdentitiesAsync(CancellationToken cancellationToken) =>
+            Task.FromResult<IReadOnlySet<string>>(new HashSet<string>(StringComparer.OrdinalIgnoreCase));
+        public Task<IReadOnlyList<AcquisitionBlocklistEntry>> ListAsync(CancellationToken cancellationToken) => throw new NotSupportedException();
+        public Task AddAsync(BlocklistAddRequest request, CancellationToken cancellationToken) => throw new NotSupportedException();
+        public Task<bool> DeleteAsync(Guid id, CancellationToken cancellationToken) => throw new NotSupportedException();
+    }
+
+    private sealed class RecordingBlocklistStore : IAcquisitionBlocklistStore {
+        public List<BlocklistAddRequest> Requests { get; } = [];
+
+        public Task<IReadOnlySet<string>> GetIdentitiesAsync(CancellationToken cancellationToken) =>
+            Task.FromResult<IReadOnlySet<string>>(new HashSet<string>(StringComparer.OrdinalIgnoreCase));
+
+        public Task AddAsync(BlocklistAddRequest request, CancellationToken cancellationToken) {
+            Requests.Add(request);
+            return Task.CompletedTask;
+        }
+
+        public Task<IReadOnlyList<AcquisitionBlocklistEntry>> ListAsync(CancellationToken cancellationToken) =>
+            throw new NotSupportedException();
+
+        public Task<bool> DeleteAsync(Guid id, CancellationToken cancellationToken) =>
+            throw new NotSupportedException();
+    }
+
+    private sealed class RecordingJobQueue : IJobQueueService {
+        public Guid? ResultGraphId { get; set; }
+        public List<EnqueueJobRequest> Requests { get; } = [];
+        public List<(string Key, int MaxConcurrency, TimeSpan MinimumStartInterval)> ResourceDeclarations { get; } = [];
+        public Exception? EnqueueFailure { get; set; }
+        public Action? BeforeEnqueue { get; set; }
+
+        public Task<IReadOnlyList<JobRunSnapshot>> ListAsync(bool hideNsfw, CancellationToken cancellationToken) => throw new NotSupportedException();
+        public Task<JobRunSnapshot> EnqueueAsync(JobType type, CancellationToken cancellationToken) => throw new NotSupportedException();
+        public Task<JobRunSnapshot> EnqueueAsync(EnqueueJobRequest request, CancellationToken cancellationToken) {
+            BeforeEnqueue?.Invoke();
+            if (EnqueueFailure is not null) {
+                throw EnqueueFailure;
+            }
+
+            Requests.Add(request);
+            return Task.FromResult(new JobRunSnapshot(
+                Guid.NewGuid(), request.Type, JobRunStatus.Queued, 0, null,
+                request.PayloadJson ?? "{}", null, request.TargetEntityId, request.TargetLabel,
+                DateTimeOffset.UtcNow, null, null) { GraphId = ResultGraphId });
+        }
+        public Task<bool> HasPendingAsync(JobType type, string? targetEntityId, CancellationToken cancellationToken) =>
+            Task.FromResult(Requests.Any(request => request.Type == type && request.TargetEntityId == targetEntityId));
+        public Task DeclareResourceAsync(
+            string resourceKey,
+            int maxConcurrency,
+            TimeSpan minimumStartInterval,
+            CancellationToken cancellationToken) {
+            ResourceDeclarations.Add((resourceKey, maxConcurrency, minimumStartInterval));
+            return Task.CompletedTask;
+        }
+        public Task<int> EnqueueBatchAsync(IReadOnlyList<EnqueueJobRequest> requests, CancellationToken cancellationToken) => throw new NotSupportedException();
+        public Task<int> CancelAsync(JobType? type, CancellationToken cancellationToken) => throw new NotSupportedException();
+        public Task<bool> CancelRunAsync(Guid id, CancellationToken cancellationToken) => throw new NotSupportedException();
+        public Task<int> ClearFailuresAsync(JobType? type, CancellationToken cancellationToken) => throw new NotSupportedException();
+        public Task<JobRunSnapshot?> ClaimNextAsync(string workerId, CancellationToken cancellationToken) => throw new NotSupportedException();
+        public Task<int> RecoverStaleRunningAsync(string currentWorkerId, TimeSpan staleAfter, CancellationToken cancellationToken) => throw new NotSupportedException();
+        public Task UpdateProgressAsync(Guid id, int progress, string? message, CancellationToken cancellationToken) => throw new NotSupportedException();
+        public Task CompleteAsync(Guid id, string? message, CancellationToken cancellationToken) => throw new NotSupportedException();
+        public Task FailAsync(Guid id, string message, TimeSpan retryDelay, CancellationToken cancellationToken) => throw new NotSupportedException();
+        public Task<IReadOnlyList<JobQueueCount>> GetQueueCountsAsync(bool hideNsfw, CancellationToken cancellationToken) => throw new NotSupportedException();
+        public Task<int> PruneHistoryAsync(TimeSpan retention, CancellationToken cancellationToken) => throw new NotSupportedException();
+    }
+}

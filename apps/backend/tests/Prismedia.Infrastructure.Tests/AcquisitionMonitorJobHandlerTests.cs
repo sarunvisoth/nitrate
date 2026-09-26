@@ -1,0 +1,950 @@
+using Microsoft.EntityFrameworkCore;
+using Microsoft.Extensions.Logging.Abstractions;
+using Prismedia.Application.Acquisition;
+using Prismedia.Application.Jobs;
+using Prismedia.Application.Jobs.Handlers;
+using Prismedia.Contracts.Acquisition;
+using Prismedia.Contracts.System;
+using Prismedia.Domain.Entities;
+using Prismedia.Infrastructure.Acquisition;
+using Prismedia.Infrastructure.Persistence;
+using Prismedia.Infrastructure.Persistence.Entities;
+
+namespace Prismedia.Infrastructure.Tests;
+
+/// <summary>
+/// Verifies the monitor's vanished-download handling: a download truly gone from the client past the
+/// grace window falls back to the searching state (no blocklist, no Failed — the user removing a torrent
+/// is not a release failure), while a healthy torrent whose category drifted is never touched. Also
+/// covers stalled downloads: a stall is anchored on first observation and abandoned to failed-recovery
+/// only after it persists past the grace window, while a recovered transfer clears its anchor.
+/// </summary>
+public sealed class AcquisitionMonitorJobHandlerTests {
+    private static readonly Guid ClientId = Guid.NewGuid();
+
+    [Theory]
+    [InlineData(true, false, false, 1)]
+    [InlineData(false, false, false, 0)]
+    [InlineData(true, true, false, 0)]
+    [InlineData(true, false, true, 0)]
+    public async Task MetadataHoldRequiresSuccessfulFileAdmission(bool hasFiles, bool wrongContent, bool unavailable, int expectedStarts) {
+        await using var db = CreateContext();
+        var id = await SeedDownloadingAsync(db, DateTimeOffset.UtcNow);
+        var acquisition = await db.Acquisitions.SingleAsync(row => row.Id == id);
+        acquisition.Kind = EntityKind.Movie; acquisition.Title = "Film"; acquisition.Year = 2020;
+        await db.SaveChangesAsync();
+        await AcquisitionTestFactory.Store(db).SetSelectedReleaseAsync(id, new("Film 2020 1080p WEB-DL", "Indexer", "hashX"), default);
+        var status = new DownloadItemStatus("hashX", "Film", 0, "stoppedDL", false, "/save", "/save/Film",
+            AwaitingPayloadAdmission: true);
+        var starts = 0;
+        var queue = new RecordingJobQueue();
+        await RunAsync(db, queue, [status], status, id,
+            beforePayloadInspection: unavailable ? () => throw new IOException("Metadata endpoint unavailable") : null,
+            files: hasFiles ? [new(wrongContent ? "Film.1999.1080p.mkv" : "Film.2020.1080p.WEB-DL.mkv", 100, 0)] : [],
+            onRelease: () => starts++);
+        Assert.Equal(expectedStarts, starts);
+        if (wrongContent) Assert.Equal(JobType.AcquisitionFailedHandle, Assert.Single(queue.Enqueued).Type);
+        else Assert.Empty(queue.Enqueued);
+    }
+
+    [Fact]
+    public async Task UnreadableStoppedMetadataEventuallyUsesStallRecovery() {
+        await using var db = CreateContext();
+        var id = await SeedDownloadingAsync(db, DateTimeOffset.UtcNow, DateTimeOffset.UtcNow.AddMinutes(-90));
+        var stopped = new DownloadItemStatus("hashX", "Book", 0, "stoppedDL", false, "/save", "/save/book",
+            AwaitingPayloadAdmission: true);
+        var queue = new RecordingJobQueue();
+        await RunAsync(db, queue, [stopped], stopped, id, files: []);
+        var job = Assert.Single(queue.Enqueued);
+        Assert.Equal(JobType.AcquisitionFailedHandle, job.Type);
+        Assert.Equal(BlocklistReason.Stalled, AcquisitionFailedPayload.Parse(job.PayloadJson!).Reason);
+    }
+
+    [Fact]
+    public async Task EarlyOwnedSeasonCoverageRequestsContextualRecoveryWithoutGloballyBlockingTheRelease() {
+        await using var db = CreateContext();
+        var id = await SeedDownloadingAsync(db, DateTimeOffset.UtcNow);
+        using var fixture = await TvPayloadAdmissionFixture.CreateAsync(db, await db.Acquisitions.SingleAsync(row => row.Id == id));
+        var queue = new RecordingJobQueue();
+        var downloading = new DownloadItemStatus("hashX", "Show", 0.01, "downloading", false, "/save", "/save/show");
+        await RunAsync(db, queue, [downloading], null, id,
+            files: fixture.Files.Select(file => new DownloadItemFile(file.RelativePath, file.SizeBytes, 0.01)).ToArray(),
+            payloadAdmission: fixture.Service);
+
+        var job = Assert.Single(queue.Enqueued);
+        Assert.Equal(JobType.AcquisitionFailedHandle, job.Type);
+        Assert.True(AcquisitionFailedPayload.Parse(job.PayloadJson!).RecheckTvCoverage);
+        Assert.Contains(fixture.Selected.Identity, await fixture.Service.GetExcludedAsync(fixture.Input, CancellationToken.None));
+        Assert.Empty(await db.AcquisitionBlocklist.ToArrayAsync());
+    }
+
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public async Task EarlyFileCheckUsesCurrentProviderMappingBeforeRejectingPairedEpisode(bool titlesAvailable) {
+        await using var db = CreateContext();
+        var acquisitionId = await SeedDownloadingAsync(db, DateTimeOffset.UtcNow);
+        var acquisition = await db.Acquisitions.SingleAsync(row => row.Id == acquisitionId);
+        acquisition.Kind = EntityKind.VideoEpisode;
+        acquisition.EntityId = Guid.NewGuid();
+        acquisition.Title = "Second Story";
+        acquisition.Series = "Show";
+        acquisition.SeasonNumber = 1;
+        acquisition.EpisodeNumber = 2;
+        await db.SaveChangesAsync();
+        await AcquisitionTestFactory.Store(db).SetSelectedReleaseAsync(
+            acquisitionId, new SelectedRelease("Show S01 720p WEB", "Indexer", "hashX"), CancellationToken.None);
+        var queue = new RecordingJobQueue();
+        var downloading = new DownloadItemStatus("hashX", "Show", 0.6, "downloading", false, "/save", "/save/show");
+
+        await RunAsync(db, queue, [downloading], null, acquisitionId,
+            files: [new("Show.S01E01.First.Story.Second.Story.mkv", 1_000_000, 0.6)],
+            importTargets: new EpisodeTitleIndex(titlesAvailable ? [new(1, "First Story"), new(2, "Second Story")] : []));
+
+        Assert.Equal(AcquisitionStatus.Downloading, await StatusOf(db, acquisitionId));
+        if (titlesAvailable) {
+            Assert.Empty(queue.Enqueued);
+        } else {
+            Assert.Equal(JobType.AcquisitionFailedHandle, Assert.Single(queue.Enqueued).Type);
+        }
+    }
+
+    [Fact]
+    public async Task DetachedCleanupCompletesWhenThePriorClientItemIsAlreadyGone() {
+        await using var db = CreateContext();
+        var cleanupId = Guid.NewGuid();
+        var now = DateTimeOffset.UtcNow;
+        db.DetachedDownloadCleanups.Add(new DetachedDownloadCleanupRow {
+            Id = cleanupId,
+            DownloadClientConfigId = ClientId,
+            ClientItemId = "old-gone-hash",
+            CreatedAt = now,
+            UpdatedAt = now
+        });
+        await db.SaveChangesAsync();
+
+        await RunAsync(
+            db,
+            new RecordingJobQueue(),
+            listing: [],
+            directLookup: null,
+            acquisitionId: Guid.NewGuid());
+
+        Assert.False(await db.DetachedDownloadCleanups.AsNoTracking()
+            .AnyAsync(row => row.Id == cleanupId));
+    }
+
+    [Fact]
+    public async Task DetachedCleanupRemovesPresentPriorItemAndCompletes() {
+        await using var db = CreateContext();
+        var cleanupId = Guid.NewGuid();
+        var now = DateTimeOffset.UtcNow;
+        db.DetachedDownloadCleanups.Add(new DetachedDownloadCleanupRow {
+            Id = cleanupId,
+            DownloadClientConfigId = ClientId,
+            ClientItemId = "old-present-hash",
+            CreatedAt = now,
+            UpdatedAt = now
+        });
+        await db.SaveChangesAsync();
+        var removed = false;
+
+        await RunAsync(
+            db,
+            new RecordingJobQueue(),
+            listing: [],
+            directLookup: new DownloadItemStatus(
+                "old-present-hash",
+                "Old",
+                0.5,
+                "downloading",
+                IsComplete: false,
+                "/downloads",
+                "/downloads/old"),
+            acquisitionId: Guid.NewGuid(),
+            onRemove: (clientItemId, deleteData) => {
+                Assert.Equal("old-present-hash", clientItemId);
+                Assert.True(deleteData);
+                removed = true;
+            });
+
+        Assert.True(removed);
+        Assert.False(await db.DetachedDownloadCleanups.AsNoTracking()
+            .AnyAsync(row => row.Id == cleanupId));
+    }
+
+    [Fact]
+    public async Task DetachedCleanupRemainsDurableWhileItsRecordedClientIsUnavailable() {
+        await using var db = CreateContext();
+        var cleanupId = Guid.NewGuid();
+        var now = DateTimeOffset.UtcNow;
+        db.DetachedDownloadCleanups.Add(new DetachedDownloadCleanupRow {
+            Id = cleanupId,
+            DownloadClientConfigId = ClientId,
+            ClientItemId = "old-retry-hash",
+            CreatedAt = now,
+            UpdatedAt = now
+        });
+        await db.SaveChangesAsync();
+
+        await RunAsync(
+            db,
+            new RecordingJobQueue(),
+            listing: [],
+            directLookup: null,
+            acquisitionId: Guid.NewGuid(),
+            downloadClientConfigs: new FakeDownloadClientConfigStore(clientExists: false));
+
+        Assert.True(await db.DetachedDownloadCleanups.AsNoTracking()
+            .AnyAsync(row => row.Id == cleanupId));
+    }
+
+    [Fact]
+    public async Task PostImportCleanupSurvivesAnUnavailableClientAndResumesWhenItReturns() {
+        await using var db = CreateContext();
+        var acquisitionId = await SeedDownloadingAsync(db, DateTimeOffset.UtcNow);
+        (await db.Acquisitions.SingleAsync(row => row.Id == acquisitionId)).Status = AcquisitionStatus.Imported;
+        var transfer = await db.DownloadTransfers.SingleAsync(row => row.AcquisitionId == acquisitionId);
+        transfer.SeedingSince = DateTimeOffset.UtcNow;
+        await db.SaveChangesAsync();
+        var removed = false;
+
+        await RunAsync(db, new RecordingJobQueue(), [], null, acquisitionId,
+            downloadClientConfigs: new FakeDownloadClientConfigStore(clientExists: false));
+
+        Assert.NotNull((await db.DownloadTransfers.AsNoTracking().SingleAsync()).SeedingSince);
+        Assert.True(await AcquisitionTestFactory.Store(db).HasActiveTransfersAsync(CancellationToken.None));
+
+        await RunAsync(db, new RecordingJobQueue(), [], null, acquisitionId,
+            properties: new DownloadItemProperties(1, 0, 0, 0, 0, 0, "/downloads"),
+            onRemove: (_, deleteData) => { Assert.True(deleteData); removed = true; });
+
+        Assert.True(removed);
+        Assert.Null((await db.DownloadTransfers.AsNoTracking().SingleAsync()).SeedingSince);
+        Assert.False(await AcquisitionTestFactory.Store(db).HasActiveTransfersAsync(CancellationToken.None));
+    }
+
+    [Fact]
+    public async Task PostImportWatchWithoutASeedGoalRemovesTheClientItem() {
+        await using var db = CreateContext();
+        var now = DateTimeOffset.UtcNow;
+        var acquisitionId = Guid.NewGuid();
+        db.Acquisitions.Add(new AcquisitionRow {
+            Id = acquisitionId,
+            Status = AcquisitionStatus.Imported,
+            Title = "Imported book",
+            ExternalIdsJson = "{}",
+            SourceUrlsJson = "[]",
+            CreatedAt = now,
+            UpdatedAt = now
+        });
+        db.DownloadTransfers.Add(new DownloadTransferRow {
+            Id = Guid.NewGuid(),
+            AcquisitionId = acquisitionId,
+            DownloadClientConfigId = ClientId,
+            ClientItemId = "cleanup-me",
+            Progress = 1,
+            SeedingSince = now,
+            CreatedAt = now,
+            UpdatedAt = now
+        });
+        await db.SaveChangesAsync();
+        var removed = false;
+
+        await RunAsync(
+            db,
+            new RecordingJobQueue(),
+            listing: [],
+            directLookup: null,
+            acquisitionId,
+            properties: new DownloadItemProperties(1, 0, 0, 0, 0, 0, "/downloads"),
+            onRemove: (clientItemId, deleteData) => {
+                Assert.Equal("cleanup-me", clientItemId);
+                Assert.True(deleteData);
+                removed = true;
+            });
+
+        Assert.True(removed);
+        Assert.Null(await db.DownloadTransfers.AsNoTracking()
+            .Where(row => row.AcquisitionId == acquisitionId)
+            .Select(row => row.SeedingSince)
+            .SingleAsync());
+    }
+
+    [Fact]
+    public async Task OldTransferlessReviewedClaimReturnsToReusableSelection() {
+        await using var db = CreateContext();
+        var now = DateTimeOffset.UtcNow.AddMinutes(-10);
+        var acquisitionId = Guid.NewGuid();
+        var candidateId = Guid.NewGuid();
+        db.Acquisitions.Add(new AcquisitionRow {
+            Id = acquisitionId,
+            Status = AcquisitionStatus.Queued,
+            Title = "Hamilton",
+            ExternalIdsJson = "{}",
+            SourceUrlsJson = "[]",
+            CreatedAt = now,
+            UpdatedAt = now
+        });
+        db.ReleaseCandidates.Add(new ReleaseCandidateRow {
+            Id = candidateId,
+            AcquisitionId = acquisitionId,
+            IndexerName = "Soulseek",
+            Title = "Hamilton album",
+            DownloadUrl = "slskd://reviewed-release",
+            Accepted = true,
+            Score = 100,
+            Protocol = DownloadProtocol.Soulseek,
+            RejectionsJson = "[]",
+            CreatedAt = now
+        });
+        await db.SaveChangesAsync();
+
+        await RunAsync(
+            db,
+            new RecordingJobQueue(),
+            listing: [],
+            directLookup: null,
+            acquisitionId);
+
+        var acquisition = await db.Acquisitions.AsNoTracking().SingleAsync(row => row.Id == acquisitionId);
+        Assert.Equal(AcquisitionStatus.AwaitingSelection, acquisition.Status);
+        Assert.Contains("reviewed release", acquisition.StatusMessage, StringComparison.OrdinalIgnoreCase);
+        Assert.True(await db.ReleaseCandidates.AsNoTracking().AnyAsync(row => row.Id == candidateId));
+        Assert.Empty(await db.DownloadTransfers.AsNoTracking().ToArrayAsync());
+    }
+
+    [Fact]
+    public async Task PendingAddIsRequeuedThroughTheSameCandidateBeforePolling() {
+        await using var db = CreateContext();
+        var now = DateTimeOffset.UtcNow.AddMinutes(-10);
+        var acquisitionId = Guid.NewGuid();
+        var candidateId = Guid.NewGuid();
+        db.Acquisitions.Add(new AcquisitionRow {
+            Id = acquisitionId, Status = AcquisitionStatus.Queued, Title = "Book",
+            ExternalIdsJson = "{}", SourceUrlsJson = "[]", CreatedAt = now, UpdatedAt = now
+        });
+        db.ReleaseCandidates.Add(new ReleaseCandidateRow {
+            Id = candidateId, AcquisitionId = acquisitionId, IndexerName = "Indexer", Title = "Book release",
+            InfoHash = "hash-pending", Accepted = true, Score = 100, Protocol = DownloadProtocol.Torrent,
+            RejectionsJson = "[]", CreatedAt = now
+        });
+        await db.SaveChangesAsync();
+        Assert.True(await AcquisitionTestFactory.Store(db).BeginTransferAddAsync(
+            acquisitionId,
+            ClientId,
+            "hash-pending",
+            "prismedia-books",
+            null,
+            CancellationToken.None));
+        var recovery = new RecordingAcquisitionQueueService();
+
+        await RunAsync(db, new RecordingJobQueue(), listing: [], directLookup: null, acquisitionId, recovery: recovery);
+
+        Assert.Equal((acquisitionId, candidateId), Assert.Single(recovery.Calls));
+    }
+
+    [Fact]
+    public async Task TerminalPendingAddFailureMakesMonitorDueAndQueuesFallbackSweep() {
+        await using var db = CreateContext();
+        var now = DateTimeOffset.UtcNow;
+        var acquisitionId = Guid.NewGuid();
+        var candidateId = Guid.NewGuid();
+        db.Acquisitions.Add(new AcquisitionRow {
+            Id = acquisitionId, Kind = EntityKind.VideoSeason, Status = AcquisitionStatus.Queued,
+            Title = "Season 1", ExternalIdsJson = "{}", SourceUrlsJson = "[]",
+            CreatedAt = now, UpdatedAt = now
+        });
+        db.ReleaseCandidates.Add(new ReleaseCandidateRow {
+            Id = candidateId, AcquisitionId = acquisitionId, IndexerName = "Indexer", Title = "Season pack",
+            InfoHash = "hash-terminal", Accepted = true, Score = 100, Protocol = DownloadProtocol.Torrent,
+            RejectionsJson = "[]", CreatedAt = now
+        });
+        db.Monitors.Add(new MonitorRow {
+            Id = Guid.NewGuid(), Kind = EntityKind.VideoSeason, AcquisitionId = acquisitionId,
+            Status = MonitorStatus.Active, Title = "Season 1", LastSearchedAt = now,
+            CreatedAt = now, UpdatedAt = now
+        });
+        await db.SaveChangesAsync();
+        var acquisitionStore = AcquisitionTestFactory.Store(db);
+        Assert.True(await acquisitionStore.BeginTransferAddAsync(
+            acquisitionId, ClientId, "hash-terminal", "prismedia", null, CancellationToken.None));
+        var monitorStore = new EfMonitorStore(db);
+        var jobs = new RecordingJobQueue();
+
+        await RunAsync(
+            db,
+            jobs,
+            listing: [],
+            directLookup: null,
+            acquisitionId,
+            recovery: new TerminalRecoveryQueueService(acquisitionStore),
+            monitors: monitorStore);
+
+        Assert.Equal(AcquisitionStatus.Failed, await StatusOf(db, acquisitionId));
+        Assert.Null(await db.Monitors.Where(row => row.AcquisitionId == acquisitionId).Select(row => row.LastSearchedAt).SingleAsync());
+        Assert.Equal(JobType.MonitoredSearch, Assert.Single(jobs.Enqueued).Type);
+    }
+
+    [Fact]
+    public async Task StalledPastGraceEnqueuesFailedHandleWithStalledReason() {
+        await using var db = CreateContext();
+        var acquisitionId = await SeedDownloadingAsync(db, lastSeen: DateTimeOffset.UtcNow, stalledSince: DateTimeOffset.UtcNow.AddMinutes(-90));
+        var queue = new RecordingJobQueue();
+
+        // The torrent is present in the listing but the client reports it stalled, and it has been stalled
+        // for longer than the grace window → abandon it to recovery, blocklisting it as stalled.
+        var stalled = new DownloadItemStatus("hashX", "Book", 0.5, "stalledDL", IsComplete: false, "/save", "/save/book", IsStalled: true);
+        await RunAsync(db, queue, listing: [stalled], directLookup: null, acquisitionId);
+
+        var enqueued = Assert.Single(queue.Enqueued);
+        Assert.Equal(JobType.AcquisitionFailedHandle, enqueued.Type);
+        Assert.Equal(JobGraphOrigin.Interactive, enqueued.Origin);
+        var payload = AcquisitionFailedPayload.Parse(enqueued.PayloadJson!);
+        Assert.Equal(BlocklistReason.Stalled, payload.Reason);
+        Assert.Equal("hashX", payload.Selected!.InfoHash);
+        // The monitor does NOT set Failed; the recovery job owns that transition.
+        Assert.Equal(AcquisitionStatus.Downloading, await StatusOf(db, acquisitionId));
+    }
+
+    [Fact]
+    public async Task StalledAbandonmentEnqueuesAtMostOnceAcrossPasses() {
+        await using var db = CreateContext();
+        var acquisitionId = await SeedDownloadingAsync(db, lastSeen: DateTimeOffset.UtcNow, stalledSince: DateTimeOffset.UtcNow.AddMinutes(-90));
+        var queue = new RecordingJobQueue();
+        var stalled = new DownloadItemStatus("hashX", "Book", 0.5, "stalledDL", IsComplete: false, "/save", "/save/book", IsStalled: true);
+
+        // Two monitor passes while the torrent stays stalled and the acquisition is still Downloading (the
+        // recovery job hasn't run yet). Abandonment must be enqueued exactly once: the first pass clears the
+        // stall anchor (so it isn't re-evaluated on a stale anchor) and the queue dedups by target.
+        await RunAsync(db, queue, listing: [stalled], directLookup: null, acquisitionId);
+        await RunAsync(db, queue, listing: [stalled], directLookup: null, acquisitionId);
+
+        var enqueued = Assert.Single(queue.Enqueued);
+        Assert.Equal(JobType.AcquisitionFailedHandle, enqueued.Type);
+        Assert.Equal(BlocklistReason.Stalled, AcquisitionFailedPayload.Parse(enqueued.PayloadJson!).Reason);
+    }
+
+    [Fact]
+    public async Task FirstStallObservationAnchorsWithoutAbandoning() {
+        await using var db = CreateContext();
+        var acquisitionId = await SeedDownloadingAsync(db, lastSeen: DateTimeOffset.UtcNow, stalledSince: null);
+        var queue = new RecordingJobQueue();
+
+        var stalled = new DownloadItemStatus("hashX", "Book", 0.5, "stalledDL", IsComplete: false, "/save", "/save/book", IsStalled: true);
+        await RunAsync(db, queue, listing: [stalled], directLookup: null, acquisitionId);
+
+        // First time seen stalled: anchor the stall, but don't abandon yet (it may recover).
+        Assert.Empty(queue.Enqueued);
+        Assert.NotNull(await StalledSinceOf(db, acquisitionId));
+        Assert.Equal(AcquisitionStatus.Downloading, await StatusOf(db, acquisitionId));
+    }
+
+    [Fact]
+    public async Task RecoveredTransferClearsStallAnchor() {
+        await using var db = CreateContext();
+        var acquisitionId = await SeedDownloadingAsync(db, lastSeen: DateTimeOffset.UtcNow, stalledSince: DateTimeOffset.UtcNow.AddMinutes(-90));
+        var queue = new RecordingJobQueue();
+
+        // Was stalled long enough to abandon, but it's downloading healthily again this pass → clear the anchor.
+        var healthy = new DownloadItemStatus("hashX", "Book", 0.7, "downloading", IsComplete: false, "/save", "/save/book");
+        await RunAsync(db, queue, listing: [healthy], directLookup: null, acquisitionId);
+
+        Assert.Empty(queue.Enqueued);
+        Assert.Null(await StalledSinceOf(db, acquisitionId));
+        Assert.Equal(AcquisitionStatus.Downloading, await StatusOf(db, acquisitionId));
+    }
+
+    [Fact]
+    public async Task CompletedTransferQueuesImportAheadOfBackgroundWork() {
+        await using var db = CreateContext();
+        var acquisitionId = await SeedDownloadingAsync(db, lastSeen: DateTimeOffset.UtcNow);
+        var queue = new RecordingJobQueue();
+        var complete = new DownloadItemStatus(
+            "hashX", "Book", 1, "completed", IsComplete: true, "/save", "/save/book");
+
+        await RunAsync(db, queue, listing: [complete], directLookup: complete, acquisitionId);
+
+        var import = Assert.Single(queue.Enqueued);
+        Assert.Equal(JobType.AcquisitionImport, import.Type);
+        Assert.Equal(JobGraphOrigin.Interactive, import.Origin);
+    }
+
+    [Fact]
+    public async Task QueuedSnapshotCannotRestoreDownloadingAfterUserCancellation() {
+        await using var db = CreateContext();
+        var acquisitionId = await SeedDownloadingAsync(
+            db,
+            lastSeen: DateTimeOffset.UtcNow,
+            status: AcquisitionStatus.Queued);
+        var queue = new RecordingJobQueue();
+        var healthy = new DownloadItemStatus(
+            "hashX", "Book", 0.7, "downloading", IsComplete: false, "/save", "/save/book");
+
+        await RunAsync(
+            db,
+            queue,
+            listing: [healthy],
+            directLookup: null,
+            acquisitionId,
+            beforePayloadInspection: async () => {
+                Assert.True(await AcquisitionTestFactory.Store(db).TryTransitionStatusAsync(
+                    acquisitionId,
+                    [AcquisitionStatus.Queued],
+                    AcquisitionStatus.Cancelled,
+                    "Cancelled.",
+                    CancellationToken.None));
+            });
+
+        Assert.Empty(queue.Enqueued);
+        Assert.Equal(AcquisitionStatus.Cancelled, await StatusOf(db, acquisitionId));
+    }
+
+    [Fact]
+    public async Task StalledStateButProgressingIsNotAbandoned() {
+        await using var db = CreateContext();
+        // Anchored well past the grace window, yet the torrent is still inching along.
+        var acquisitionId = await SeedDownloadingAsync(db, lastSeen: DateTimeOffset.UtcNow, stalledSince: DateTimeOffset.UtcNow.AddMinutes(-90));
+        var queue = new RecordingJobQueue();
+
+        // The client labels it stalled this instant, but cumulative progress rose from the seeded 0.5 → 0.7:
+        // it's alive (just slow), so it must not be abandoned, and the stale anchor is cleared.
+        var creeping = new DownloadItemStatus("hashX", "Book", 0.7, "stalledDL", IsComplete: false, "/save", "/save/book", IsStalled: true);
+        await RunAsync(db, queue, listing: [creeping], directLookup: null, acquisitionId);
+
+        Assert.Empty(queue.Enqueued);
+        Assert.Null(await StalledSinceOf(db, acquisitionId));
+        Assert.Equal(AcquisitionStatus.Downloading, await StatusOf(db, acquisitionId));
+    }
+
+    [Fact]
+    public async Task VanishedPastGraceFallsBackToSearching() {
+        await using var db = CreateContext();
+        var acquisitionId = await SeedDownloadingAsync(db, lastSeen: DateTimeOffset.UtcNow.AddMinutes(-10));
+        var queue = new RecordingJobQueue();
+
+        // Absent from the category listing AND absent on a per-hash lookup → genuinely gone (e.g. the
+        // user deleted the torrent in the client). The acquisition must not sit orphaned in Downloading,
+        // and the removed release must not be blocklisted — it falls back to a fresh search instead.
+        await RunAsync(db, queue, listing: [], directLookup: null, acquisitionId);
+
+        var enqueued = Assert.Single(queue.Enqueued);
+        Assert.Equal(JobType.AcquisitionSearch, enqueued.Type);
+        Assert.Equal(acquisitionId.ToString(), enqueued.TargetEntityId);
+        Assert.Equal(AcquisitionStatus.Searching, await StatusOf(db, acquisitionId));
+
+        // Durable record of what happened, so the History surface explains the restart.
+        var events = await new EfAcquisitionHistoryStore(db).ListAsync(200, entityId: null, CancellationToken.None);
+        var entry = Assert.Single(events, item => item.Event == AcquisitionHistoryEvent.DownloadFailed);
+        Assert.Contains("removed from the client", entry.Message ?? "");
+        Assert.Empty(await db.DownloadTransfers.AsNoTracking().Where(row => row.AcquisitionId == acquisitionId).ToArrayAsync());
+        Assert.Empty(await db.ReleaseCandidates.AsNoTracking().Where(row => row.AcquisitionId == acquisitionId).ToArrayAsync());
+        Assert.Null(await AcquisitionTestFactory.Store(db).GetSelectedReleaseAsync(acquisitionId, CancellationToken.None));
+    }
+
+    [Fact]
+    public async Task VanishedFallbackFiresOnceAcrossPasses() {
+        await using var db = CreateContext();
+        var acquisitionId = await SeedDownloadingAsync(db, lastSeen: DateTimeOffset.UtcNow.AddMinutes(-10));
+        var queue = new RecordingJobQueue();
+
+        // The first pass flips the acquisition to Searching, which retires the orphaned transfer from the
+        // active set — a second pass must find nothing to advance and enqueue nothing new.
+        await RunAsync(db, queue, listing: [], directLookup: null, acquisitionId);
+        await RunAsync(db, queue, listing: [], directLookup: null, acquisitionId);
+
+        var enqueued = Assert.Single(queue.Enqueued);
+        Assert.Equal(JobType.AcquisitionSearch, enqueued.Type);
+        Assert.Equal(AcquisitionStatus.Searching, await StatusOf(db, acquisitionId));
+    }
+
+    [Fact]
+    public async Task RecategorizedButHealthyTorrentIsNotFailedOrEnqueued() {
+        await using var db = CreateContext();
+        var acquisitionId = await SeedDownloadingAsync(db, lastSeen: DateTimeOffset.UtcNow.AddMinutes(-10));
+        var queue = new RecordingJobQueue();
+
+        // Absent from the category listing but the per-hash lookup finds it (category drifted) → still healthy.
+        var present = new DownloadItemStatus("hashX", "Book", 0.6, "downloading", IsComplete: false, "/save", "/save/book");
+        await RunAsync(db, queue, listing: [], directLookup: present, acquisitionId);
+
+        Assert.Empty(queue.Enqueued);
+        Assert.Equal(AcquisitionStatus.Downloading, await StatusOf(db, acquisitionId));
+        var progress = await db.DownloadTransfers.AsNoTracking().Where(t => t.AcquisitionId == acquisitionId).Select(t => t.Progress).FirstAsync();
+        Assert.Equal(0.6, progress);
+    }
+
+    [Fact]
+    public async Task VanishedWithinGraceDoesNothing() {
+        await using var db = CreateContext();
+        var acquisitionId = await SeedDownloadingAsync(db, lastSeen: DateTimeOffset.UtcNow);
+        var queue = new RecordingJobQueue();
+
+        await RunAsync(db, queue, listing: [], directLookup: null, acquisitionId);
+
+        Assert.Empty(queue.Enqueued);
+        Assert.Equal(AcquisitionStatus.Downloading, await StatusOf(db, acquisitionId));
+    }
+
+    [Fact]
+    public async Task UnreachableClientMovesDownloadToWaitingWithoutFailureRecovery() {
+        await using var db = CreateContext();
+        var acquisitionId = await SeedDownloadingAsync(db, lastSeen: DateTimeOffset.UtcNow.AddMinutes(-90));
+        var queue = new RecordingJobQueue();
+
+        await RunAsync(
+            db,
+            queue,
+            listing: [],
+            directLookup: null,
+            acquisitionId,
+            listingFailure: new HttpRequestException("connection refused"));
+
+        Assert.Empty(queue.Enqueued);
+        Assert.Equal(AcquisitionStatus.WaitingForDownloadClient, await StatusOf(db, acquisitionId));
+        Assert.Single(await db.DownloadTransfers.AsNoTracking().Where(row => row.AcquisitionId == acquisitionId).ToArrayAsync());
+    }
+
+    [Fact]
+    public async Task UnhealthyClientDoesNotBlocklistAReportedTransferFailure() {
+        await using var db = CreateContext();
+        var acquisitionId = await SeedDownloadingAsync(
+            db,
+            lastSeen: DateTimeOffset.UtcNow.AddMinutes(-90),
+            stalledSince: DateTimeOffset.UtcNow.AddHours(-2));
+        var queue = new RecordingJobQueue();
+        var failed = new DownloadItemStatus(
+            "hashX",
+            "Book",
+            0.5,
+            "failed",
+            IsComplete: false,
+            "/save",
+            "/save/book",
+            IsFailed: true,
+            FailureMessage: "client session disconnected");
+
+        await RunAsync(
+            db,
+            queue,
+            listing: [failed],
+            directLookup: null,
+            acquisitionId,
+            health: new DownloadClientConnectionTest(false, "Download client is offline."));
+
+        Assert.Empty(queue.Enqueued);
+        Assert.Equal(AcquisitionStatus.WaitingForDownloadClient, await StatusOf(db, acquisitionId));
+        Assert.Null(await StalledSinceOf(db, acquisitionId));
+        Assert.NotNull(await AcquisitionTestFactory.Store(db).GetSelectedReleaseAsync(acquisitionId, CancellationToken.None));
+    }
+
+    [Fact]
+    public async Task HealthyClientResumesAWaitingTransfer() {
+        await using var db = CreateContext();
+        var acquisitionId = await SeedDownloadingAsync(
+            db,
+            lastSeen: DateTimeOffset.UtcNow,
+            status: AcquisitionStatus.WaitingForDownloadClient);
+        var queue = new RecordingJobQueue();
+        var active = new DownloadItemStatus(
+            "hashX",
+            "Book",
+            0.7,
+            "downloading",
+            IsComplete: false,
+            "/save",
+            "/save/book");
+
+        await RunAsync(db, queue, listing: [active], directLookup: null, acquisitionId);
+
+        Assert.Empty(queue.Enqueued);
+        Assert.Equal(AcquisitionStatus.Downloading, await StatusOf(db, acquisitionId));
+    }
+
+    [Fact]
+    public async Task RemovedClientClearsTheDownloadAttemptAndWaitsForAReplacement() {
+        await using var db = CreateContext();
+        var acquisitionId = await SeedDownloadingAsync(db, lastSeen: DateTimeOffset.UtcNow.AddMinutes(-10));
+        var queue = new RecordingJobQueue();
+
+        await RunAsync(
+            db,
+            queue,
+            listing: [],
+            directLookup: null,
+            acquisitionId,
+            downloadClientConfigs: new FakeDownloadClientConfigStore(clientExists: false, defaultExists: false));
+
+        Assert.Empty(queue.Enqueued);
+        Assert.Equal(AcquisitionStatus.WaitingForDownloadClient, await StatusOf(db, acquisitionId));
+        Assert.Empty(await db.DownloadTransfers.AsNoTracking().Where(row => row.AcquisitionId == acquisitionId).ToArrayAsync());
+        Assert.Empty(await db.ReleaseCandidates.AsNoTracking().Where(row => row.AcquisitionId == acquisitionId).ToArrayAsync());
+        Assert.Null(await AcquisitionTestFactory.Store(db).GetSelectedReleaseAsync(acquisitionId, CancellationToken.None));
+        Assert.True(await AcquisitionTestFactory.Store(db).HasActiveTransfersAsync(CancellationToken.None));
+    }
+
+    [Fact]
+    public async Task ReplacementClientRestartsAFreshSearchAfterTheOldClientWasRemoved() {
+        await using var db = CreateContext();
+        var now = DateTimeOffset.UtcNow.AddMinutes(-10);
+        var acquisitionId = Guid.NewGuid();
+        db.Acquisitions.Add(new AcquisitionRow {
+            Id = acquisitionId,
+            Status = AcquisitionStatus.WaitingForDownloadClient,
+            StatusMessage = "Waiting for a configured download client.",
+            Title = "Book",
+            ExternalIdsJson = "{}",
+            SourceUrlsJson = "[]",
+            CreatedAt = now,
+            UpdatedAt = now
+        });
+        await db.SaveChangesAsync();
+        var queue = new RecordingJobQueue();
+
+        await RunAsync(
+            db,
+            queue,
+            listing: [],
+            directLookup: null,
+            acquisitionId,
+            downloadClientConfigs: new FakeDownloadClientConfigStore(clientExists: false, defaultExists: true));
+
+        var enqueued = Assert.Single(queue.Enqueued);
+        Assert.Equal(JobType.AcquisitionSearch, enqueued.Type);
+        Assert.Equal(acquisitionId.ToString(), enqueued.TargetEntityId);
+        Assert.Equal(AcquisitionStatus.Searching, await StatusOf(db, acquisitionId));
+    }
+
+    private static async Task RunAsync(
+        PrismediaDbContext db,
+        RecordingJobQueue queue,
+        IReadOnlyList<DownloadItemStatus> listing,
+        DownloadItemStatus? directLookup,
+        Guid acquisitionId,
+        Func<Task>? beforePayloadInspection = null,
+        IAcquisitionQueueService? recovery = null,
+        IMonitorStore? monitors = null,
+        IDownloadClientConfigStore? downloadClientConfigs = null,
+        DownloadClientConnectionTest? health = null,
+        Exception? listingFailure = null,
+        DownloadItemProperties? properties = null,
+        Action<string, bool>? onRemove = null,
+        IReadOnlyList<DownloadItemFile>? files = null,
+        IImportTargetIndex? importTargets = null,
+        TvPayloadAdmission? payloadAdmission = null,
+        Action? onRelease = null) {
+        var handler = new AcquisitionMonitorJobHandler(
+            AcquisitionTestFactory.Store(db),
+            new EfDetachedDownloadCleanupStore(db),
+            recovery ?? new RecordingAcquisitionQueueService(),
+            monitors ?? new EfMonitorStore(db),
+            downloadClientConfigs ?? new FakeDownloadClientConfigStore(),
+            new FakeDownloadClientFactory(new FakeDownloadClient(
+                listing,
+                directLookup,
+                beforePayloadInspection,
+                health,
+                listingFailure,
+                properties,
+                onRemove,
+                files,
+                onRelease)),
+            new RemotePathMapper(new NoRemotePathMappings()),
+            new EfAcquisitionHistoryStore(db),
+            NullLogger<AcquisitionMonitorJobHandler>.Instance,
+            importTargets: importTargets,
+            payloadAdmission: payloadAdmission);
+        var job = new JobRunSnapshot(
+            Guid.NewGuid(), JobType.AcquisitionMonitor, JobRunStatus.Running, 0, null, "{}",
+            null, null, null, DateTimeOffset.UtcNow, DateTimeOffset.UtcNow, null);
+        await handler.HandleAsync(new JobContext(job, queue), CancellationToken.None);
+    }
+
+    private sealed class RecordingAcquisitionQueueService : IAcquisitionQueueService {
+        public List<(Guid AcquisitionId, Guid CandidateId)> Calls { get; } = [];
+
+        public Task<AcquisitionDetail?> QueueAsync(
+            Guid acquisitionId,
+            Guid candidateId,
+            CancellationToken cancellationToken,
+            bool manualPick = false,
+            AcquisitionStatus? requiredStatus = null) {
+            Calls.Add((acquisitionId, candidateId));
+            return Task.FromResult<AcquisitionDetail?>(null);
+        }
+    }
+
+    private sealed class TerminalRecoveryQueueService(IAcquisitionStore store) : IAcquisitionQueueService {
+        public async Task<AcquisitionDetail?> QueueAsync(
+            Guid acquisitionId,
+            Guid candidateId,
+            CancellationToken cancellationToken,
+            bool manualPick = false,
+            AcquisitionStatus? requiredStatus = null) {
+            await store.AbandonTransferAddAsync(
+                acquisitionId,
+                ClientId,
+                "hash-terminal",
+                cancellationToken);
+            await store.TryTransitionStatusAsync(
+                acquisitionId,
+                [AcquisitionStatus.Queued],
+                AcquisitionStatus.Failed,
+                "No identifiable torrent was added.",
+                cancellationToken);
+            throw new AcquisitionConfigurationException(
+                ApiProblemCodes.AcquisitionInvalid,
+                "No identifiable torrent was added.");
+        }
+    }
+
+    private static async Task<Guid> SeedDownloadingAsync(
+        PrismediaDbContext db,
+        DateTimeOffset lastSeen,
+        DateTimeOffset? stalledSince = null,
+        AcquisitionStatus status = AcquisitionStatus.Downloading) {
+        var acquisitionId = Guid.NewGuid();
+        db.Acquisitions.Add(new AcquisitionRow {
+            Id = acquisitionId, Status = status, Title = "Book",
+            ExternalIdsJson = "{}", SourceUrlsJson = "[]", CreatedAt = lastSeen, UpdatedAt = lastSeen
+        });
+        db.DownloadTransfers.Add(new DownloadTransferRow {
+            Id = Guid.NewGuid(), AcquisitionId = acquisitionId, DownloadClientConfigId = ClientId,
+            ClientItemId = "hashX", Progress = 0.5, StalledSince = stalledSince, CreatedAt = lastSeen, UpdatedAt = lastSeen
+        });
+        await db.SaveChangesAsync();
+        await AcquisitionTestFactory.Store(db).SetSelectedReleaseAsync(
+            acquisitionId, new SelectedRelease("Book (epub)", "Indexer", "hashX"), CancellationToken.None);
+        return acquisitionId;
+    }
+
+    private static async Task<AcquisitionStatus> StatusOf(PrismediaDbContext db, Guid acquisitionId) =>
+        await db.Acquisitions.AsNoTracking().Where(row => row.Id == acquisitionId).Select(row => row.Status).FirstAsync();
+
+    private static async Task<DateTimeOffset?> StalledSinceOf(PrismediaDbContext db, Guid acquisitionId) =>
+        await db.DownloadTransfers.AsNoTracking().Where(row => row.AcquisitionId == acquisitionId).Select(row => row.StalledSince).FirstAsync();
+
+    private static PrismediaDbContext CreateContext() =>
+        new(new DbContextOptionsBuilder<PrismediaDbContext>().UseInMemoryDatabase(Guid.NewGuid().ToString()).Options);
+
+    private sealed class FakeDownloadClient(
+        IReadOnlyList<DownloadItemStatus> listing,
+        DownloadItemStatus? directLookup,
+        Func<Task>? beforePayloadInspection = null,
+        DownloadClientConnectionTest? health = null,
+        Exception? listingFailure = null,
+        DownloadItemProperties? properties = null,
+        Action<string, bool>? onRemove = null,
+        IReadOnlyList<DownloadItemFile>? files = null,
+        Action? onRelease = null) : IDownloadClient {
+        private bool _removed;
+
+        public DownloadClientKind Kind => DownloadClientKind.QBittorrent;
+        public Task<IReadOnlyList<DownloadItemStatus>> ListItemsAsync(DownloadClientConnection connection, CancellationToken cancellationToken) {
+            if (listingFailure is not null) {
+                throw listingFailure;
+            }
+
+            return Task.FromResult(listing);
+        }
+        public Task<DownloadItemStatus?> GetItemAsync(DownloadClientConnection connection, string clientItemId, CancellationToken cancellationToken) =>
+            Task.FromResult(_removed ? null : directLookup);
+        public Task<string> AddAsync(DownloadClientConnection connection, DownloadAddRequest request, CancellationToken cancellationToken) => throw new NotSupportedException();
+        public Task<string> AddTorrentFileAsync(DownloadClientConnection connection, string fileName, byte[] torrent, CancellationToken cancellationToken) => throw new NotSupportedException();
+        public async Task<IReadOnlyList<DownloadItemFile>> GetFilesAsync(
+            DownloadClientConnection connection,
+            string clientItemId,
+            CancellationToken cancellationToken) {
+            if (beforePayloadInspection is not null) {
+                await beforePayloadInspection();
+            }
+
+            return files ?? [];
+        }
+        public Task<DownloadItemProperties?> GetPropertiesAsync(DownloadClientConnection connection, string clientItemId, CancellationToken cancellationToken) =>
+            Task.FromResult(properties);
+        public Task ReleasePayloadAsync(DownloadClientConnection connection, string clientItemId, CancellationToken cancellationToken) {
+            onRelease?.Invoke();
+            return Task.CompletedTask;
+        }
+        public Task<byte[]> GetPieceStatesAsync(DownloadClientConnection connection, string clientItemId, CancellationToken cancellationToken) => throw new NotSupportedException();
+        public Task RemoveAsync(DownloadClientConnection connection, string clientItemId, bool deleteData, CancellationToken cancellationToken) {
+            if (onRemove is null) {
+                throw new NotSupportedException();
+            }
+            onRemove(clientItemId, deleteData);
+            _removed = true;
+            return Task.CompletedTask;
+        }
+        public Task<DownloadClientConnectionTest> TestAsync(DownloadClientConnection connection, CancellationToken cancellationToken) =>
+            Task.FromResult(health ?? new DownloadClientConnectionTest(true, "Connected."));
+    }
+
+    private sealed class EpisodeTitleIndex(IReadOnlyList<TvEpisodeTitle> titles) : IImportTargetIndex {
+        public Task<IReadOnlyList<TvEpisodeTitle>> GetSeasonEpisodeTitlesAsync(Guid entityId, int seasonNumber, CancellationToken cancellationToken) => Task.FromResult(titles);
+        public Task<TvSeriesDiskLayout?> GetTvLayoutAsync(Guid entityId, CancellationToken cancellationToken) => Task.FromResult<TvSeriesDiskLayout?>(null);
+        public Task<MovieDiskTarget?> GetMovieTargetAsync(Guid entityId, CancellationToken cancellationToken) => Task.FromResult<MovieDiskTarget?>(null);
+        public Task<AlbumDiskTarget?> GetAlbumTargetAsync(Guid entityId, CancellationToken cancellationToken) => Task.FromResult<AlbumDiskTarget?>(null);
+    }
+
+    private sealed class FakeDownloadClientFactory(IDownloadClient client) : IDownloadClientFactory {
+        public IDownloadClient Get(DownloadClientKind kind) => client;
+    }
+
+    private sealed class FakeDownloadClientConfigStore(
+        bool clientExists = true,
+        bool defaultExists = true) : IDownloadClientConfigStore {
+        private static readonly DownloadClientDetail Detail =
+            new(ClientId, DownloadClientKind.QBittorrent, "qbit", "http://x", null, "prismedia-books", true, false, null);
+        public Task<DownloadClientDetail?> GetAsync(Guid id, CancellationToken cancellationToken) =>
+            Task.FromResult<DownloadClientDetail?>(clientExists ? Detail : null);
+        public Task<DownloadClientDetail?> GetDefaultAsync(CancellationToken cancellationToken) =>
+            Task.FromResult<DownloadClientDetail?>(defaultExists ? Detail : null);
+        public Task<DownloadClientDetail?> GetDefaultAsync(Prismedia.Domain.Entities.DownloadProtocol protocol, CancellationToken cancellationToken) => GetDefaultAsync(cancellationToken);
+        public Task<IReadOnlyList<DownloadClientDetail>> ListEnabledAsync(Prismedia.Domain.Entities.DownloadProtocol protocol, CancellationToken cancellationToken) => throw new NotSupportedException();
+        public Task<IReadOnlyList<Prismedia.Domain.Entities.DownloadProtocol>> GetEnabledProtocolsAsync(CancellationToken cancellationToken) => Task.FromResult<IReadOnlyList<Prismedia.Domain.Entities.DownloadProtocol>>([Prismedia.Domain.Entities.DownloadProtocol.Torrent]);
+        public Task<IReadOnlyList<DownloadClientSummary>> ListAsync(CancellationToken cancellationToken) => throw new NotSupportedException();
+        public Task<IReadOnlyList<DownloadClientDetail>> ListDetailsAsync(CancellationToken cancellationToken) => throw new NotSupportedException();
+        public Task<DownloadClientSummary> SaveAsync(DownloadClientSaveCommand command, CancellationToken cancellationToken) => throw new NotSupportedException();
+        public Task<bool> DeleteAsync(Guid id, CancellationToken cancellationToken) => throw new NotSupportedException();
+    }
+
+    private sealed class NoRemotePathMappings : IRemotePathMappingStore {
+        public Task<IReadOnlyList<Prismedia.Contracts.Acquisition.RemotePathMappingView>> ListForClientAsync(Guid downloadClientConfigId, CancellationToken cancellationToken) =>
+            Task.FromResult<IReadOnlyList<Prismedia.Contracts.Acquisition.RemotePathMappingView>>([]);
+        public Task<IReadOnlyList<Prismedia.Contracts.Acquisition.RemotePathMappingView>> ListAsync(CancellationToken cancellationToken) => throw new NotSupportedException();
+        public Task<Prismedia.Contracts.Acquisition.RemotePathMappingView> SaveAsync(Prismedia.Contracts.Acquisition.RemotePathMappingSaveRequest request, CancellationToken cancellationToken) => throw new NotSupportedException();
+        public Task<bool> DeleteAsync(Guid id, CancellationToken cancellationToken) => throw new NotSupportedException();
+    }
+
+    private sealed class RecordingJobQueue : IJobQueueService {
+        public List<EnqueueJobRequest> Enqueued { get; } = [];
+
+        public Task<JobRunSnapshot> EnqueueAsync(EnqueueJobRequest request, CancellationToken cancellationToken) {
+            Enqueued.Add(request);
+            var now = DateTimeOffset.UtcNow;
+            return Task.FromResult(new JobRunSnapshot(
+                Guid.NewGuid(), request.Type, JobRunStatus.Queued, 0, null, request.PayloadJson ?? "{}",
+                request.TargetEntityKind, request.TargetEntityId, request.TargetLabel, now, null, null));
+        }
+
+        // Mirrors the real queue's dedup-by-target: a job already enqueued for the same (type, target) is
+        // pending, so EnqueueIfNeededAsync skips a duplicate. Lets multi-pass tests exercise dedup faithfully.
+        public Task<bool> HasPendingAsync(JobType type, string? targetEntityId, CancellationToken cancellationToken) =>
+            Task.FromResult(Enqueued.Any(request => request.Type == type && request.TargetEntityId == targetEntityId));
+        public Task UpdateProgressAsync(Guid id, int progress, string? message, CancellationToken cancellationToken) => Task.CompletedTask;
+
+        public Task<IReadOnlyList<JobRunSnapshot>> ListAsync(bool hideNsfw, CancellationToken cancellationToken) => throw new NotSupportedException();
+        public Task<JobRunSnapshot> EnqueueAsync(JobType type, CancellationToken cancellationToken) => throw new NotSupportedException();
+        public Task<int> EnqueueBatchAsync(IReadOnlyList<EnqueueJobRequest> requests, CancellationToken cancellationToken) => throw new NotSupportedException();
+        public Task<int> CancelAsync(JobType? type, CancellationToken cancellationToken) => throw new NotSupportedException();
+        public Task<bool> CancelRunAsync(Guid id, CancellationToken cancellationToken) => throw new NotSupportedException();
+        public Task<int> ClearFailuresAsync(JobType? type, CancellationToken cancellationToken) => throw new NotSupportedException();
+        public Task<JobRunSnapshot?> ClaimNextAsync(string workerId, CancellationToken cancellationToken) => throw new NotSupportedException();
+        public Task<int> RecoverStaleRunningAsync(string currentWorkerId, TimeSpan staleAfter, CancellationToken cancellationToken) => throw new NotSupportedException();
+        public Task CompleteAsync(Guid id, string? message, CancellationToken cancellationToken) => throw new NotSupportedException();
+        public Task FailAsync(Guid id, string message, TimeSpan retryDelay, CancellationToken cancellationToken) => throw new NotSupportedException();
+        public Task<IReadOnlyList<JobQueueCount>> GetQueueCountsAsync(bool hideNsfw, CancellationToken cancellationToken) => throw new NotSupportedException();
+        public Task<int> PruneHistoryAsync(TimeSpan retention, CancellationToken cancellationToken) => throw new NotSupportedException();
+    }
+}

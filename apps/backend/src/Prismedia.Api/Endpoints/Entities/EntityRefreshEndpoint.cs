@@ -1,0 +1,53 @@
+using Prismedia.Application.Jobs;
+using Prismedia.Domain.Entities;
+
+using Prismedia.Api.Security;
+
+namespace Prismedia.Api.Endpoints;
+
+/// <summary>
+/// POST /api/entities/{id}/refresh — queues a refresh-entity job that re-runs the
+/// processing pipeline (probe, fingerprint, preview, subtitles) for the entity and
+/// its structural children.
+/// </summary>
+internal static class EntityRefreshEndpoint {
+    internal static RouteGroupBuilder MapEntityRefreshEndpoint(this RouteGroupBuilder group) {
+        group.MapPost("/{id:guid}/refresh", async (
+                Guid id,
+                IJobQueueService queue,
+                CancellationToken cancellationToken) => {
+            var job = await queue.EnqueueAsync(
+                new EnqueueJobRequest(
+                    JobType.RefreshEntity,
+                    TargetEntityKind: JobTargetKinds.Entity,
+                    TargetEntityId: id.ToString(),
+                    Origin: JobGraphOrigin.Interactive),
+                cancellationToken);
+
+            return Results.Ok(new EntityRefreshResponse(
+                job.Id,
+                job.GraphId,
+                job.GraphOrigin ?? JobGraphOrigin.Interactive,
+                job.TargetEntityId,
+                AlreadyPending: false));
+        })
+            .RequireAdmin()
+            .WithName("RefreshEntity")
+            .WithSummary("Refresh Entity.")
+            .Produces<EntityRefreshResponse>();
+
+        return group;
+    }
+}
+
+/// <summary>
+/// Response from the refresh-entity endpoint.
+/// </summary>
+/// <param name="JobId">Queued job identifier, or null when a refresh was already pending.</param>
+/// <param name="AlreadyPending">True when a refresh job is already queued or running for this entity.</param>
+public sealed record EntityRefreshResponse(
+    Guid? JobId,
+    Guid? GraphId,
+    JobGraphOrigin Origin,
+    string? RootEntityId,
+    bool AlreadyPending);

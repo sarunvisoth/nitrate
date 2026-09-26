@@ -1,0 +1,283 @@
+using Prismedia.Application.Entities;
+using Prismedia.Contracts.Entities;
+using Prismedia.Domain.Capabilities;
+using Prismedia.Domain.Entities;
+using Prismedia.Domain.Media;
+using Prismedia.Domain.Taxonomy;
+using ContractEntityCapability = Prismedia.Contracts.Entities.EntityCapability;
+
+namespace Prismedia.Api.Tests;
+
+public sealed class EntityCardProjectorContractTests {
+    [Fact]
+    public void ProjectsLogoBeforeBackdropForThumbnailCoverUrls() {
+        var studio = new Studio(Guid.NewGuid(), "GameChops");
+        studio.AttachFile(EntityFileRole.Backdrop, "/assets/plugins/artwork/gamechops/banner.webp", "image/webp");
+        studio.AttachFile(EntityFileRole.Logo, "/assets/plugins/artwork/gamechops/logo.webp", "image/webp");
+
+        var card = EntityCardProjector.ToCard(studio, hasSourceBackedSubtree: false);
+        var images = AssertCapability<ImagesCapability>(card);
+
+        Assert.Equal("/assets/plugins/artwork/gamechops/logo.webp", images.CoverUrl);
+        Assert.Equal("/assets/plugins/artwork/gamechops/logo.webp", images.ThumbnailUrl);
+        Assert.Equal([EntityFileRole.Logo, EntityFileRole.Backdrop], images.Items.Select(item => item.Kind));
+    }
+
+    [Fact]
+    public void ProjectsOriginalStudioArtworkEvenWhenStaleRasterVariantsExist() {
+        var studio = new Studio(Guid.NewGuid(), "GameChops");
+        studio.AttachFile(EntityFileRole.Logo, "/assets/plugins/artwork/gamechops/logo.webp", "image/webp");
+        studio.AttachFile(EntityFileRole.GridThumbnail, "/assets/grid-thumbs/gamechops.jpg?v=2", "image/jpeg");
+        studio.AttachFile(EntityFileRole.GridThumbnail2x, "/assets/grid-thumbs/gamechops@2x.jpg?v=2", "image/jpeg");
+
+        var images = AssertCapability<ImagesCapability>(
+            EntityCardProjector.ToCard(studio, hasSourceBackedSubtree: false));
+
+        Assert.Equal("/assets/plugins/artwork/gamechops/logo.webp", images.CoverUrl);
+        Assert.Equal("/assets/plugins/artwork/gamechops/logo.webp", images.ThumbnailUrl);
+        Assert.Null(images.Thumbnail2xUrl);
+        Assert.Equal("/assets/plugins/artwork/gamechops/logo.webp", Assert.Single(images.Items).Path);
+    }
+
+    [Fact]
+    public void ProjectsFileManagementOnlyForSourceBackedSafeManagedTreeRoots() {
+        var emptyMovie = EntityCardProjector.ToCard(new Movie(Guid.NewGuid(), "Wanted Arrival"), hasSourceBackedSubtree: false);
+        var sourceBackedMovie = EntityCardProjector.ToCard(new Movie(Guid.NewGuid(), "Arrival"), hasSourceBackedSubtree: true);
+        var archiveChapter = new BookChapter(Guid.NewGuid(), "Chapter 1");
+        archiveChapter.AttachFile(EntityFileRole.Source, "/media/books/Arrival.cbz::001.jpg", "image/jpeg");
+        var studio = EntityCardProjector.ToCard(new Studio(Guid.NewGuid(), "Paramount"), hasSourceBackedSubtree: false);
+
+        Assert.Empty(emptyMovie.Capabilities.OfType<FileManagementCapability>());
+        Assert.False(emptyMovie.HasSourceMedia);
+        Assert.True(sourceBackedMovie.HasSourceMedia);
+        Assert.True(AssertCapability<FileManagementCapability>(sourceBackedMovie).CanDeleteFiles);
+        Assert.Empty(EntityCardProjector.ToCard(archiveChapter, hasSourceBackedSubtree: true).Capabilities.OfType<FileManagementCapability>());
+        Assert.Empty(studio.Capabilities.OfType<FileManagementCapability>());
+    }
+
+    [Fact]
+    public void ProjectsPlayableVideoOnlyForPlayableDefinitionsWithTheirOwnSourceFile() {
+        var movie = new Movie(Guid.NewGuid(), "Arrival");
+        movie.AttachFile(EntityFileRole.Source, "/media/movies/Arrival.mkv", "video/x-matroska");
+        var standalone = new Video(Guid.NewGuid(), "Clip");
+        standalone.AttachFile(EntityFileRole.Source, "/media/videos/Clip.mkv", "video/x-matroska");
+        var episode = new VideoEpisode(Guid.NewGuid(), "Pilot", Guid.NewGuid());
+        episode.AttachFile(EntityFileRole.Source, "/media/tv/Pilot.mkv", "video/x-matroska");
+        var series = new VideoSeries(Guid.NewGuid(), "Series");
+        series.AttachFile(EntityFileRole.Source, "/media/tv/Series.mkv", "video/x-matroska");
+
+        AssertCapability<PlayableVideoCapability>(EntityCardProjector.ToCard(movie, hasSourceBackedSubtree: true));
+        AssertCapability<PlayableVideoCapability>(EntityCardProjector.ToCard(standalone, hasSourceBackedSubtree: true));
+        AssertCapability<PlayableVideoCapability>(EntityCardProjector.ToCard(episode, hasSourceBackedSubtree: true));
+        Assert.Empty(EntityCardProjector.ToCard(series, hasSourceBackedSubtree: true)
+            .Capabilities.OfType<PlayableVideoCapability>());
+    }
+
+    [Fact]
+    public void ProjectsGenericAudioQueuePolicyForDirectItemsAndSourceBackedOwners() {
+        var track = new AudioTrack(Guid.NewGuid(), "Prologue", embeddedArtist: null, embeddedAlbum: null);
+        track.AttachFile(EntityFileRole.Source, "/media/books/Novel/01 Prologue.m4b", "audio/mp4");
+        var missingTrack = new AudioTrack(Guid.NewGuid(), "Missing", embeddedArtist: null, embeddedAlbum: null);
+        var book = new Book(
+            Guid.NewGuid(),
+            "Novel",
+            BookType.Novel,
+            BookFormat.Audio);
+        book.AddChild(track);
+
+        var direct = AssertCapability<PlayableAudioCapability>(
+            EntityCardProjector.ToCard(track, hasSourceBackedSubtree: true));
+        Assert.Equal(EntityKind.AudioTrack, direct.ItemKind);
+        Assert.False(direct.PreservesQueueOrder);
+        Assert.False(direct.SupportsPlaybackRate);
+
+        var queue = AssertCapability<PlayableAudioCapability>(
+            EntityCardProjector.ToCard(book, hasSourceBackedSubtree: true));
+        Assert.Equal(EntityKind.AudioTrack, queue.ItemKind);
+        Assert.True(queue.PreservesQueueOrder);
+        Assert.True(queue.SupportsPlaybackRate);
+
+        Assert.Empty(EntityCardProjector.ToCard(missingTrack, hasSourceBackedSubtree: false)
+            .Capabilities.OfType<PlayableAudioCapability>());
+        Assert.Empty(EntityCardProjector.ToCard(
+                new Book(Guid.NewGuid(), "Silent", BookType.Novel, BookFormat.Audio),
+                hasSourceBackedSubtree: false)
+            .Capabilities.OfType<PlayableAudioCapability>());
+    }
+
+    [Fact]
+    public void ProjectsOrderedSequenceParticipationFromDefinitionTopology() {
+        var series = EntityCardProjector.ToCard(
+            new VideoSeries(Guid.NewGuid(), "Series"),
+            hasSourceBackedSubtree: false);
+        var season = EntityCardProjector.ToCard(
+            new VideoSeason(Guid.NewGuid(), "Season 1", Guid.NewGuid()),
+            hasSourceBackedSubtree: false);
+        var episode = EntityCardProjector.ToCard(
+            new VideoEpisode(Guid.NewGuid(), "Pilot", Guid.NewGuid()),
+            hasSourceBackedSubtree: false);
+        var comicSeries = EntityCardProjector.ToCard(
+            new ComicSeries(Guid.NewGuid(), "Witch Hat Atelier"),
+            hasSourceBackedSubtree: false);
+        var comicVolume = EntityCardProjector.ToCard(
+            new ComicVolume(Guid.NewGuid(), "Volume 12", Guid.NewGuid()),
+            hasSourceBackedSubtree: false);
+        var comicInstallment = EntityCardProjector.ToCard(
+            new ComicInstallment(
+                Guid.NewGuid(),
+                "Chapter 83",
+                ComicInstallmentKind.Chapter,
+                Guid.NewGuid()),
+            hasSourceBackedSubtree: false);
+        var book = EntityCardProjector.ToCard(
+            new Book(Guid.NewGuid(), "Novel", BookType.Novel, BookFormat.Epub),
+            hasSourceBackedSubtree: false);
+
+        var seriesSequence = AssertCapability<OrderedSequenceCapability>(series);
+        Assert.Equal(EntitySequenceRole.Container, seriesSequence.Role);
+        Assert.Equal(EntityKind.VideoEpisode, seriesSequence.ItemKind);
+        Assert.Empty(seriesSequence.ContainerKinds);
+
+        var seasonSequence = AssertCapability<OrderedSequenceCapability>(season);
+        Assert.Equal(EntitySequenceRole.Container, seasonSequence.Role);
+        Assert.Equal(EntityKind.VideoEpisode, seasonSequence.ItemKind);
+        Assert.Empty(seasonSequence.ContainerKinds);
+
+        var episodeSequence = AssertCapability<OrderedSequenceCapability>(episode);
+        Assert.Equal(EntitySequenceRole.Item, episodeSequence.Role);
+        Assert.Equal(EntityKind.VideoEpisode, episodeSequence.ItemKind);
+        Assert.Equal([EntityKind.VideoSeason, EntityKind.VideoSeries], episodeSequence.ContainerKinds);
+
+        var comicSeriesSequence = AssertCapability<OrderedSequenceCapability>(comicSeries);
+        Assert.Equal(EntitySequenceRole.Container, comicSeriesSequence.Role);
+        Assert.Equal(EntityKind.ComicInstallment, comicSeriesSequence.ItemKind);
+        Assert.Empty(comicSeriesSequence.ContainerKinds);
+
+        var comicVolumeSequence = AssertCapability<OrderedSequenceCapability>(comicVolume);
+        Assert.Equal(EntitySequenceRole.Container, comicVolumeSequence.Role);
+        Assert.Equal(EntityKind.ComicInstallment, comicVolumeSequence.ItemKind);
+        Assert.Empty(comicVolumeSequence.ContainerKinds);
+
+        var comicInstallmentSequence = AssertCapability<OrderedSequenceCapability>(comicInstallment);
+        Assert.Equal(EntitySequenceRole.Item, comicInstallmentSequence.Role);
+        Assert.Equal(EntityKind.ComicInstallment, comicInstallmentSequence.ItemKind);
+        Assert.Equal(
+            [EntityKind.ComicVolume, EntityKind.ComicSeries],
+            comicInstallmentSequence.ContainerKinds);
+        Assert.Empty(book.Capabilities.OfType<OrderedSequenceCapability>());
+    }
+
+    [Fact]
+    public void ProjectsPageSequenceOnlyWhenAPersistedManifestWasHydrated() {
+        var readable = new ComicInstallment(
+            Guid.NewGuid(),
+            "Chapter 83",
+            ComicInstallmentKind.Chapter,
+            Guid.NewGuid());
+        readable.AddCapability(new CapabilityPageSequence(
+            42,
+            PageReadingDirection.RightToLeft,
+            ReaderMode.Paged,
+            coverOrdinal: 0));
+        var empty = new ComicInstallment(
+            Guid.NewGuid(),
+            "Chapter 84",
+            ComicInstallmentKind.Chapter,
+            Guid.NewGuid());
+
+        var capability = AssertCapability<PageSequenceCapability>(
+            EntityCardProjector.ToCard(readable, hasSourceBackedSubtree: true));
+
+        Assert.Equal(42, capability.PageCount);
+        Assert.Equal(PageReadingDirection.RightToLeft, capability.Direction);
+        Assert.Equal(ReaderMode.Paged, capability.DefaultMode);
+        Assert.Equal(0, capability.CoverOrdinal);
+        Assert.Empty(EntityCardProjector.ToCard(empty, hasSourceBackedSubtree: false)
+            .Capabilities.OfType<PageSequenceCapability>());
+    }
+
+    [Fact]
+    public void ProjectsFileManagementForARecoverableDeletionWithoutClaimingSourceMedia() {
+        var wantedMovie = new Movie(Guid.NewGuid(), "Wanted Arrival");
+
+        var recovering = EntityCardProjector.ToCard(
+            wantedMovie,
+            new EntityFileManagementState(
+                HasSourceBackedSubtree: false,
+                HasRecoverableDeletion: true));
+        var ordinaryWanted = EntityCardProjector.ToCard(
+            wantedMovie,
+            new EntityFileManagementState(
+                HasSourceBackedSubtree: false,
+                HasRecoverableDeletion: false));
+
+        Assert.False(recovering.HasSourceMedia);
+        Assert.True(AssertCapability<FileManagementCapability>(recovering).CanDeleteFiles);
+        Assert.Empty(ordinaryWanted.Capabilities.OfType<FileManagementCapability>());
+    }
+
+    [Fact]
+    public void ProjectsKindDataThroughCapabilitiesInsteadOfDerivedDetailShapes() {
+        var book = new Book(
+            Guid.NewGuid(),
+            "The Left Hand of Darkness",
+            BookType.Novel,
+            format: BookFormat.Epub);
+
+        var card = EntityCardProjector.ToCard(book, hasSourceBackedSubtree: false);
+
+        var metadata = AssertCapability<BookMetadataCapability>(card);
+        Assert.Equal(BookType.Novel, metadata.BookType);
+        Assert.Equal(BookFormat.Epub, metadata.Format);
+        Assert.Empty(card.Capabilities.OfType<CoverSelectionCapability>());
+    }
+
+    [Fact]
+    public void ProjectsSharedCreditsAndSubtitleStateAsCapabilities() {
+        var extractedAt = DateTimeOffset.UtcNow;
+        var director = new Person(Guid.NewGuid(), "Jane Doe");
+        var video = new Video(Guid.NewGuid(), "Feature");
+        video.Credits!.Add(director, CreditRole.Director);
+        video.SubtitleCapability!.MarkExtracted(extractedAt);
+
+        var card = EntityCardProjector.ToCard(video, hasSourceBackedSubtree: false);
+
+        var credit = Assert.Single(AssertCapability<CreditsCapability>(card).Items);
+        Assert.Equal(director.Id, credit.PersonId);
+        Assert.Equal(CreditRole.Director.ToCode(), credit.Role);
+        Assert.Equal(extractedAt, AssertCapability<SubtitlesCapability>(card).ExtractedAt);
+    }
+
+    [Fact]
+    public void ProjectsCallerSpecificCollectionConfigurationAsACapability() {
+        var ownerId = Guid.NewGuid();
+        var coverItemId = Guid.NewGuid();
+        var refreshedAt = DateTimeOffset.UtcNow;
+        var collection = new Collection(
+            Guid.NewGuid(),
+            "Favorites",
+            ownerId,
+            CollectionMode.Dynamic,
+            "{\"all\":[]}",
+            CollectionCoverMode.Item,
+            coverItemId,
+            refreshedAt,
+            isShared: true);
+
+        var card = EntityCardProjector.ToCard(
+            collection,
+            new EntityFileManagementState(false, false),
+            currentUserId: ownerId);
+
+        var configuration = AssertCapability<CollectionConfigurationCapability>(card);
+        Assert.True(configuration.IsShared);
+        Assert.True(configuration.CanEdit);
+        Assert.Equal(CollectionMode.Dynamic, configuration.Mode);
+        Assert.Equal(refreshedAt, configuration.LastRefreshedAt);
+        Assert.Equal(coverItemId, AssertCapability<CoverSelectionCapability>(card).EntityId);
+    }
+
+    private static TCapability AssertCapability<TCapability>(EntityCard card)
+        where TCapability : ContractEntityCapability =>
+        Assert.IsType<TCapability>(Assert.Single(card.Capabilities.OfType<TCapability>()));
+}

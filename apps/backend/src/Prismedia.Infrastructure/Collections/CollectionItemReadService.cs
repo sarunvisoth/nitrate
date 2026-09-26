@@ -1,0 +1,206 @@
+using Microsoft.EntityFrameworkCore;
+using Prismedia.Application.Collections;
+using Prismedia.Application.Entities;
+using Prismedia.Application.Security;
+using Prismedia.Contracts.Collections;
+using Prismedia.Domain.Entities;
+using Prismedia.Infrastructure.Entities;
+using Prismedia.Infrastructure.Persistence;
+
+namespace Prismedia.Infrastructure.Collections;
+
+/// <summary>
+/// EF-backed read model for ordered collection membership.
+/// </summary>
+public sealed class CollectionItemReadService(
+    PrismediaDbContext db,
+    IEntityReadService entities,
+    ICurrentUserContext currentUser,
+    EfEntityCatalogQuery catalogQuery) : ICollectionItemReadService {
+    private static readonly IReadOnlySet<string> AudioKindCodes = EntityKindRegistry.All
+        .Where(definition => definition.MediaQualityFamily == EntityMediaQualityFamily.Audio)
+        .Select(definition => definition.Code)
+        .ToHashSet(StringComparer.Ordinal);
+
+    public async Task<CollectionMembershipOptionsResponse> ListMembershipOptionsAsync(
+        bool hideNsfw,
+        CancellationToken cancellationToken) {
+        var userId = currentUser.UserId;
+        var items = await (
+            from detail in db.CollectionDetails.AsNoTracking()
+            join entity in db.Entities.AsNoTracking() on detail.EntityId equals entity.Id
+            where (currentUser.IsSystem || detail.OwnerUserId == userId || detail.IsShared) &&
+                  detail.Mode != CollectionMode.Dynamic &&
+                  (!hideNsfw || !entity.IsNsfw)
+            orderby entity.Title, entity.Id
+            select new CollectionMembershipOption(entity.Id, entity.Title))
+            .ToArrayAsync(cancellationToken);
+
+        return new CollectionMembershipOptionsResponse(items);
+    }
+
+    public async Task<CollectionItemsResponse> ListItemsAsync(
+        Guid collectionId,
+        bool hideNsfw,
+        CancellationToken cancellationToken) {
+        var collectionExists = await db.Entities.AsNoTracking()
+            .AnyAsync(entity =>
+                entity.Id == collectionId &&
+                entity.KindCode == EntityKind.Collection.ToCode() &&
+                db.CollectionDetails.Any(detail =>
+                    detail.EntityId == entity.Id &&
+                    (currentUser.IsSystem ||
+                     detail.OwnerUserId == currentUser.UserId ||
+                     detail.IsShared)),
+                cancellationToken);
+
+        if (!collectionExists) {
+            return new CollectionItemsResponse([]);
+        }
+
+        var catalogEntities = await catalogQuery.ForCurrentUserAsync(
+            EntityCatalogSurface.Collection,
+            cancellationToken);
+        var rows = await (
+            from item in db.CollectionItemDetails.AsNoTracking()
+            join entity in catalogEntities on item.ItemEntityId equals entity.Id
+            where item.CollectionEntityId == collectionId &&
+                  (!hideNsfw || !entity.IsNsfw)
+            orderby item.SortOrder, entity.Title, item.Id
+            select new {
+                item.Id,
+                item.CollectionEntityId,
+                item.ItemEntityId,
+                item.Source,
+                item.SortOrder,
+                item.AddedAt,
+                entity.KindCode
+            }).ToArrayAsync(cancellationToken);
+
+        if (rows.Length == 0) {
+            return new CollectionItemsResponse([]);
+        }
+
+        var thumbnails = await entities.GetThumbnailsAsync(
+            rows.Select(row => row.ItemEntityId).ToArray(),
+            hideNsfw,
+            cancellationToken);
+        var thumbnailsById = thumbnails.Items.ToDictionary(thumbnail => thumbnail.Id);
+
+        var items = rows
+            .Select(row => thumbnailsById.TryGetValue(row.ItemEntityId, out var thumbnail)
+                ? new CollectionItemDetail(
+                    row.Id,
+                    row.CollectionEntityId,
+                    row.KindCode.DecodeAs<EntityKind>(),
+                    row.ItemEntityId,
+                    row.Source,
+                    row.SortOrder,
+                    row.AddedAt,
+                    thumbnail)
+                : null)
+            .Where(item => item is not null)
+            .Select(item => item!)
+            .ToArray();
+
+        return new CollectionItemsResponse(items);
+    }
+
+    public async Task<IReadOnlyDictionary<Guid, CollectionListContext>> GetListContextsAsync(
+        IReadOnlyList<Guid> collectionIds,
+        bool hideNsfw,
+        CancellationToken cancellationToken) {
+        if (collectionIds.Count == 0) {
+            return new Dictionary<Guid, CollectionListContext>();
+        }
+
+        // One grouped query for the whole batch: member counts and audio capability come straight
+        // from the membership join — no thumbnail hydration, no per-collection round-trips.
+        var catalogEntities = await catalogQuery.ForCurrentUserAsync(
+            EntityCatalogSurface.Collection,
+            cancellationToken);
+        var rows = await (
+            from item in db.CollectionItemDetails.AsNoTracking()
+            join entity in catalogEntities on item.ItemEntityId equals entity.Id
+            where collectionIds.Contains(item.CollectionEntityId) &&
+                  (!hideNsfw || !entity.IsNsfw)
+            group entity.KindCode by item.CollectionEntityId into members
+            select new {
+                CollectionId = members.Key,
+                Count = members.Count(),
+                HasAudio = members.Any(kind => AudioKindCodes.Contains(kind))
+            }).ToArrayAsync(cancellationToken);
+
+        return rows.ToDictionary(
+            row => row.CollectionId,
+            row => new CollectionListContext(row.Count, row.HasAudio));
+    }
+
+    public async Task<IReadOnlyDictionary<Guid, string>> ResolveCoverPathsAsync(
+        IReadOnlyList<Guid> collectionIds,
+        bool hideNsfw,
+        CancellationToken cancellationToken) {
+        if (collectionIds.Count == 0) {
+            return new Dictionary<Guid, string>();
+        }
+
+        var ids = collectionIds.Distinct().ToArray();
+
+        // Configured cover item wins; capture it per collection so it can override the
+        // first-member fallback resolved below.
+        // First visible member per collection, in collection sort order, as the fallback cover.
+        var catalogEntities = await catalogQuery.ForCurrentUserAsync(
+            EntityCatalogSurface.Collection,
+            cancellationToken);
+        var coverItemByCollection = await (
+            from detail in db.CollectionDetails.AsNoTracking()
+            join entity in catalogEntities on detail.CoverItemEntityId equals entity.Id
+            where ids.Contains(detail.EntityId) && detail.CoverItemEntityId != null &&
+                  (!hideNsfw || !entity.IsNsfw)
+            select new { detail.EntityId, CoverItemEntityId = entity.Id })
+            .ToDictionaryAsync(row => row.EntityId, row => row.CoverItemEntityId, cancellationToken);
+        var memberRows = await (
+            from item in db.CollectionItemDetails.AsNoTracking()
+            join entity in catalogEntities on item.ItemEntityId equals entity.Id
+            where ids.Contains(item.CollectionEntityId) &&
+                  (!hideNsfw || !entity.IsNsfw)
+            orderby item.SortOrder, entity.Title, item.Id
+            select new { item.CollectionEntityId, item.ItemEntityId }).ToArrayAsync(cancellationToken);
+        var firstMemberByCollection = memberRows
+            .GroupBy(row => row.CollectionEntityId)
+            .ToDictionary(group => group.Key, group => group.First().ItemEntityId);
+
+        // Representative entity per collection: configured cover item, else first member.
+        var representativeByCollection = new Dictionary<Guid, Guid>();
+        foreach (var collectionId in ids) {
+            if (coverItemByCollection.TryGetValue(collectionId, out var coverItemId)) {
+                representativeByCollection[collectionId] = coverItemId;
+            } else if (firstMemberByCollection.TryGetValue(collectionId, out var memberId)) {
+                representativeByCollection[collectionId] = memberId;
+            }
+        }
+
+        if (representativeByCollection.Count == 0) {
+            return new Dictionary<Guid, string>();
+        }
+
+        // Reuse the batched thumbnail projection so the cover we report matches the one the
+        // representative entity would render with everywhere else.
+        var thumbnails = await entities.GetThumbnailsAsync(
+            representativeByCollection.Values.Distinct().ToArray(),
+            hideNsfw,
+            cancellationToken);
+        var coverByEntity = thumbnails.Items
+            .Where(thumbnail => thumbnail.CoverUrl is not null)
+            .ToDictionary(thumbnail => thumbnail.Id, thumbnail => thumbnail.CoverUrl!);
+
+        var result = new Dictionary<Guid, string>();
+        foreach (var pair in representativeByCollection) {
+            if (coverByEntity.TryGetValue(pair.Value, out var coverUrl)) {
+                result[pair.Key] = coverUrl;
+            }
+        }
+
+        return result;
+    }
+}

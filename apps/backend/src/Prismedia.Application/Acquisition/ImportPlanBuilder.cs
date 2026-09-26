@@ -1,0 +1,216 @@
+using System.Text.RegularExpressions;
+using Prismedia.Domain.Entities;
+
+namespace Prismedia.Application.Acquisition;
+
+/// <summary>Why an import was blocked for manual resolution rather than performed automatically.</summary>
+public enum ImportBlockReason {
+    /// <summary>The payload contained no supported publication files.</summary>
+    NoSupportedPayload,
+
+    /// <summary>The payload contained supported video, but its positive TV identifiers did not agree with the requested unit.</summary>
+    NoMatchingTvUnit,
+
+    /// <summary>The payload contained multiple standalone prose books, so the correct one is ambiguous.</summary>
+    AmbiguousMultiplePrimaries,
+
+    /// <summary>The payload mixed a standalone book with comic archives, so the intent is ambiguous.</summary>
+    MixedPayload
+}
+
+/// <summary>One file to import and the sanitized library-relative path it should land at.</summary>
+/// <param name="SourceRelativePath">Download-payload-relative source path.</param>
+/// <param name="TargetRelativePath">Sanitized target path beneath the library root.</param>
+/// <param name="TargetEntityId">Requested Entity this exact file was selected to satisfy, when known.</param>
+public sealed record ImportPlanItem(
+    string SourceRelativePath,
+    string TargetRelativePath,
+    Guid? TargetEntityId = null);
+
+/// <summary>The outcome of planning an import: either a set of moves, or a block reason needing manual resolution.</summary>
+public sealed record ImportPlan(bool Blocked, ImportBlockReason? BlockReason, IReadOnlyList<ImportPlanItem> Items) {
+    public static ImportPlan Block(ImportBlockReason reason) => new(true, reason, []);
+    public static ImportPlan For(IReadOnlyList<ImportPlanItem> items) => new(false, null, items);
+}
+
+/// <summary>Publication metadata available for rendering target paths.</summary>
+public sealed record ImportTemplateContext(
+    string Title,
+    string? Author,
+    int? Year,
+    string? Series = null,
+    int? VolumeNumber = null);
+
+/// <summary>
+/// Pure import planning: decides which downloaded files are the publication payload and renders their target
+/// paths from a profile template. Filesystem access lives in the infrastructure planner; this core is
+/// deterministic so the format rules, ambiguity handling, and path sanitization are unit-testable.
+/// </summary>
+public static partial class ImportPlanBuilder {
+    private static readonly IReadOnlySet<string> PrimaryBookExtensions =
+        new HashSet<string>(StringComparer.OrdinalIgnoreCase) { ".epub", ".pdf" };
+
+    private static readonly IReadOnlySet<string> ComicArchiveExtensions =
+        new HashSet<string>(StringComparer.OrdinalIgnoreCase) { ".cbz", ".zip" };
+
+    private static readonly IReadOnlySet<string> AudiobookExtensions =
+        new HashSet<string>(StringComparer.OrdinalIgnoreCase) { ".m4b", ".m4a", ".mp3" };
+
+    [GeneratedRegex(@"[<>:""/\\|?*\x00-\x1f]")]
+    private static partial Regex IllegalPathCharsRegex();
+
+    [GeneratedRegex(@"\s{2,}")]
+    private static partial Regex CollapseWhitespaceRegex();
+
+    // Optional template tokens that embed connector text (e.g. "{ - Volume}"). v1 does not parse volume,
+    // so these are dropped wholesale along with their connectors rather than left as literal braces.
+    [GeneratedRegex(@"\{[^{}]*\bVolume\b[^{}]*\}", RegexOptions.IgnoreCase)]
+    private static partial Regex OptionalVolumeTokenRegex();
+
+    /// <summary>The prose-book, serialized-comic, and audiobook file extensions the publication importer recognizes.</summary>
+    public static IReadOnlySet<string> SupportedExtensions { get; } =
+        new HashSet<string>(PrimaryBookExtensions.Concat(ComicArchiveExtensions).Concat(AudiobookExtensions), StringComparer.OrdinalIgnoreCase);
+
+    /// <summary>
+    /// Plans the import for a set of files (paths relative to the download content root) given the book
+    /// metadata and the profile path template.
+    /// </summary>
+    public static ImportPlan Plan(
+        IReadOnlyList<string> relativeFilePaths,
+        ImportTemplateContext context,
+        string pathTemplate,
+        BookRendition rendition = BookRendition.Ebook) {
+        if (rendition == BookRendition.Audiobook) {
+            var audio = relativeFilePaths
+                .Where(path => AudiobookExtensions.Contains(Path.GetExtension(path)))
+                .OrderBy(path => path, StringComparer.OrdinalIgnoreCase)
+                .ToArray();
+            if (audio.Length == 0) {
+                return ImportPlan.Block(ImportBlockReason.NoSupportedPayload);
+            }
+
+            var audioFolder = RenderFolder(pathTemplate, context);
+            return ImportPlan.For(audio
+                .Select(path => new ImportPlanItem(
+                    path,
+                    CombineRelative(audioFolder, SanitizeSegment(Path.GetFileName(path)))))
+                .ToArray());
+        }
+
+        var supported = relativeFilePaths
+            .Where(path => PrimaryBookExtensions.Contains(Path.GetExtension(path))
+                || ComicArchiveExtensions.Contains(Path.GetExtension(path)))
+            .ToArray();
+        var primaries = supported.Where(path => PrimaryBookExtensions.Contains(Path.GetExtension(path))).ToArray();
+        var archives = supported.Where(path => ComicArchiveExtensions.Contains(Path.GetExtension(path))).ToArray();
+
+        if (supported.Length == 0) {
+            return ImportPlan.Block(ImportBlockReason.NoSupportedPayload);
+        }
+
+        // A standalone book file mixed with comic archives is ambiguous intent.
+        if (primaries.Length >= 1 && archives.Length >= 1) {
+            return ImportPlan.Block(ImportBlockReason.MixedPayload);
+        }
+
+        if (primaries.Length >= 1) {
+            // Distinct base names mean genuinely different books; a single base name in several formats
+            // (e.g. "Book.epub" + "Book.pdf" + "Book.mobi") is one book, so pick the preferred format.
+            var distinctBooks = primaries
+                .Select(path => NormalizeBaseName(path))
+                .Distinct(StringComparer.OrdinalIgnoreCase)
+                .Count();
+            if (distinctBooks > 1) {
+                return ImportPlan.Block(ImportBlockReason.AmbiguousMultiplePrimaries);
+            }
+
+            var chosen = PreferredPrimary(primaries);
+            var target = RenderPath(pathTemplate, context, Path.GetExtension(chosen), fileNameOnly: false);
+            return ImportPlan.For([new ImportPlanItem(chosen, target)]);
+        }
+
+        // One or more comic archives: retain each released installment under the rendered series/volume folder.
+        var folder = RenderFolder(pathTemplate, context);
+        var items = archives
+            .OrderBy(path => path, StringComparer.OrdinalIgnoreCase)
+            .Select(path => new ImportPlanItem(path, CombineRelative(folder, SanitizeSegment(Path.GetFileName(path)))))
+            .ToArray();
+        return ImportPlan.For(items);
+    }
+
+    /// <summary>Renders the template to a sanitized relative path, optionally keeping only the directory portion.</summary>
+    private static string RenderPath(string template, ImportTemplateContext context, string extension, bool fileNameOnly) {
+        var segments = template.Split('/', StringSplitOptions.RemoveEmptyEntries);
+        var rendered = new List<string>(segments.Length);
+        foreach (var segment in segments) {
+            var value = SanitizeSegment(ReplaceTokens(segment, context, extension));
+            if (!string.IsNullOrWhiteSpace(value)) {
+                rendered.Add(value);
+            }
+        }
+
+        return string.Join('/', rendered);
+    }
+
+    /// <summary>Renders just the directory portion of the template (drops the final file-name segment).</summary>
+    private static string RenderFolder(string template, ImportTemplateContext context) {
+        var lastSlash = template.LastIndexOf('/');
+        var directoryTemplate = lastSlash < 0 ? string.Empty : template[..lastSlash];
+        return RenderPath(directoryTemplate, context, extension: string.Empty, fileNameOnly: false);
+    }
+
+    private static string ReplaceTokens(string segment, ImportTemplateContext context, string extension) {
+        var result = OptionalVolumeTokenRegex().Replace(segment, string.Empty)
+            .Replace("{Author}", context.Author ?? string.Empty, StringComparison.Ordinal)
+            .Replace("{Series}", context.Series ?? context.Title, StringComparison.Ordinal)
+            .Replace(
+                "{VolumeFolder}",
+                context.VolumeNumber is { } volume ? $"Volume {volume:00}" : string.Empty,
+                StringComparison.Ordinal)
+            .Replace("{Title}", context.Title, StringComparison.Ordinal)
+            .Replace("{Year}", context.Year?.ToString() ?? string.Empty, StringComparison.Ordinal)
+            .Replace("{ext}", extension.TrimStart('.'), StringComparison.Ordinal);
+
+        return CleanEmptyDecorations(result);
+    }
+
+    /// <summary>
+    /// Cleans a token-substituted segment: drops connectors and brackets left empty by missing tokens
+    /// (e.g. "()", "[]", a trailing " - "), collapses whitespace, and trims stray connectors. Shared by
+    /// the book and media naming renderers so an absent token (a null year, an unknown quality) degrades
+    /// to a clean name rather than leaving literal punctuation behind.
+    /// </summary>
+    internal static string CleanEmptyDecorations(string value) {
+        value = Regex.Replace(value, @"\(\s*\)", string.Empty);
+        value = Regex.Replace(value, @"\[\s*\]", string.Empty);
+        value = CollapseWhitespaceRegex().Replace(value, " ");
+        // Whitespace left dangling before a dot (e.g. "Title .ext" after "()" vanished before ".ext").
+        value = Regex.Replace(value, @"\s+\.", ".");
+        return value.Trim().Trim('-', '.', ' ').Trim();
+    }
+
+    /// <summary>
+    /// Sanitizes one path segment for library placement: illegal filesystem characters become spaces,
+    /// whitespace collapses, and relative markers are neutralized. Shared by the per-kind import planners
+    /// so every import renders target paths under the same rules.
+    /// </summary>
+    public static string SanitizeSegment(string segment) {
+        var cleaned = IllegalPathCharsRegex().Replace(segment, " ");
+        cleaned = CollapseWhitespaceRegex().Replace(cleaned, " ").Trim();
+        // Never allow a segment to escape upward or resolve to a relative marker.
+        return cleaned is "." or ".." ? "_" : cleaned;
+    }
+
+    private static string CombineRelative(string folder, string fileName) =>
+        string.IsNullOrEmpty(folder) ? fileName : $"{folder}/{fileName}";
+
+    /// <summary>Normalizes a file's base name (no extension) so format variants of one book compare equal.</summary>
+    private static string NormalizeBaseName(string path) =>
+        CollapseWhitespaceRegex().Replace(Path.GetFileNameWithoutExtension(path).Replace('_', ' '), " ").Trim();
+
+    /// <summary>Chooses the preferred format among one book's files: EPUB first, then PDF, else the first.</summary>
+    private static string PreferredPrimary(IReadOnlyList<string> primaries) =>
+        primaries.FirstOrDefault(path => string.Equals(Path.GetExtension(path), ".epub", StringComparison.OrdinalIgnoreCase))
+        ?? primaries.FirstOrDefault(path => string.Equals(Path.GetExtension(path), ".pdf", StringComparison.OrdinalIgnoreCase))
+        ?? primaries[0];
+}

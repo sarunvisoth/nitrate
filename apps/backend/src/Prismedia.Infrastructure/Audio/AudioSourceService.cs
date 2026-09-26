@@ -1,0 +1,118 @@
+using Microsoft.EntityFrameworkCore;
+using Prismedia.Application.Audio;
+using Prismedia.Application.Entities;
+using Prismedia.Contracts.Media;
+using Prismedia.Domain.Entities;
+using Prismedia.Infrastructure.Persistence;
+
+namespace Prismedia.Infrastructure.Audio;
+
+/// <summary>
+/// EF-backed implementation that resolves source audio files from the shared file capability table.
+/// </summary>
+public sealed class AudioSourceService : IAudioSourceService {
+    private static readonly HashSet<string> BrowserNativeCodecs = new(StringComparer.OrdinalIgnoreCase) {
+        MediaCodecs.Aac,
+        MediaCodecs.Flac,
+        MediaCodecs.Mp3,
+        MediaCodecs.Opus,
+        MediaCodecs.PcmS16Le,
+        MediaCodecs.PcmS24Le,
+        MediaCodecs.Vorbis
+    };
+
+    private readonly PrismediaDbContext _db;
+    private readonly IEntityVisibilityChecker _visibility;
+
+    /// <summary>
+    /// Creates an audio source resolver over the database context.
+    /// </summary>
+    /// <param name="db">Database context used to find audio source file rows.</param>
+    /// <param name="visibility">Current-user library visibility, checked before resolving any file.</param>
+    public AudioSourceService(PrismediaDbContext db, IEntityVisibilityChecker visibility) {
+        _db = db;
+        _visibility = visibility;
+    }
+
+    /// <inheritdoc />
+    public async Task<AudioSourceFile?> GetSourceAsync(Guid id, CancellationToken cancellationToken) {
+        if (!await _visibility.IsVisibleAsync(id, cancellationToken)) {
+            return null;
+        }
+
+        var playableKindCodes = EntityKindRegistry.All
+            .OfType<IPlayableAudioKindDefinition>()
+            .Select(definition => definition.Kind.ToCode())
+            .ToArray();
+        var source = await (
+            from entity in _db.Entities.AsNoTracking()
+            join file in _db.EntityFiles.AsNoTracking() on entity.Id equals file.EntityId
+            join technical in _db.EntityTechnical.AsNoTracking() on entity.Id equals technical.EntityId into technicalRows
+            from technical in technicalRows.DefaultIfEmpty()
+            where entity.Id == id &&
+                playableKindCodes.Contains(entity.KindCode) &&
+                !entity.IsWanted &&
+                file.Role == EntityFileRole.Source
+            select new {
+                File = file,
+                Technical = technical
+            })
+            .FirstOrDefaultAsync(cancellationToken);
+
+        if (source is null || !File.Exists(source.File.Path)) {
+            return null;
+        }
+
+        var extension = Path.GetExtension(source.File.Path);
+
+        return new AudioSourceFile(
+            id,
+            source.File.Path,
+            ContentTypeForSource(
+                source.File.MimeType,
+                extension,
+                source.Technical?.Container,
+                source.Technical?.Codec),
+            source.Technical?.DurationSeconds,
+            source.Technical?.Codec,
+            IsDirectPlayable(source.Technical?.Codec));
+    }
+
+    private static bool IsDirectPlayable(string? codec) =>
+        string.IsNullOrWhiteSpace(codec) || BrowserNativeCodecs.Contains(codec.Trim());
+
+    private static string ContentTypeForSource(
+        string? storedContentType,
+        string extension,
+        string? container,
+        string? codec) {
+        if (IsOggOpus(extension, container, codec)) {
+            return MediaContentTypes.AudioOggOpus;
+        }
+
+        return storedContentType ?? MimeForExtension(extension);
+    }
+
+    private static bool IsOggOpus(string extension, string? container, string? codec) {
+        if (string.Equals(extension, ".opus", StringComparison.OrdinalIgnoreCase)) {
+            return true;
+        }
+
+        return string.Equals(container?.Trim(), "ogg", StringComparison.OrdinalIgnoreCase) &&
+            string.Equals(codec?.Trim(), MediaCodecs.Opus, StringComparison.OrdinalIgnoreCase);
+    }
+
+    private static string MimeForExtension(string extension) {
+        return extension.ToLowerInvariant() switch {
+            ".mp3" => MediaContentTypes.AudioMpeg,
+            ".m4a" or ".m4b" or ".aac" => MediaContentTypes.AudioMp4,
+            ".ogg" or ".oga" => MediaContentTypes.AudioOgg,
+            ".opus" => MediaContentTypes.AudioOggOpus,
+            ".flac" => MediaContentTypes.AudioFlac,
+            ".wav" => MediaContentTypes.AudioWav,
+            ".aiff" or ".aif" => MediaContentTypes.AudioAiff,
+            ".wma" => MediaContentTypes.AudioWma,
+            _ => MediaContentTypes.OctetStream
+        };
+    }
+}

@@ -1,0 +1,512 @@
+import { fireEvent, render, waitFor } from "@testing-library/svelte";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { tick } from "svelte";
+import EntityThumbnail from "./EntityThumbnail.svelte";
+import type { EntityThumbnailCard } from "$lib/entities/entity-thumbnail";
+import {
+  galleryCard,
+  imageSequenceCard,
+  personCard,
+  pointerEvent,
+  spriteCard,
+} from "./entity-thumbnail-test-fixtures";
+
+// jsdom lacks TouchEvent, so synthesize a cancelable event carrying a touches list.
+function touchEvent(type: string, touches: Array<{ clientX: number; clientY: number }>): Event {
+  const event = new Event(type, { bubbles: true, cancelable: true });
+  Object.defineProperty(event, "touches", { value: touches, configurable: true });
+  return event;
+}
+
+const loadTrickplayFrames = vi.fn();
+
+vi.mock("@prismedia/ui-svelte", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("@prismedia/ui-svelte")>();
+  return {
+    ...actual,
+    loadTrickplayFrames: (...args: unknown[]) => loadTrickplayFrames(...args),
+  };
+});
+
+describe("EntityThumbnail", () => {
+  beforeEach(() => {
+    loadTrickplayFrames.mockClear();
+    loadTrickplayFrames.mockResolvedValue([
+      { start: 0, end: 10, x: 0, y: 0, width: 160, height: 90, url: "/api/playback/videos/1/trickplay/280/0.jpg" },
+      { start: 10, end: 20, x: 160, y: 0, width: 160, height: 90, url: "/api/playback/videos/1/trickplay/280/0.jpg" },
+    ]);
+    vi.stubGlobal("requestAnimationFrame", vi.fn((callback: FrameRequestCallback) => {
+      callback(0);
+      return 1;
+    }));
+    vi.stubGlobal("cancelAnimationFrame", vi.fn());
+    vi.stubGlobal("ResizeObserver", class {
+      observe = vi.fn();
+      disconnect = vi.fn();
+    });
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+    vi.unstubAllGlobals();
+    vi.restoreAllMocks();
+  });
+
+  it("shows the first sprite frame after hover intent settles", async () => {
+    vi.useFakeTimers();
+    const { container } = render(EntityThumbnail, {
+      props: {
+        card: spriteCard(),
+      },
+    });
+    const media = container.querySelector(".media") as HTMLElement;
+    Object.defineProperty(media, "getBoundingClientRect", {
+      configurable: true,
+      value: () => ({ left: 0, width: 100 }),
+    });
+
+    await fireEvent(media, pointerEvent("pointerenter", 50));
+
+    expect(loadTrickplayFrames).not.toHaveBeenCalled();
+    await vi.advanceTimersByTimeAsync(140);
+
+    await waitFor(() => {
+      expect(loadTrickplayFrames).toHaveBeenCalledWith("/api/playback/videos/1/trickplay/280/tiles.m3u8");
+      expect(container.querySelector(".sprite-overlay")).not.toBeNull();
+    });
+  });
+
+  it("does not scrub or capture the pointer on touch so rows stay scrollable", async () => {
+    const { container } = render(EntityThumbnail, {
+      props: {
+        card: spriteCard(),
+      },
+    });
+    const media = container.querySelector(".media") as HTMLElement;
+    media.setPointerCapture = vi.fn();
+    Object.defineProperty(media, "getBoundingClientRect", {
+      configurable: true,
+      value: () => ({ left: 0, width: 100 }),
+    });
+
+    // A touch drag must not capture the pointer — the browser keeps owning the gesture so the
+    // surrounding horizontal row can scroll. (Scrubbing is a desktop pointer-hover interaction.)
+    await fireEvent(media, pointerEvent("pointerdown", 10, { pointerType: "touch", pointerId: 7 }));
+    await fireEvent(media, pointerEvent("pointermove", 90, { pointerType: "touch", pointerId: 7 }));
+
+    expect(media.setPointerCapture).not.toHaveBeenCalled();
+  });
+
+  it("scrubs sprite trickplay from a horizontal touch drag", async () => {
+    vi.useFakeTimers();
+    const { container } = render(EntityThumbnail, {
+      props: {
+        card: spriteCard(),
+      },
+    });
+    await tick();
+    const media = container.querySelector(".media") as HTMLElement;
+    Object.defineProperty(media, "getBoundingClientRect", {
+      configurable: true,
+      value: () => ({ left: 0, width: 100 }),
+    });
+
+    media.dispatchEvent(touchEvent("touchstart", [{ clientX: 10, clientY: 10 }]));
+    // A horizontal drag scrubs immediately and preventDefaults to stop the row scrolling.
+    const move = touchEvent("touchmove", [{ clientX: 90, clientY: 12 }]);
+    media.dispatchEvent(move);
+    await vi.advanceTimersByTimeAsync(0);
+
+    expect(move.defaultPrevented).toBe(true);
+    const overlay = container.querySelector<HTMLElement>(".sprite-overlay");
+    expect(loadTrickplayFrames).toHaveBeenCalledWith("/api/playback/videos/1/trickplay/280/tiles.m3u8");
+    expect(overlay?.style.backgroundPosition).toContain("100%");
+  });
+
+  it("lets a vertical touch swipe scroll without scrubbing", async () => {
+    vi.useFakeTimers();
+    const { container } = render(EntityThumbnail, {
+      props: {
+        card: spriteCard(),
+      },
+    });
+    await tick();
+    const media = container.querySelector(".media") as HTMLElement;
+    Object.defineProperty(media, "getBoundingClientRect", {
+      configurable: true,
+      value: () => ({ left: 0, width: 100 }),
+    });
+
+    media.dispatchEvent(touchEvent("touchstart", [{ clientX: 10, clientY: 10 }]));
+    // A vertical drag is a scroll: it resolves to "scroll" and never preventDefaults.
+    media.dispatchEvent(touchEvent("touchmove", [{ clientX: 12, clientY: 60 }]));
+    const move = touchEvent("touchmove", [{ clientX: 12, clientY: 90 }]);
+    media.dispatchEvent(move);
+
+    expect(move.defaultPrevented).toBe(false);
+  });
+
+  it("keeps touch taps navigable when a thumbnail can scrub", async () => {
+    const onActivate = vi.fn();
+    const { container } = render(EntityThumbnail, {
+      props: {
+        card: spriteCard(),
+        linkable: false,
+        onActivate,
+      },
+    });
+    const surface = container.querySelector<HTMLElement>(".entity-thumbnail");
+    const media = container.querySelector(".media") as HTMLElement;
+    media.setPointerCapture = vi.fn();
+    media.releasePointerCapture = vi.fn();
+    Object.defineProperty(media, "getBoundingClientRect", {
+      configurable: true,
+      value: () => ({ left: 0, width: 100 }),
+    });
+
+    await fireEvent(media, pointerEvent("pointerdown", 50, { pointerType: "touch", pointerId: 7 }));
+    await fireEvent(media, pointerEvent("pointermove", 54, { pointerType: "touch", pointerId: 7 }));
+    expect(media.setPointerCapture).not.toHaveBeenCalled();
+    await fireEvent(media, pointerEvent("pointerup", 54, { pointerType: "touch", pointerId: 7 }));
+    await fireEvent.click(surface!);
+
+    expect(onActivate).toHaveBeenCalledWith(spriteCard());
+  });
+
+  it("does not start mouse scrubbing from linkable hover-preview thumbnails", async () => {
+    const { container } = render(EntityThumbnail, {
+      props: {
+        card: imageSequenceCard(),
+      },
+    });
+    const media = container.querySelector(".media") as HTMLElement;
+    media.setPointerCapture = vi.fn();
+    Object.defineProperty(media, "getBoundingClientRect", {
+      configurable: true,
+      value: () => ({ left: 0, width: 100 }),
+    });
+
+    await fireEvent(media, pointerEvent("pointerdown", 90));
+    await fireEvent.focus(container.querySelector<HTMLElement>(".entity-thumbnail")!);
+
+    expect(media.setPointerCapture).not.toHaveBeenCalled();
+    expect(container.querySelector<HTMLImageElement>(".media > img")?.getAttribute("src")).toBe("/assets/pages/1.jpg");
+  });
+
+  it("resolves default entity links inside the shared thumbnail", () => {
+    const { container } = render(EntityThumbnail, {
+      props: {
+        card: personCard(),
+      },
+    });
+
+    const link = container.querySelector<HTMLAnchorElement>("a.entity-thumbnail");
+    expect(link?.getAttribute("href")).toBe("/people/person-1");
+  });
+
+  it("can open shared thumbnail links in a safe new tab", () => {
+    const { container } = render(EntityThumbnail, {
+      props: {
+        card: personCard(),
+        linkTarget: "_blank",
+      },
+    });
+
+    const link = container.querySelector<HTMLAnchorElement>("a.entity-thumbnail");
+    expect(link?.getAttribute("target")).toBe("_blank");
+    expect(link?.getAttribute("rel")).toBe("noopener noreferrer");
+  });
+
+  it("renders remote cover artwork without forwarding the app referrer", () => {
+    const coverUrl =
+      "https://uploads.mangadex.org/covers/2d3114e5-43fb-4e10-9129-ebc2014489f8/6187c6cf-8f55-4b2e-874a-3e689b000623.jpg.512.jpg";
+    const card = {
+      ...personCard(),
+      cover: {
+        alt: "MangaDex cover",
+        src: coverUrl,
+      },
+    };
+
+    const { container } = render(EntityThumbnail, {
+      props: { card },
+    });
+
+    const image = container.querySelector<HTMLImageElement>(".media > img");
+    expect(image).toHaveAttribute("src", coverUrl);
+    expect(image).toHaveAttribute("referrerpolicy", "no-referrer");
+  });
+
+  it("resolves nested gallery cards to their gallery detail route", () => {
+    const { container } = render(EntityThumbnail, {
+      props: {
+        card: galleryCard(),
+        selectable: false,
+      },
+    });
+
+    const link = container.querySelector<HTMLAnchorElement>("a.entity-thumbnail");
+    expect(link?.getAttribute("href")).toBe("/galleries/gallery-2");
+  });
+
+  it("can disable the default link and toggle selection from the card surface", async () => {
+    const onSelectedChange = vi.fn();
+    const { container } = render(EntityThumbnail, {
+      props: {
+        card: personCard(),
+        linkable: false,
+        selectable: true,
+        selected: true,
+        onSelectedChange,
+      },
+    });
+
+    const surface = container.querySelector<HTMLElement>(".entity-thumbnail");
+    expect(container.querySelector("a.entity-thumbnail")).toBeNull();
+    expect(surface?.getAttribute("role")).toBe("checkbox");
+    expect(surface?.getAttribute("aria-checked")).toBe("true");
+
+    await fireEvent.click(surface!);
+
+    expect(onSelectedChange).toHaveBeenCalledWith(false);
+  });
+
+  it("can activate from the card surface while keeping checkbox selection separate", async () => {
+    const onActivate = vi.fn();
+    const onSelectedChange = vi.fn();
+    const { container } = render(EntityThumbnail, {
+      props: {
+        card: personCard(),
+        linkable: false,
+        selectable: true,
+        selected: true,
+        onActivate,
+        onSelectedChange,
+      },
+    });
+
+    const surface = container.querySelector<HTMLElement>(".entity-thumbnail");
+    const checkbox = container.querySelector<HTMLElement>('[role="checkbox"]');
+
+    await fireEvent.click(surface!);
+    expect(onActivate).toHaveBeenCalledWith(personCard());
+    expect(onSelectedChange).not.toHaveBeenCalled();
+
+    await fireEvent.click(checkbox!);
+    expect(onSelectedChange).toHaveBeenCalledWith(false);
+    expect(onActivate).toHaveBeenCalledTimes(1);
+  });
+
+  it("can render as a static visual inside a parent control", () => {
+    const { container } = render(EntityThumbnail, {
+      props: {
+        card: personCard(),
+        interactive: false,
+        linkable: false,
+      },
+    });
+
+    const surface = container.querySelector<HTMLElement>(".entity-thumbnail");
+    expect(container.querySelector("a.entity-thumbnail")).toBeNull();
+    expect(surface?.getAttribute("role")).toBeNull();
+    expect(surface?.getAttribute("tabindex")).toBeNull();
+    expect(surface?.classList.contains("is-static")).toBe(true);
+  });
+
+  it("renders credit subtitles when present", () => {
+    const { container } = render(EntityThumbnail, {
+      props: {
+        card: {
+          ...personCard(),
+          subtitle: "Character Ronnie",
+        },
+      },
+    });
+
+    expect(container.textContent).toContain("Character Ronnie");
+  });
+
+  it("shows a skeleton while async cover images are loading", async () => {
+    const { container } = render(EntityThumbnail, {
+      props: {
+        card: {
+          ...personCard(),
+          cover: {
+            alt: "Tim Robinson",
+            src: "/assets/people/tim.jpg",
+          },
+        },
+      },
+    });
+
+    const media = container.querySelector<HTMLElement>(".media");
+    const image = container.querySelector<HTMLImageElement>(".media > img");
+
+    expect(image?.getAttribute("loading")).toBe("lazy");
+    expect(image?.getAttribute("decoding")).toBe("async");
+    expect(image?.getAttribute("fetchpriority")).toBe("low");
+    expect(media?.classList.contains("is-image-loading")).toBe(true);
+    expect(container.querySelector(".image-loading-skeleton")).not.toBeNull();
+
+    await fireEvent.load(image!);
+
+    await waitFor(() => {
+      expect(media?.classList.contains("is-image-loading")).toBe(false);
+      expect(container.querySelector(".image-loading-skeleton")).toBeNull();
+    });
+  });
+
+  it("allows scrolling grids to opt into eager cover image loading", () => {
+    const { container } = render(EntityThumbnail, {
+      props: {
+        card: {
+          ...personCard(),
+          cover: {
+            alt: "Tim Robinson",
+            src: "/assets/people/tim.jpg",
+          },
+        },
+        imageFetchPriority: "auto",
+        imageLoading: "eager",
+      },
+    });
+
+    const image = container.querySelector<HTMLImageElement>(".media > img");
+
+    expect(image?.getAttribute("loading")).toBe("eager");
+    expect(image?.getAttribute("fetchpriority")).toBe("auto");
+  });
+
+  it("renders image-sequence thumbnails as the first still until hovered", async () => {
+    vi.useFakeTimers();
+    const { container } = render(EntityThumbnail, {
+      props: {
+        card: imageSequenceCard(),
+      },
+    });
+    const media = container.querySelector(".media") as HTMLElement;
+    Object.defineProperty(media, "getBoundingClientRect", {
+      configurable: true,
+      value: () => ({ left: 0, width: 100 }),
+    });
+
+    expect(container.querySelector<HTMLImageElement>(".media > img")?.getAttribute("src")).toBe("/assets/pages/1.jpg");
+
+    await fireEvent(media, pointerEvent("pointerenter", 90));
+    expect(container.querySelector<HTMLImageElement>(".media > img")?.getAttribute("src")).toBe("/assets/pages/1.jpg");
+    await vi.advanceTimersByTimeAsync(140);
+
+    const activeImage = container.querySelector<HTMLImageElement>(".media > img");
+    expect(activeImage?.getAttribute("src")).toBe("/assets/pages/3.jpg");
+    expect(container.querySelector(".sequence-rail span.is-active")).not.toBeNull();
+  });
+
+  it("renders image sequences when separate entities share the same artwork path", () => {
+    const base = imageSequenceCard();
+    if (base.hover.kind !== "image-sequence") throw new Error("Expected an image sequence test card.");
+    const sharedPathCard: EntityThumbnailCard = {
+      ...base,
+      hover: {
+        kind: "image-sequence",
+        assets: [
+          { alt: "First item", entityId: "item-1", src: "/assets/shared/cover.jpg" },
+          { alt: "Second item", entityId: "item-2", src: "/assets/shared/cover.jpg" },
+          { alt: "Third item", entityId: "item-3", src: "/assets/unique/cover.jpg" },
+        ],
+      },
+    };
+
+    const { container } = render(EntityThumbnail, { props: { card: sharedPathCard } });
+
+    expect(container.querySelectorAll(".sequence-rail span")).toHaveLength(2);
+  });
+
+  it("scrubs image-sequence thumbnails from a mouse hover drag", async () => {
+    vi.useFakeTimers();
+    const { container } = render(EntityThumbnail, {
+      props: {
+        card: imageSequenceCard(),
+      },
+    });
+    const media = container.querySelector(".media") as HTMLElement;
+    Object.defineProperty(media, "getBoundingClientRect", {
+      configurable: true,
+      value: () => ({ left: 0, width: 100 }),
+    });
+
+    await fireEvent(media, pointerEvent("pointerenter", 0));
+    await vi.advanceTimersByTimeAsync(200);
+    await fireEvent(media, pointerEvent("pointermove", 90));
+    await vi.advanceTimersByTimeAsync(0);
+
+    expect(container.querySelector<HTMLImageElement>(".media > img")?.getAttribute("src")).toBe("/assets/pages/3.jpg");
+    expect(container.querySelector(".sequence-rail span.is-active")).not.toBeNull();
+  });
+
+  it("keeps image-sequence hover previews on the selected frame until the user scrubs", async () => {
+    vi.useFakeTimers();
+    const { container } = render(EntityThumbnail, {
+      props: {
+        card: imageSequenceCard(),
+      },
+    });
+    const media = container.querySelector(".media") as HTMLElement;
+    Object.defineProperty(media, "getBoundingClientRect", {
+      configurable: true,
+      value: () => ({ left: 0, width: 100 }),
+    });
+
+    await fireEvent(media, pointerEvent("pointerenter", 0));
+    expect(container.querySelector<HTMLImageElement>(".media > img")?.getAttribute("src")).toBe("/assets/pages/1.jpg");
+
+    await vi.advanceTimersByTimeAsync(1_500);
+    expect(container.querySelector<HTMLImageElement>(".media > img")?.getAttribute("src")).toBe("/assets/pages/1.jpg");
+
+    await fireEvent(media, pointerEvent("pointermove", 90));
+
+    expect(container.querySelector<HTMLImageElement>(".media > img")?.getAttribute("src")).toBe("/assets/pages/3.jpg");
+  });
+
+  it("does not load hover previews while previews are disabled", async () => {
+    vi.useFakeTimers();
+    const { container } = render(EntityThumbnail, {
+      props: {
+        card: spriteCard(),
+        hoverPreviewsEnabled: false,
+      },
+    });
+    const media = container.querySelector(".media") as HTMLElement;
+    Object.defineProperty(media, "getBoundingClientRect", {
+      configurable: true,
+      value: () => ({ left: 0, width: 100 }),
+    });
+
+    await fireEvent(media, pointerEvent("pointerenter", 50));
+    await vi.advanceTimersByTimeAsync(500);
+
+    expect(loadTrickplayFrames).not.toHaveBeenCalled();
+    expect(container.querySelector(".sprite-overlay")).toBeNull();
+  });
+
+  it("does not load hover previews while the caller temporarily suppresses them", async () => {
+    vi.useFakeTimers();
+    const { container } = render(EntityThumbnail, {
+      props: {
+        card: spriteCard(),
+        hoverPreviewSuppressed: () => true,
+      },
+    });
+    const media = container.querySelector(".media") as HTMLElement;
+    Object.defineProperty(media, "getBoundingClientRect", {
+      configurable: true,
+      value: () => ({ left: 0, width: 100 }),
+    });
+
+    await fireEvent(media, pointerEvent("pointerenter", 50));
+    await vi.advanceTimersByTimeAsync(500);
+
+    expect(loadTrickplayFrames).not.toHaveBeenCalled();
+    expect(container.querySelector(".sprite-overlay")).toBeNull();
+  });
+
+});

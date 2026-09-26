@@ -1,0 +1,39 @@
+{
+  "name": "prismedia",
+  "version": "3.7.2",
+  "private": true,
+  "packageManager": "pnpm@10.30.3",
+  "scripts": {
+    "build": "turbo run build",
+    "dev": "pnpm --filter @prismedia/web-svelte dev",
+    "dev:api": "dotnet watch --project apps/backend/src/Prismedia.Api/Prismedia.Api.csproj run",
+    "dev:worker": "dotnet watch --project apps/backend/src/Prismedia.Worker/Prismedia.Worker.csproj run",
+    "lint": "turbo run lint",
+    "typecheck": "turbo run typecheck",
+    "check": "pnpm --filter @prismedia/web-svelte sync && turbo run lint typecheck",
+    "api:generate": "pnpm --filter @prismedia/web-svelte api:generate",
+    "api:check": "pnpm --filter @prismedia/web-svelte api:check",
+    "test": "pnpm test:unit",
+    "test:backend": "dotnet test apps/backend/Prismedia.slnx",
+    "test:unit": "vitest run --config vitest.config.ts",
+    "test:web-svelte": "pnpm --filter @prismedia/web-svelte test:unit",
+    "test:e2e": "playwright test",
+    "test:ci": "pnpm validate",
+    "validate": "pnpm release:check && pnpm api:check && pnpm check && pnpm test:unit && pnpm test:web-svelte && pnpm docs:check && pnpm test:backend",
+    "coverage": "pnpm test:unit -- --coverage && pnpm test:web-svelte -- --coverage",
+    "docs:dev": "node scripts/docs-site.mjs start",
+    "docs:build": "pnpm --filter @prismedia/documentation-site build",
+    "docs:serve": "node scripts/docs-site.mjs serve",
+    "docs:check": "pnpm --filter @prismedia/documentation-site typecheck && pnpm --filter @prismedia/documentation-site build",
+    "dev:kill": "bash scripts/dev/kill-orphans.sh",
+    "release:check": "node scripts/release/check-version.mjs"
+  },
+  "devDependencies": {
+    "@playwright/test": "^1.60.0",
+    "@testing-library/jest-dom": "^6.9.1",
+    "@vitest/coverage-v8": "^4.1.7",
+    "jsdom": "^29.1.1",
+    "turbo": "^2.9.14",
+    "vitest": "^4.1.7"
+  }
+}

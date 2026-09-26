@@ -1,0 +1,41 @@
+.DS_Store
+.env
+.env.*
+!.env.example
+node_modules/
+.turbo/
+coverage/
+playwright-report/
+test-results/
+.tmp/
+*.log
+.claude/
+# Local sample media at the repo root only — unanchored `videos/` would also swallow
+# C# source under */Videos/ on case-insensitive filesystems.
+/videos/*
+
+apps/web-svelte/.svelte-kit/
+apps/web-svelte/build/
+documentation-site/.docusaurus/
+documentation-site/build/
+
+# Private working notes and one-off launch/review workspaces. Keep durable,
+# publishable project documentation in docs/ or documentation-site/ instead.
+docs/audits/
+docs/launch/
+docs/discover-request-roadmap.md
+infra/docker/apple-review.compose.yml
+scripts/launch/
+
+**/bin/
+**/obj/
+**/*.lscache
+apps/backend/data/
+
+# Local dev tools (host-specific binaries, e.g. jellyfin-ffmpeg for the VSCode launch configs)
+.tools/
+
+# .NET API serves the built Svelte app from wwwroot; assets are produced by the web build,
+# while the empty root is retained because ASP.NET's static-web-assets test host requires it.
+apps/backend/src/Prismedia.Api/wwwroot/*
+!apps/backend/src/Prismedia.Api/wwwroot/.gitkeep

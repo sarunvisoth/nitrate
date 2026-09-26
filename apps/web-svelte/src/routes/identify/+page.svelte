@@ -1,0 +1,212 @@
+<script lang="ts">
+  import { onMount } from "svelte";
+  import { goto } from "$app/navigation";
+  import { page } from "$app/state";
+  import {
+    AlertCircle,
+    Check,
+    Home,
+    Loader2,
+    ScanSearch,
+    X,
+  } from "@lucide/svelte";
+  import { Button, cn } from "@prismedia/ui-svelte";
+  import {
+    useIdentifyStore,
+  } from "$lib/components/identify/identify-store.svelte";
+  import IdentifyDashboard from "$lib/components/identify/IdentifyDashboard.svelte";
+  import IdentifyKindTab from "$lib/components/identify/IdentifyKindTab.svelte";
+  import IdentifyReviewChoice from "$lib/components/identify/IdentifyReviewChoice.svelte";
+  import IdentifyReviewParent from "$lib/components/identify/IdentifyReviewParent.svelte";
+  import IdentifyReviewChild from "$lib/components/identify/IdentifyReviewChild.svelte";
+  import { entityKindIcon } from "$lib/entities/entity-kind-icons";
+  import { entityAccentForKind } from "$lib/entities/entity-accent";
+  import { useAppChrome } from "$lib/stores/app-chrome.svelte";
+
+  const store = useIdentifyStore();
+  const appChrome = useAppChrome();
+
+  onMount(() => {
+    const entityId = page.url.searchParams.get("entity");
+    const returnId = page.url.searchParams.get("returnId");
+    if (entityId) {
+      const query = returnId ? `?returnId=${encodeURIComponent(returnId)}` : "";
+      void goto(`/identify/${entityId}${query}`);
+    } else {
+      void store.enterDashboardRoute();
+    }
+  });
+
+  $effect(() => {
+    return appChrome.setBreadcrumbs([{ label: "Identify" }]);
+  });
+</script>
+
+<svelte:head>
+  <title>Identify · Prismedia</title>
+</svelte:head>
+
+<div class="flex flex-col gap-0 pb-16">
+  <!-- ── Header ── -->
+  <div class="flex items-start justify-between gap-4">
+    <div class="flex items-center gap-3">
+      <ScanSearch class="h-5 w-5 text-text-accent" />
+      <div>
+        <h1 class="flex items-center gap-2">
+          Identify
+          {#if store.view.kind !== "dashboard"}
+            <span class="rounded-xs border border-phosphor-600/20 bg-surface-3 px-1.5 py-0.5 font-mono text-[0.62rem] text-phosphor-600">
+              {store.view.kind === "kind-tab" ? store.view.entityKind : "review"}
+            </span>
+          {/if}
+        </h1>
+        <p class="mt-0.5 text-[0.78rem] text-text-muted">
+          {#if store.view.kind === "dashboard"}
+            Identify entities via plugin providers
+          {:else if store.view.kind === "kind-tab"}
+            Scoped to {store.view.entityKind}
+          {:else}
+            Reviewing proposal
+          {/if}
+        </p>
+      </div>
+    </div>
+  </div>
+
+  <!-- ── Tab strip (dashboard + per-kind tabs) ── -->
+  {#if store.view.kind === "dashboard" || store.view.kind === "kind-tab"}
+    <nav class="mt-4 flex items-stretch overflow-hidden rounded-sm border border-border-subtle bg-gradient-to-b from-surface-2 to-surface-1">
+      <Button
+        type="button"
+        variant="ghost"
+        size="sm"
+        aria-pressed={store.view.kind === "dashboard"}
+        class={cn(
+          "h-auto items-center gap-2 rounded-none border-b-2 border-r border-r-border-subtle px-3.5 py-2.5 font-heading text-[0.78rem] font-semibold transition-colors",
+          store.view.kind === "dashboard"
+            ? "border-b-accent-500 bg-accent-950/20 text-text-accent-bright"
+            : "border-b-transparent text-text-muted hover:bg-surface-2 hover:text-text-primary",
+        )}
+        onclick={() => store.navigateToDashboard()}
+      >
+        <Home class="h-3.5 w-3.5" />
+        Dashboard
+      </Button>
+
+      <div class="flex flex-1 items-stretch overflow-x-auto">
+        {#each store.supportedKinds as kindInfo (kindInfo.kind)}
+          {@const isActive = store.view.kind === "kind-tab" && store.view.entityKind === kindInfo.kind}
+          {@const KindIcon = entityKindIcon(kindInfo.kind)}
+          {@const kindAccent = entityAccentForKind(kindInfo.kind).primary}
+          <Button
+            type="button"
+            variant="ghost"
+            size="sm"
+            aria-pressed={isActive}
+            class={cn(
+              "h-auto items-center gap-2 whitespace-nowrap rounded-none border-b-2 px-3.5 py-2.5 font-heading text-[0.8rem] font-semibold transition-colors",
+              isActive
+                ? "border-b-accent-500 bg-accent-950/20 text-text-accent-bright"
+                : "border-b-transparent text-text-secondary hover:bg-surface-2 hover:text-text-primary",
+            )}
+            onclick={() => store.navigateToKind(kindInfo.kind)}
+          >
+            <KindIcon class="h-3.5 w-3.5" color={kindAccent} aria-hidden="true" />
+            <span>{kindInfo.label}</span>
+            {#if kindInfo.pending > 0}
+              <span class="font-mono text-[0.6rem] text-text-accent">{kindInfo.pending}</span>
+            {/if}
+          </Button>
+        {/each}
+      </div>
+    </nav>
+  {/if}
+
+  <!-- ── Notices ── -->
+  {#if store.error}
+    <div class="mt-4 flex items-center gap-2.5 rounded-xs border border-error/40 bg-surface-1 px-3 py-2.5 text-[0.82rem] text-text-primary" role="alert">
+      <AlertCircle class="h-4 w-4 shrink-0 text-error-text" />
+      <span class="min-w-0 flex-1">{store.error}</span>
+      <Button
+        type="button"
+        variant="ghost"
+        size="icon"
+        class="shrink-0 text-text-disabled transition-colors hover:text-text-primary"
+        onclick={() => (store.error = null)}
+        aria-label="Dismiss error"
+      >
+        <X class="h-3.5 w-3.5" />
+      </Button>
+    </div>
+  {/if}
+
+  {#if store.message}
+    <div class="mt-4 flex items-center gap-2.5 rounded-xs border border-border-accent bg-surface-1 px-3 py-2.5 text-[0.82rem] text-text-primary">
+      <Check class="h-4 w-4 shrink-0 text-text-accent" />
+      <span class="min-w-0 flex-1">{store.message}</span>
+      <Button
+        type="button"
+        variant="ghost"
+        size="icon"
+        class="shrink-0 text-text-disabled transition-colors hover:text-text-primary"
+        onclick={() => (store.message = null)}
+        aria-label="Dismiss message"
+      >
+        <X class="h-3.5 w-3.5" />
+      </Button>
+    </div>
+  {/if}
+
+  <!-- ── Main content area ── -->
+  <div class="mt-4">
+    <svelte:boundary onerror={(error) => console.error("[identify] review render failed", error)}>
+    {#if store.loading}
+      <div class="flex items-center justify-center py-16">
+        <Loader2 class="h-6 w-6 animate-spin text-text-accent" />
+      </div>
+    {:else if store.view.kind === "dashboard"}
+      <IdentifyDashboard />
+    {:else if store.view.kind === "kind-tab"}
+      <IdentifyKindTab entityKind={store.view.entityKind} />
+    {:else if store.view.kind === "review-choice"}
+      <IdentifyReviewChoice entity={store.view.entity} candidates={store.view.candidates} />
+    {:else if store.view.kind === "review-parent"}
+      <IdentifyReviewParent entity={store.view.entity} proposal={store.view.proposal} detail={store.view.detail} />
+    {:else if store.view.kind === "review-child"}
+      <IdentifyReviewChild
+        entity={store.view.entity}
+        proposal={store.view.proposal}
+        parentProposal={store.view.parentProposal}
+      />
+    {/if}
+
+    {#snippet failed(error, reset)}
+      <div class="flex flex-col items-center justify-center gap-4 rounded-sm border border-error/40 bg-surface-1 px-4 py-12 text-center">
+        <AlertCircle class="h-7 w-7 text-error-text" />
+        <div class="space-y-1">
+          <p class="font-heading text-[0.9rem] font-semibold text-text-primary">This view couldn't be displayed</p>
+          <p class="mx-auto max-w-md font-mono text-[0.72rem] text-text-muted">
+            {error instanceof Error ? error.message : String(error)}
+          </p>
+        </div>
+        <div class="flex items-center gap-2">
+          <Button
+            type="button"
+            variant="secondary"
+            onclick={reset}
+          >
+            Try again
+          </Button>
+          <Button
+            type="button"
+            variant="primary"
+            onclick={() => { reset(); store.navigateToDashboard(); }}
+          >
+            Back to dashboard
+          </Button>
+        </div>
+      </div>
+    {/snippet}
+    </svelte:boundary>
+  </div>
+</div>

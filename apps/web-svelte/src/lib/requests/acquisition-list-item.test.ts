@@ -1,0 +1,191 @@
+import { describe, expect, it, vi } from "vitest";
+import {
+  ACQUISITION_STATUS,
+  ENTITY_KIND,
+  MONITOR_STATUS,
+  type AcquisitionStatusCode,
+} from "$lib/api/generated/codes";
+import type { DownloadQueueItemView, WantedListItemView } from "$lib/api/generated/model";
+import { downloadToListItem, wantedToListItem } from "./acquisition-list-item";
+import { acquisitionStatusDisplay } from "./acquisition-status-display";
+
+describe("download acquisition list items", () => {
+  it.each(Object.values(ACQUISITION_STATUS))("shares the thumbnail status presentation for %s", (status) => {
+    const item = downloadToListItem(download(status), null, { onReSearch: vi.fn(), onRemove: vi.fn() }, false);
+    const display = acquisitionStatusDisplay(status);
+    expect(item.statusLabel).toBe(display.label);
+    expect(item.statusIcon).toBe(display.icon);
+    expect(item.tone).toBe(display.tone);
+  });
+  it("locks every destructive or restart action while cleanup is in progress", () => {
+    const item = downloadToListItem(
+      download(ACQUISITION_STATUS.stopping),
+      null,
+      { onReSearch: vi.fn(), onRemove: vi.fn() },
+      false,
+    );
+
+    expect(item.statusLabel).toBe("Cleaning up");
+    expect(item.tone).toBe("cleanup");
+    expect(item.indeterminate).toBe(true);
+    expect(item.description).toBe("Removing download and managed files…");
+    expect(item.selectable).toBe(false);
+    expect(item.primaryAction).toBeNull();
+    expect(item.removeAction).toBeNull();
+    expect(item.menuActions).toEqual([]);
+  });
+
+  it("fails closed when the server returns a newer lifecycle state", () => {
+    const unknown = "future-lifecycle-state" as AcquisitionStatusCode;
+    const item = downloadToListItem(
+      download(unknown),
+      null,
+      { onReSearch: vi.fn(), onRemove: vi.fn() },
+      false,
+    );
+
+    expect(item.statusLabel).toBe("Updating");
+    expect(item.tone).toBe("cleanup");
+    expect(item.selectable).toBe(false);
+    expect(item.primaryAction).toBeNull();
+    expect(item.removeAction).toBeNull();
+    expect(item.menuActions).toEqual([]);
+  });
+
+  it("shows why an import is waiting instead of presenting it as active work", () => {
+    const row = download(ACQUISITION_STATUS.importing);
+    row.statusMessage = "Waiting for the current library scan to finish.";
+
+    const item = downloadToListItem(
+      row,
+      null,
+      { onReSearch: vi.fn(), onRemove: vi.fn() },
+      false,
+    );
+
+    expect(item.description).toBe(row.statusMessage);
+  });
+
+  it("shows download-client recovery as a waiting state without a restart action", () => {
+    const row = download(ACQUISITION_STATUS.waitingForDownloadClient);
+    row.statusMessage = "Waiting for download client \"qBittorrent\" to recover.";
+
+    const item = downloadToListItem(
+      row,
+      null,
+      { onReSearch: vi.fn(), onRemove: vi.fn() },
+      false,
+    );
+
+    expect(item.statusLabel).toBe("Waiting for download client");
+    expect(item.tone).toBe("queued");
+    expect(item.indeterminate).toBe(true);
+    expect(item.description).toBe(row.statusMessage);
+    expect(item.primaryAction?.id).toBe("view");
+  });
+
+  it("offers a deliberate manual search while an automatic release gate is waiting", () => {
+    const onReSearch = vi.fn();
+    const row = download(ACQUISITION_STATUS.waitingForRelease);
+    row.statusMessage = "Waiting until 2026-09-01, after the digital release date.";
+
+    const item = downloadToListItem(
+      row,
+      null,
+      { onReSearch, onRemove: vi.fn() },
+      false,
+    );
+
+    expect(item.statusLabel).toBe("Waiting for release");
+    expect(item.indeterminate).toBe(false);
+    expect(item.description).toBe(row.statusMessage);
+    expect(item.primaryAction?.id).toBe("search");
+    item.primaryAction?.run?.();
+    expect(onReSearch).toHaveBeenCalledWith(row);
+  });
+
+  it("surfaces legacy unavailable release metadata as waiting work", () => {
+    const onReSearch = vi.fn();
+    const row = download(ACQUISITION_STATUS.manualSearchRequired);
+    row.statusMessage = "The configured metadata provider did not return a streaming release date. This item is waiting: check again later, search manually, or enter the date yourself.";
+
+    const item = downloadToListItem(
+      row,
+      null,
+      { onReSearch, onRemove: vi.fn() },
+      false,
+    );
+
+    expect(item.statusLabel).toBe("Waiting for release");
+    expect(item.tone).toBe("queued");
+    expect(item.indeterminate).toBe(false);
+    expect(item.description).toBe(row.statusMessage);
+    expect(item.primaryAction?.id).toBe("search");
+  });
+
+  it("keeps a legacy release-metadata miss visibly waiting in Wanted", () => {
+    const row = wanted(MONITOR_STATUS.active);
+    row.acquisitionStatus = ACQUISITION_STATUS.manualSearchRequired;
+
+    const item = wantedToListItem(
+      row,
+      "missing",
+      null,
+      { onSearchNow: vi.fn(), onUnmonitor: vi.fn() },
+      false,
+    );
+
+    expect(item.statusLabel).toBe("Waiting for release");
+    expect(item.tone).toBe("searching");
+    expect(item.indeterminate).toBe(true);
+    expect(item.metaParts.some((part) => part.startsWith("next "))).toBe(true);
+    expect(item.primaryAction?.label).toBe("Search now");
+  });
+
+  it("locks wanted-list actions while monitor cleanup owns the Entity", () => {
+    const item = wantedToListItem(
+      wanted(MONITOR_STATUS.deletingFiles),
+      "missing",
+      null,
+      { onSearchNow: vi.fn(), onUnmonitor: vi.fn() },
+      false,
+    );
+
+    expect(item.statusLabel).toBe("Deleting files");
+    expect(item.tone).toBe("cleanup");
+    expect(item.selectable).toBe(false);
+    expect(item.primaryAction).toBeNull();
+    expect(item.removeAction).toBeNull();
+    expect(item.menuActions).toEqual([]);
+  });
+});
+
+function download(status: AcquisitionStatusCode): DownloadQueueItemView {
+  return {
+    acquisitionId: "acquisition-1",
+    entityId: "movie-1",
+    kind: ENTITY_KIND.movie,
+    title: "Arrival",
+    status,
+    statusMessage: null,
+    progress: null,
+    updatedAt: "2026-07-10T00:00:00Z",
+  };
+}
+
+function wanted(status: WantedListItemView["monitorStatus"]): WantedListItemView {
+  return {
+    monitorId: "monitor-1",
+    acquisitionId: "acquisition-1",
+    entityId: "movie-1",
+    kind: ENTITY_KIND.movie,
+    title: "Arrival",
+    monitorStatus: status,
+    acquisitionStatus: null,
+    lastSearchedAt: null,
+    nextSearchAt: null,
+    ownedQuality: null,
+    cutoffQuality: null,
+    barrenSearches: 0,
+  };
+}

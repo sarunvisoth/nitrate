@@ -1,0 +1,41 @@
+using Prismedia.Domain.Capabilities;
+using Prismedia.Domain.Entities;
+
+namespace Prismedia.Domain.Taxonomy;
+
+/// <summary>Defines the studio taxonomy kind and shared-root construction.</summary>
+public sealed class StudioEntityKindDefinition() : RootEntityKindDefinition<Studio>(
+    EntityKind.Studio,
+    "studio",
+    "Studio",
+    "Studios",
+    EntityKindCategory.Taxonomy,
+    EntityStorageShape.None,
+    new EntityKindPresentation(
+        EntityKindIcon.Studio,
+        EntityKindIcon.Studio,
+        21,
+        9,
+        EntityAccentHue.Orange,
+        EntityAccentHue.Magenta,
+        EntityArtworkFit.Contain,
+        EntityArtworkSurface.BrandPlate),
+    new EntityKindNavigation(EntityKind.Studio, "studios", "/studios", "/studios/{id}"),
+    new EntityKindSearch(4, expandsRelationshipResults: true),
+    static root => new Studio(root.Id, root.Title),
+    behavior: new EntityKindBehavior(supportsManualManagement: true)) {
+    /// <inheritdoc />
+    public override EntityProgressTopology ProgressTopology => EntityProgressTopology.None;
+
+    /// <inheritdoc />
+    public override EntityStructurePolicy StructurePolicy => EntityStructurePolicy.RootOnly;
+}
+
+/// <summary>
+/// Domain model for studio, publisher, label, or production-group taxonomy entities.
+/// </summary>
+public sealed class Studio : Entity<StudioEntityKindDefinition> {
+    public Studio(Guid id, string title, IEnumerable<EntityCapability>? capabilities = null)
+        : base(id, title, capabilities) {
+    }
+}

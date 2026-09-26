@@ -54,14 +54,14 @@
 - Consumes: the current `nitrate` `main`, which contains only `docs/nitrate/**` (no `README.md`, no `.gitignore`), so the merge is conflict-free.
 - Produces: a `main` whose history contains `627958a491f565babf1f8f693a5bb48ea834bc7e` and whose tree is Prismedia v3.7.2 plus `docs/nitrate/**`.
 
-- [ ] **Step 1: Confirm starting state**
+- [x] **Step 1: Confirm starting state**
 
 ```bash
 git status --short          # expect: clean
 git ls-files                # expect: only docs/nitrate/** files
 ```
 
-- [ ] **Step 2: Fetch Prismedia (full history, not shallow)**
+- [x] **Step 2: Fetch Prismedia (full history, not shallow)**
 
 ```bash
 git remote add prismedia https://github.com/pauljoda/Prismedia.git
@@ -69,7 +69,7 @@ git fetch prismedia main
 git cat-file -t 627958a491f565babf1f8f693a5bb48ea834bc7e   # expect: commit
 ```
 
-- [ ] **Step 3: Merge the pinned commit**
+- [x] **Step 3: Merge the pinned commit**
 
 ```bash
 git merge --allow-unrelated-histories --no-edit \
@@ -79,7 +79,7 @@ git merge --allow-unrelated-histories --no-edit \
 
 Expected: merge succeeds with no conflicts. If there is a conflict it can only be under `docs/nitrate/`; keep the Nitrate version (`git checkout --ours docs/nitrate && git add docs/nitrate`).
 
-- [ ] **Step 4: Remove the remote and verify**
+- [x] **Step 4: Remove the remote and verify**
 
 ```bash
 git remote remove prismedia
@@ -89,7 +89,7 @@ test -d apps/backend && test -d apps/web-svelte && test -f LICENSE && echo OK   
 test -L CLAUDE.md && echo symlink                                                        # expect: symlink
 ```
 
-- [ ] **Step 5: Push**
+- [x] **Step 5: Push**
 
 ```bash
 git push origin main
@@ -106,13 +106,13 @@ git push origin main
 
 **Why:** `publish-dev.yml` runs on every push to `main` and tries to publish to Prismedia's GHCR; `ci.yml` runs on every push and would burn the private repo's Actions minutes. Prismedia's `AGENTS.md` also contains release/versioning/publishing rules that do not apply to Nitrate and would mislead agents.
 
-- [ ] **Step 1: Remove publishing workflows**
+- [x] **Step 1: Remove publishing workflows**
 
 ```bash
 git rm .github/workflows/publish-dev.yml .github/workflows/publish-channel.yml .github/workflows/documentation-site.yml
 ```
 
-- [ ] **Step 2: Make CI manual-only.** In `.github/workflows/ci.yml` replace exactly this block:
+- [x] **Step 2: Make CI manual-only.** In `.github/workflows/ci.yml` replace exactly this block:
 
 ```yaml
 on:
@@ -130,7 +130,7 @@ on:
 
 Verify: `ls .github/workflows` → `ci.yml  validate.yml`; `grep -n "^on:" -A 2 .github/workflows/*.yml` shows only `workflow_dispatch`.
 
-- [ ] **Step 3: Prepend Nitrate overrides to `AGENTS.md`.** Insert this block at the very top of `AGENTS.md`, above `# Prismedia Repository Contract`:
+- [x] **Step 3: Prepend Nitrate overrides to `AGENTS.md`.** Insert this block at the very top of `AGENTS.md`, above `# Prismedia Repository Contract`:
 
 ```markdown
 # Nitrate Overrides (read first)
@@ -166,7 +166,7 @@ overrides it.
 
 Verify: `head -3 CLAUDE.md` prints `# Nitrate Overrides (read first)` (proves the symlink still works).
 
-- [ ] **Step 4: Prepend Nitrate header to `README.md`.** Insert at the very top:
+- [x] **Step 4: Prepend Nitrate header to `README.md`.** Insert at the very top:
 
 ```markdown
 # Nitrate
@@ -183,9 +183,9 @@ Project docs: [`docs/nitrate/`](docs/nitrate/).
 
 ```
 
-- [ ] **Step 5: Update roadmap** — set M0 Status to `Done` in `docs/nitrate/ROADMAP.md`.
+- [x] **Step 5: Update roadmap** — set M0 Status to `Done` in `docs/nitrate/ROADMAP.md`.
 
-- [ ] **Step 6: Commit and push**
+- [x] **Step 6: Commit and push**
 
 ```bash
 git add -A
@@ -202,7 +202,7 @@ git push origin main
 **Interfaces:**
 - Produces: `BASELINE.md` with sections `## Toolchain`, `## Test baseline`, `## Running locally`. Tasks 4–7 compare against the test baseline; a test that already failed here is not a regression.
 
-- [ ] **Step 1: Toolchain.** Install whatever is missing and record versions:
+- [x] **Step 1: Toolchain.** Install whatever is missing and record versions:
 
 ```bash
 dotnet --version || (curl -sSL https://dot.net/v1/dotnet-install.sh | bash -s -- --channel 10.0 && export PATH="$HOME/.dotnet:$PATH")
@@ -212,7 +212,7 @@ ffmpeg -version | head -1    # install via apt if missing: sudo apt-get install 
 psql --version               # PostgreSQL 16 if integration tests or a local run need it
 ```
 
-- [ ] **Step 2: Install and run the suites**
+- [x] **Step 2: Install and run the suites**
 
 ```bash
 pnpm install --frozen-lockfile
@@ -223,9 +223,9 @@ pnpm test:backend
 
 Record pass/fail counts for each in `BASELINE.md`. If a suite fails before any Nitrate code change, record the failing test names and the error — **do not fix them** in this task.
 
-- [ ] **Step 3: Try a local run** (API + worker + web). Read `docs/nix-development.md`, `infra/docker/docker-compose.yml`, and `apps/backend/src/Prismedia.Api/appsettings*.json` to find the required config (database connection string, `PRISMEDIA_DATA_DIR`, `PRISMEDIA_CACHE_DIR`, ffmpeg paths, port — README says `8008`). Start Postgres, then `pnpm dev:api`, `pnpm dev:worker`, `pnpm dev`. Record in `## Running locally` the exact env vars and commands that worked, or exactly where it failed. A failed local run in the cloud sandbox is acceptable; record it and continue.
+- [x] **Step 3: Try a local run** (API + worker + web). Read `docs/nix-development.md`, `infra/docker/docker-compose.yml`, and `apps/backend/src/Prismedia.Api/appsettings*.json` to find the required config (database connection string, `PRISMEDIA_DATA_DIR`, `PRISMEDIA_CACHE_DIR`, ffmpeg paths, port — README says `8008`). Start Postgres, then `pnpm dev:api`, `pnpm dev:worker`, `pnpm dev`. Record in `## Running locally` the exact env vars and commands that worked, or exactly where it failed. A failed local run in the cloud sandbox is acceptable; record it and continue.
 
-- [ ] **Step 4: Commit**
+- [x] **Step 4: Commit**
 
 ```bash
 git add docs/nitrate/BASELINE.md
@@ -250,7 +250,7 @@ Prismedia supports `Software`, `VideoToolbox`, `Vaapi`, `Nvenc`, `Qsv` but not A
 **Interfaces:**
 - Produces: `HlsTranscoderProfile.Amf`; persisted setting value `"Amf"` for key `hls.transcoderProfile`; ffmpeg `-c:v h264_amf`.
 
-- [ ] **Step 1: Write the failing tests.** Add next to `VirtualSegmentsUseVideoToolboxEncoderWhenConfigured` in `HlsAssetServiceTests.cs`:
+- [x] **Step 1: Write the failing tests.** Add next to `VirtualSegmentsUseVideoToolboxEncoderWhenConfigured` in `HlsAssetServiceTests.cs`:
 
 ```csharp
     [Fact]
@@ -290,7 +290,7 @@ Prismedia supports `Software`, `VideoToolbox`, `Vaapi`, `Nvenc`, `Qsv` but not A
     }
 ```
 
-- [ ] **Step 2: Run to verify they fail**
+- [x] **Step 2: Run to verify they fail**
 
 ```bash
 dotnet test apps/backend/tests/Prismedia.Infrastructure.Tests --filter "FullyQualifiedName~Amf"
@@ -298,7 +298,7 @@ dotnet test apps/backend/tests/Prismedia.Infrastructure.Tests --filter "FullyQua
 
 Expected: build error `'HlsTranscoderProfile' does not contain a definition for 'Amf'`.
 
-- [ ] **Step 3: Add the enum member.** In `HlsAssetServiceOptions.cs`, change the tail of the enum from:
+- [x] **Step 3: Add the enum member.** In `HlsAssetServiceOptions.cs`, change the tail of the enum from:
 
 ```csharp
     /// <summary>Use Intel Quick Sync via <c>h264_qsv</c> when the host and ffmpeg build expose it.</summary>
@@ -317,7 +317,7 @@ to:
 }
 ```
 
-- [ ] **Step 4: Map the encoder.** In `HlsAssetService.Encoding.cs` `VideoEncoderArguments`, add the `Amf` arm:
+- [x] **Step 4: Map the encoder.** In `HlsAssetService.Encoding.cs` `VideoEncoderArguments`, add the `Amf` arm:
 
 ```csharp
         var encoder = transcoderProfile switch {
@@ -332,7 +332,7 @@ to:
 
 No other change is needed in that method: the existing hardware branch already emits `-profile:v main` and `-pix_fmt yuv420p` for non-QSV, non-VAAPI profiles, both valid for `h264_amf`. The software-scale filter path (`format=yuv420p`) is also correct for AMF.
 
-- [ ] **Step 5: Run the tests to verify they pass**
+- [x] **Step 5: Run the tests to verify they pass**
 
 ```bash
 dotnet test apps/backend/tests/Prismedia.Infrastructure.Tests --filter "FullyQualifiedName~HlsAssetServiceTests"
@@ -340,14 +340,14 @@ dotnet test apps/backend/tests/Prismedia.Infrastructure.Tests --filter "FullyQua
 
 Expected: all `HlsAssetServiceTests` pass (new AMF tests included).
 
-- [ ] **Step 6: Expose it in settings (backend).** In `AppSettings.cs` `TranscoderProfile` options, add after the `Qsv` line (note the comma on the `Qsv` line):
+- [x] **Step 6: Expose it in settings (backend).** In `AppSettings.cs` `TranscoderProfile` options, add after the `Qsv` line (note the comma on the `Qsv` line):
 
 ```csharp
                 new("Qsv", "QSV", "Intel Quick Sync."),
                 new("Amf", "AMD AMF", "AMD on Windows.")
 ```
 
-- [ ] **Step 7: Expose it in settings (web).** In `apps/web-svelte/src/lib/settings/library-settings.ts`:
+- [x] **Step 7: Expose it in settings (web).** In `apps/web-svelte/src/lib/settings/library-settings.ts`:
 
 ```ts
 export const hlsTranscoderProfiles = [
@@ -369,7 +369,7 @@ grep -rn "\"Qsv\"\|'Qsv'\|Quick Sync" apps/web-svelte/src apps/backend/tests
 
 If the settings UI has a label/description map keyed by profile (the grep will show it), add `Amf` there with label `AMD AMF`.
 
-- [ ] **Step 8: Run affected suites**
+- [x] **Step 8: Run affected suites**
 
 ```bash
 pnpm test:backend
@@ -382,7 +382,7 @@ If `pnpm api:check` reports drift in the generated client, run `pnpm api:generat
 
 Expected: same results as `BASELINE.md` plus the new passing AMF tests. Any new failure must be fixed before committing.
 
-- [ ] **Step 9: Commit**
+- [x] **Step 9: Commit**
 
 ```bash
 git add -A
@@ -407,7 +407,7 @@ Real-hardware verification of AMF is **Owner-verified** in Task 7's checklist �
 **Interfaces:**
 - Produces: the section headings below, in this order. Task 7 depends on §19; Task 8 depends on §10–§14 and §16.
 
-- [ ] **Step 1: Write sections 1–18** (the owner's list), with these starting points:
+- [x] **Step 1: Write sections 1–18** (the owner's list), with these starting points:
 
 | § | Topic | Start here |
 |---|-------|-----------|
@@ -430,7 +430,7 @@ Real-hardware verification of AMF is **Owner-verified** in Task 7's checklist �
 | 17 | Relevant licenses | Prismedia, vendored foliate-js, pdfjs-dist; Readest/BookOrbit (reference only) — link to `docs/THIRD_PARTY_LICENSES.md` |
 | 18 | Risks / limitations | include: foliate-js being vendored (upgrade path), CFI stability across re-scans/file changes, multi-user assumptions, anything that blocks native Windows |
 
-- [ ] **Step 2: Add §19 "Native Windows readiness".** Evidence-based checklist of anything that assumes Linux/Docker in runtime code or startup:
+- [x] **Step 2: Add §19 "Native Windows readiness".** Evidence-based checklist of anything that assumes Linux/Docker in runtime code or startup:
 
 ```bash
 grep -rnE "OperatingSystem\.IsLinux|/dev/|/tmp|/data\b|chmod|\"bash\"|\"sh\"|Path\.Combine\(\"/|inotify|Mono\.Unix" apps/backend/src --include='*.cs' | grep -v /Migrations/
@@ -439,9 +439,9 @@ grep -rnE "PRISMEDIA_[A-Z_]+" apps/backend/src --include='*.cs' -o | sort -u
 
 For each hit, say whether it breaks on Windows and the minimal fix. Also list every `PRISMEDIA_*` env var with its default and meaning (Task 7 needs this), and how the API finds the built web assets.
 
-- [ ] **Step 3: Add §20 "Proposed annotation system (summary)"** — one page: data model, EPUB locator choice, PDF locator choice, sync semantics, endpoints, frontend integration points. This is the summary Task 8 expands into a full plan.
+- [x] **Step 3: Add §20 "Proposed annotation system (summary)"** — one page: data model, EPUB locator choice, PDF locator choice, sync semantics, endpoints, frontend integration points. This is the summary Task 8 expands into a full plan.
 
-- [ ] **Step 4: Commit**
+- [x] **Step 4: Commit**
 
 ```bash
 git add docs/nitrate/ARCHITECTURE_ANALYSIS.md
@@ -452,7 +452,7 @@ git commit -m "docs(nitrate): architecture analysis of Prismedia base"
 
 **Files:** Create `docs/THIRD_PARTY_LICENSES.md`.
 
-- [ ] **Step 1: Gather**
+- [x] **Step 1: Gather**
 
 ```bash
 pnpm licenses list --prod --json > /tmp/js-licenses.json
@@ -460,9 +460,9 @@ dotnet list apps/backend/Prismedia.slnx package --include-transitive > /tmp/dotn
 head -40 apps/web-svelte/src/lib/vendor/foliate-js/*.js | grep -iE "license|copyright" | sort -u
 ```
 
-- [ ] **Step 2: Write the file** with sections: `## Base project` (Prismedia, CC BY-NC-SA 4.0, commit `627958a`), `## Vendored code` (foliate-js: license + upstream URL + vendored version if determinable), `## JavaScript dependencies (production)` (table: package, version, license — group by license), `## .NET dependencies` (table: package, version, license — look up license from NuGet metadata where the tool does not report it), `## Reference-only projects (no code used)` (Readest, BookOrbit, KOReader — with their licenses). Flag any GPL/AGPL/SSPL/non-commercial license in production dependencies at the top under `## Attention`.
+- [x] **Step 2: Write the file** with sections: `## Base project` (Prismedia, CC BY-NC-SA 4.0, commit `627958a`), `## Vendored code` (foliate-js: license + upstream URL + vendored version if determinable), `## JavaScript dependencies (production)` (table: package, version, license — group by license), `## .NET dependencies` (table: package, version, license — look up license from NuGet metadata where the tool does not report it), `## Reference-only projects (no code used)` (Readest, BookOrbit, KOReader — with their licenses). Flag any GPL/AGPL/SSPL/non-commercial license in production dependencies at the top under `## Attention`.
 
-- [ ] **Step 3: Commit**
+- [x] **Step 3: Commit**
 
 ```bash
 git add docs/THIRD_PARTY_LICENSES.md
@@ -480,9 +480,9 @@ git commit -m "docs: third-party license inventory"
 **Interfaces:**
 - Consumes: ARCHITECTURE_ANALYSIS §19 (env vars, blockers, web-asset path), BASELINE `## Running locally`.
 
-- [ ] **Step 1: Fix small blockers** from §19 one at a time, each with a unit test where the code is testable, each as its own commit (`fix(api): …`). Run `pnpm test:backend` after each.
+- [x] **Step 1: Fix small blockers** from §19 one at a time, each with a unit test where the code is testable, each as its own commit (`fix(api): …`). Run `pnpm test:backend` after each.
 
-- [ ] **Step 2: Write the guide** with these sections, using real commands and the env vars found in §19:
+- [x] **Step 2: Write the guide** with these sections, using real commands and the env vars found in §19:
   1. **Prerequisites (winget):** .NET 10 SDK, Node LTS + pnpm (via corepack), PostgreSQL 16, FFmpeg full build (the gyan.dev build includes `h264_amf`), Git. Give the `winget install` commands and tell the owner to confirm IDs with `winget search <name>` if one fails.
   2. **Library folders:** `D:\HomeServer\{Movies,TV,Music,Audiobooks,Books,Comics,Photos}` and how to add each as a library in the web UI.
   3. **Database:** create the Postgres user/database; the connection string format.
@@ -500,7 +500,7 @@ git commit -m "docs: third-party license inventory"
      text file unless Developer Mode + `core.symlinks=true` are on. This is harmless for running
      the server.
 
-- [ ] **Step 3: Owner verification checklist** — end the guide with this checklist (unticked; the owner fills it in):
+- [x] **Step 3: Owner verification checklist** — end the guide with this checklist (unticked; the owner fills it in):
 
 ```markdown
 ## Owner verification
@@ -516,9 +516,9 @@ git commit -m "docs: third-party license inventory"
 - [ ] PC stays usable (normal apps, light gaming) while one stream transcodes
 ```
 
-- [ ] **Step 4: Update roadmap** — M2 Status: `Built; awaiting owner verification`.
+- [x] **Step 4: Update roadmap** — M2 Status: `Built; awaiting owner verification`.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add -A
@@ -537,7 +537,7 @@ git push origin main
 **Interfaces:**
 - Consumes: ARCHITECTURE_ANALYSIS §10–§14, §16, §20; VISION "Highlights", "Notes", "Progress Synchronization".
 
-- [ ] **Step 1: Write the plan** using the superpowers:writing-plans skill format (header, Global Constraints, file map, TDD tasks with real code). Scope is **exactly**:
+- [x] **Step 1: Write the plan** using the superpowers:writing-plans skill format (header, Global Constraints, file map, TDD tasks with real code). Scope is **exactly**:
   - Server: `Annotation` entity + EF migration (fields from VISION's `Annotation` shape: id, userId, bookId, locator, selectedText, surroundingText, type, color, note, createdAt, updatedAt; plus soft-delete `deletedAt` for sync), CRUD endpoints under a new route group, per-user authorization, OpenAPI + regenerated web client (`pnpm api:generate`).
   - Sync semantics: server is the source of truth; client fetches all annotations for a book on open and after focus/visibility change; last-write-wins on `updatedAt`; deletes are tombstones.
   - EPUB locator: CFI via the vendored foliate-js `epubcfi.js` unless §11/§16 found a better foliate-js mechanism; store a text-quote fallback (`selectedText` + `surroundingText`) to re-anchor if the CFI fails.
@@ -546,9 +546,9 @@ git push origin main
   - A Playwright e2e test: open an EPUB fixture, highlight, reload, highlight still there; second browser context (same user) sees it.
   - Owner-verified acceptance: highlight on Mac browser, see it on iPad.
 
-- [ ] **Step 2: Update roadmap** — M1 Status: `Done`; M3 Plan column: link to the new file; M3 Status: `Plan ready — awaiting owner review`.
+- [x] **Step 2: Update roadmap** — M1 Status: `Done`; M3 Plan column: link to the new file; M3 Status: `Plan ready — awaiting owner review`.
 
-- [ ] **Step 3: Commit, push, and stop**
+- [x] **Step 3: Commit, push, and stop**
 
 ```bash
 git add docs/nitrate

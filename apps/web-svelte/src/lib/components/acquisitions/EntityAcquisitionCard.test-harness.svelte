@@ -1,0 +1,113 @@
+<script lang="ts">
+  import { CAPABILITY_KIND, ENTITY_KIND } from "$lib/api/generated/codes";
+  import type { AcquisitionDetail, EntityCapability } from "$lib/api/generated/model";
+  import type { EntityAcquisition } from "$lib/components/acquisitions/use-entity-acquisition.svelte";
+  import EntityAcquisitionCard from "$lib/components/acquisitions/EntityAcquisitionCard.svelte";
+  import { provideNsfw } from "$lib/nsfw/store.svelte";
+
+  provideNsfw(() => ({ initialMode: "show", allowed: true }));
+
+  let {
+    initialAcquisition = null,
+    refresh,
+    onImported,
+    showFileManagement = false,
+    monitorStopping = false,
+    monitorDeletingFiles = false,
+    monitorUnknownStatus = false,
+    monitorActive = false,
+    showMonitor = false,
+    showSearch = false,
+    onToggleMonitor,
+    entityKind = ENTITY_KIND.book,
+  }: {
+    initialAcquisition?: AcquisitionDetail | null;
+    refresh: () => Promise<void>;
+    onImported?: () => void | Promise<void>;
+    showFileManagement?: boolean;
+    monitorStopping?: boolean;
+    monitorDeletingFiles?: boolean;
+    monitorUnknownStatus?: boolean;
+    monitorActive?: boolean;
+    showMonitor?: boolean;
+    showSearch?: boolean;
+    onToggleMonitor?: () => void | Promise<void>;
+    entityKind?: string;
+  } = $props();
+
+  let acquisition = $derived<AcquisitionDetail | null>(initialAcquisition);
+
+  const acq: EntityAcquisition = {
+    get acquisition() {
+      return acquisition;
+    },
+    get monitor() {
+      return monitorStopping || monitorDeletingFiles || monitorUnknownStatus ? ({} as never) : null;
+    },
+    get monitorActive() {
+      return monitorActive || monitorDeletingFiles;
+    },
+    get monitorStopping() {
+      return monitorStopping;
+    },
+    get monitorDeletingFiles() {
+      return monitorDeletingFiles;
+    },
+    get monitorUnknownStatus() {
+      return monitorUnknownStatus;
+    },
+    trackedVia: "",
+    get showFileManagement() {
+      return showFileManagement;
+    },
+    showSync: false,
+    get showMonitor() {
+      return showMonitor || monitorStopping || monitorDeletingFiles || monitorUnknownStatus;
+    },
+    get showSearch() {
+      return showSearch;
+    },
+    showSearchMissing: false,
+    visible: true,
+    childCards: [],
+    missingChildCount: 0,
+    monitorBusy: false,
+    monitorError: null,
+    syncBusy: false,
+    searchBusy: false,
+    missingBusy: false,
+    missingResult: null,
+    clearAcquisition() {
+      acquisition = null;
+    },
+    setAcquisition(value) {
+      acquisition = value;
+    },
+    refresh: () => refresh(),
+    async toggleMonitor() {
+      await onToggleMonitor?.();
+    },
+    async updateMonitorTargeting() {},
+    async syncNow() {},
+    async searchMissing() {},
+    async searchForRelease() {},
+    async childMonitoringChanged() {},
+  };
+
+  const entity = $derived({
+    id: "entity-1",
+    title: "Managed Entity",
+    kind: entityKind,
+    capabilities: showFileManagement
+      ? [{ kind: CAPABILITY_KIND.fileManagement, canDeleteFiles: true } as EntityCapability]
+      : [],
+  });
+</script>
+
+<span data-testid="bound-acquisition-id">{acquisition?.summary.id ?? "none"}</span>
+<EntityAcquisitionCard
+  {acq}
+  {entity}
+  fileManagement={{ onDeleted: async () => {}, onReverted: async () => {} }}
+  {onImported}
+/>

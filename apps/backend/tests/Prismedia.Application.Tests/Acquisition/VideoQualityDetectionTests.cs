@@ -1,0 +1,38 @@
+using Prismedia.Application.Acquisition;
+using Prismedia.Domain.Entities;
+
+namespace Prismedia.Application.Tests.Acquisition;
+
+public sealed class VideoQualityDetectionTests {
+    [Theory]
+    [InlineData("Film.2000.1080p.HDTS.English")]
+    [InlineData("Film.2000.2160p.HDCAM.English")]
+    [InlineData("Film.2000.1080p.CAMRip")]
+    [InlineData("Film.2000.1080p.TeleSync")]
+    public void TheaterRecordingsDoNotInheritTheBareResolutionBroadcastQuality(string title) =>
+        Assert.Equal(VideoQuality.Unknown, VideoQualityDetection.Detect(title));
+
+    [Fact]
+    public void AWorkNamedCamStillUsesItsDeclaredSource() =>
+        Assert.Equal(VideoQuality.Webdl1080p, VideoQualityDetection.Detect("Cam.2018.1080p.WEB-DL"));
+
+    [Theory]
+    [InlineData("Film.2000.480p.BluRay.x264")]
+    [InlineData("Film.2000.576p.BDRip.x264")]
+    [InlineData("Film.2000.480p.Remux")]
+    public void AnExplicitSdEncodeDoesNotInheritAnHdDiscResolution(string release) =>
+        Assert.Equal(VideoQuality.Sdtv, VideoQualityDetection.Detect(release));
+
+    [Theory]
+    [InlineData("Film.2000.DVD9.720p.HDDVD.x264", VideoQuality.Bluray720p)]
+    [InlineData("Film.2000.720p.HD-DVD.x264", VideoQuality.Bluray720p)]
+    [InlineData("Film.2000.1080p.HD.DVD.x264", VideoQuality.Bluray1080p)]
+    [InlineData("Film.2000.1080p.HDDVDRip.x264", VideoQuality.Bluray1080p)]
+    [InlineData("Film.2000.1080p.HD-DVDRip.x264", VideoQuality.Bluray1080p)]
+    [InlineData("Film.2000.1080p.HDDVD.REMUX", VideoQuality.Remux1080p)]
+    [InlineData("Film.2000.DVD9", VideoQuality.Dvd)]
+    [InlineData("Film.2000.DVDRip.XviD", VideoQuality.Dvd)]
+    public void HighDefinitionDiscSourcesUseTheHdDiscLadder(string release, VideoQuality expected) {
+        Assert.Equal(expected, VideoQualityDetection.Detect(release));
+    }
+}
