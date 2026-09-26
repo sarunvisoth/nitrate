@@ -65,6 +65,43 @@ export async function textCentre(frame: Frame, text: string) {
 }
 
 
+/**
+ * Selects the first occurrence of `text` directly on the page (PdfReader's text layer lives in the
+ * main document, unlike foliate's per-section iframes) and returns its viewport centre. Polls
+ * because PdfReader lazily renders each page's canvas/text layer (pdf.js parses + paints
+ * asynchronously after the reader shell itself is already visible and interactive).
+ */
+export async function selectOnPage(page: Page, text: string, timeout = 20_000) {
+  await expect(page.locator(".pdf-text-layer")).not.toHaveCount(0, { timeout });
+  let result: { x: number; y: number } | null = null;
+  await expect
+    .poll(async () => (result = await selectOnPageOnce(page, text).catch(() => null)), { timeout })
+    .not.toBeNull();
+  return result!;
+}
+
+function selectOnPageOnce(page: Page, text: string) {
+  return page.evaluate((t) => {
+    const walker = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT);
+    let node: Node | null;
+    while ((node = walker.nextNode())) {
+      const at = node.textContent?.indexOf(t) ?? -1;
+      if (at < 0) continue;
+      const range = document.createRange();
+      range.setStart(node, at);
+      range.setEnd(node, at + t.length);
+      range.startContainer.parentElement?.scrollIntoView({ block: "center" });
+      const selection = document.getSelection()!;
+      selection.removeAllRanges();
+      selection.addRange(range);
+      document.dispatchEvent(new Event("selectionchange", { bubbles: true }));
+      const r = range.getBoundingClientRect();
+      return { x: r.left + r.width / 2, y: r.top + r.height / 2 };
+    }
+    throw new Error(`text not found: ${t}`);
+  }, text);
+}
+
 /** Reveals the reader's auto-hidden top bar the way a mouse does (gradual move out of the book iframe). */
 export async function revealReaderChrome(page: Page) {
   await page.mouse.move(700, 600);

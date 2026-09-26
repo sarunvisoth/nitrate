@@ -52,12 +52,12 @@ export class BookBookmarkStore extends SyncedItemStore<BookBookmark> {
   }
 
   /** Bookmarks a page and returns the new bookmark immediately. */
-  add(page: BookmarkPage): BookBookmark {
+  add(page: BookmarkPage, locatorKind: string = ANNOTATION_LOCATOR_KIND.epubCfi): BookBookmark {
     const at = this.now();
     const bookmark: BookBookmark = {
       id: this.newId(),
       bookId: this.bookId,
-      locatorKind: ANNOTATION_LOCATOR_KIND.epubCfi,
+      locatorKind,
       ...page,
       label: null,
       createdAt: at,

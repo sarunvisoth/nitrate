@@ -161,6 +161,53 @@ public sealed class EfBookAnnotationServiceTests {
     }
 
     [Fact]
+    public async Task PdfLocatorWithValidPageAndRectsIsAccepted() {
+        await SeedBookAsync();
+        var locator = PdfAnnotationLocatorCodec.Write(new PdfAnnotationLocator(
+            4, [new PdfAnnotationRect(0.1, 0.2, 0.3, 0.05)]));
+        var request = new UpsertBookAnnotationRequest(
+            AnnotationLocatorKind.Pdf.ToCode(), locator, 4, 0.2, "Hello", null, null,
+            AnnotationStyle.Highlight.ToCode(), AnnotationColor.Yellow.ToCode(), null, Now);
+
+        var result = await Service(_userA).UpsertAsync(_bookId, Guid.NewGuid(), request, CancellationToken.None);
+
+        Assert.Equal(BookAnnotationWriteStatus.Applied, result.Status);
+        Assert.Equal(AnnotationLocatorKind.Pdf.ToCode(), result.Annotation!.LocatorKind);
+        Assert.Equal(locator, result.Annotation.Locator);
+    }
+
+    [Theory]
+    [InlineData("{\"page\":-1,\"rects\":[]}")] // negative page
+    [InlineData("{\"page\":0,\"rects\":[{\"x\":1.5,\"y\":0,\"w\":0.1,\"h\":0.1}]}")] // rect out of 0..1
+    [InlineData("not json")]
+    public async Task PdfLocatorWithInvalidPayloadIsRejected(string locator) {
+        await SeedBookAsync();
+        var request = new UpsertBookAnnotationRequest(
+            AnnotationLocatorKind.Pdf.ToCode(), locator, 0, 0.1, "Hello", null, null,
+            AnnotationStyle.Highlight.ToCode(), AnnotationColor.Yellow.ToCode(), null, Now);
+
+        var result = await Service(_userA).UpsertAsync(_bookId, Guid.NewGuid(), request, CancellationToken.None);
+
+        Assert.Equal(BookAnnotationWriteStatus.Invalid, result.Status);
+    }
+
+    [Fact]
+    public async Task PdfLocatorWithTooManyRectsIsRejected() {
+        await SeedBookAsync();
+        var rects = Enumerable.Range(0, PdfAnnotationLocatorCodec.MaxRects + 1)
+            .Select(_ => new PdfAnnotationRect(0, 0, 0.1, 0.1))
+            .ToList();
+        var locator = PdfAnnotationLocatorCodec.Write(new PdfAnnotationLocator(0, rects));
+        var request = new UpsertBookAnnotationRequest(
+            AnnotationLocatorKind.Pdf.ToCode(), locator, 0, 0.1, "Hello", null, null,
+            AnnotationStyle.Highlight.ToCode(), AnnotationColor.Yellow.ToCode(), null, Now);
+
+        var result = await Service(_userA).UpsertAsync(_bookId, Guid.NewGuid(), request, CancellationToken.None);
+
+        Assert.Equal(BookAnnotationWriteStatus.Invalid, result.Status);
+    }
+
+    [Fact]
     public async Task SourceSignatureIsCopiedFromTheBookContentStateOnCreate() {
         await SeedBookAsync();
         await using (var db = CreateContext()) {

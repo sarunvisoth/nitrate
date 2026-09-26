@@ -89,6 +89,28 @@ public sealed class EfBookBookmarkServiceTests {
         Assert.Equal(BookAnnotationWriteStatus.Invalid, result.Status);
     }
 
+    [Fact]
+    public async Task PdfPageBookmarkWithNoRectsIsAccepted() {
+        await SeedBookAsync();
+        var locator = PdfAnnotationLocatorCodec.Write(new PdfAnnotationLocator(3, []));
+        var request = new UpsertBookBookmarkRequest(AnnotationLocatorKind.Pdf.ToCode(), locator, 3, 0, null, null, Now);
+
+        var result = await Service(_userA).UpsertAsync(_bookId, Guid.NewGuid(), request, CancellationToken.None);
+
+        Assert.Equal(BookAnnotationWriteStatus.Applied, result.Status);
+        Assert.Equal(AnnotationLocatorKind.Pdf.ToCode(), result.Bookmark!.LocatorKind);
+    }
+
+    [Fact]
+    public async Task PdfBookmarkWithMalformedLocatorIsRejected() {
+        await SeedBookAsync();
+        var request = new UpsertBookBookmarkRequest(AnnotationLocatorKind.Pdf.ToCode(), "not json", 0, 0, null, null, Now);
+
+        var result = await Service(_userA).UpsertAsync(_bookId, Guid.NewGuid(), request, CancellationToken.None);
+
+        Assert.Equal(BookAnnotationWriteStatus.Invalid, result.Status);
+    }
+
     private static UpsertBookBookmarkRequest Request(DateTimeOffset updatedAt, string? label = null) =>
         new(AnnotationLocatorKind.EpubCfi.ToCode(), "epubcfi(/6/4!/4/2/1:0)", 1, 0.2, "The Harbour", label, updatedAt);
 

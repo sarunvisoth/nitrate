@@ -1,27 +1,29 @@
 <script lang="ts">
-  import { Button, TextInput, buttonVariants } from "@prismedia/ui-svelte";
+  import { Button, buttonVariants } from "@prismedia/ui-svelte";
   import ReaderContentsSheet from "./reader/ReaderContentsSheet.svelte";
   import { onMount, tick } from "svelte";
   import {
-    AlertTriangle,
-    ChevronDown,
-    ChevronLeft,
-    ChevronRight,
-    ChevronUp,
-    Download,
-    List,
-    Maximize,
-    Minus,
-    Plus,
-    Search,
-    StretchVertical,
-    X,
+    AlertTriangle, Bookmark, BookmarkCheck, ChevronLeft, ChevronRight, Download, Highlighter,
+    List, Maximize, Minus, NotebookPen, Plus, Search, StretchVertical, BookOpen, Rows3,
   } from "@lucide/svelte";
-  import { BookOpen, Rows3 } from "@lucide/svelte";
   import { apiAssetUrl as toApiUrl } from "$lib/api/orval-fetch";
   import { comicTapZone } from "$lib/components/comic-reader";
   import ReaderShell from "$lib/components/reader/ReaderShell.svelte";
   import type { ReaderNotice } from "$lib/components/reader/reader-notice";
+  import ReaderSelectionMenu, { type ReaderSelectionAction } from "$lib/components/reader/ReaderSelectionMenu.svelte";
+  import AnnotationEditor from "$lib/components/reader/AnnotationEditor.svelte";
+  import PdfHighlightLayer from "$lib/components/reader/PdfHighlightLayer.svelte";
+  import PdfSearchPanel from "$lib/components/reader/PdfSearchPanel.svelte";
+  import ReaderBookmarkList from "$lib/components/reader/ReaderBookmarkList.svelte";
+  import type { AnnotationColorCode } from "$lib/api/generated/codes";
+  import type { BookAnnotation, BookBookmark } from "$lib/api/generated/model";
+  import type { AnnotationDraft } from "$lib/reader/annotation-sync";
+  import { readLastHighlightColor, rememberHighlightColor } from "$lib/reader/annotation-colors";
+  import { textQuoteFor } from "$lib/reader/epub-selection";
+  import { computeSelectionRects } from "$lib/reader/pdf-selection";
+  import { buildPdfLocator, parsePdfLocator } from "$lib/reader/pdf-locator";
+  import { ReaderPreferencesStore } from "$lib/reader/reader-preferences-store.svelte";
+  import { THEME_COLORS } from "$lib/reader/reader-content-styles";
 
   type ReaderFlow = "scrolled" | "paged";
 
@@ -41,6 +43,18 @@
     onPageChange?: (page: number, pageCount: number) => void;
     /** Non-blocking notice shown over the reader. */
     notice?: ReaderNotice | null;
+    /** Book Entity id, threaded into the selection menu's lookup source context (Add to Vocabulary). */
+    bookId?: string | null;
+    /** Highlights to draw (already filtered to non-deleted, locatorKind "pdf"). Omit to disable annotations. */
+    annotations?: readonly BookAnnotation[];
+    onCreateAnnotation?: (draft: AnnotationDraft) => BookAnnotation | undefined;
+    onUpdateAnnotation?: (annotation: BookAnnotation) => void;
+    onDeleteAnnotation?: (annotation: BookAnnotation) => void;
+    /** Bookmarks to list (already filtered to non-deleted). Omit to disable bookmarks. */
+    bookmarks?: readonly BookBookmark[];
+    onAddBookmark?: (page: number) => void;
+    onRenameBookmark?: (bookmark: BookBookmark, label: string) => void;
+    onDeleteBookmark?: (bookmark: BookBookmark) => void;
   }
 
   let {
@@ -52,6 +66,15 @@
     onClose,
     onPageChange,
     notice = null,
+    bookId = null,
+    annotations,
+    onCreateAnnotation,
+    onUpdateAnnotation,
+    onDeleteAnnotation,
+    bookmarks,
+    onAddBookmark,
+    onRenameBookmark,
+    onDeleteBookmark,
   }: Props = $props();
 
   let shell = $state<ReturnType<typeof ReaderShell>>();
@@ -62,10 +85,9 @@
   let currentPage = $state(0);
   let toc = $state.raw<TocEntry[]>([]);
   let tocOpen = $state(false);
-
   const MIN_SCALE = 0.25;
   const MAX_SCALE = 6;
-  let scale = $state(1);
+  let scale = $state(1); // also used to normalize highlight rects to the unscaled page viewport
   let gapless = $state(false);
   const zoomPercent = $derived(Math.round(scale * 100));
   const downloadHref = $derived(toApiUrl(sourceUrl));
@@ -78,8 +100,11 @@
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   let pdfjsLib: any = null;
   let wrappers: HTMLDivElement[] = [];
+  // Imperative canvas/text/link layers attach here, leaving `.pdf-page` free for the highlight overlay.
+  let canvasHosts: HTMLDivElement[] = [];
   const rendered = new Set<number>();
   const rendering = new Set<number>();
+  const prefsStore = new ReaderPreferencesStore();
   let observer: IntersectionObserver | null = null;
   // Unscaled page-1 dimensions, used to derive fit scales and placeholder sizes (the scroll
   // height — and each page's offsetTop — must be correct before pages lazily render so resume works).
@@ -170,88 +195,116 @@
     else shell?.toggleControls();
   }
 
-  // ── In-document search ──
+  // ── In-document search (Sheet UI mirroring BookSearchPanel; see pdf-text-search.ts) ──
   let searchOpen = $state(false);
-  let searchQuery = $state("");
-  let searchBusy = $state(false);
-  let searchMatches = $state.raw<number[]>([]); // page index of each occurrence, in order
-  let searchActive = $state(0);
-  let textIndex: string[] | null = null;
-  let searchDebounce = 0;
-  let searchInputEl = $state<HTMLInputElement>();
 
-  async function buildTextIndex() {
-    if (textIndex || !pdf) return;
-    const idx: string[] = [];
-    for (let i = 1; i <= pageCount; i++) {
-      try {
-        const page = await pdf.getPage(i);
-        const content = await page.getTextContent();
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        idx.push(content.items.map((it: any) => (typeof it.str === "string" ? it.str : "")).join(" ").toLowerCase());
-      } catch {
-        idx.push("");
-      }
-    }
-    textIndex = idx;
+  function toggleSearch() {
+    searchOpen = !searchOpen;
   }
 
-  async function runSearch() {
-    const query = searchQuery.trim().toLowerCase();
-    if (!query) {
-      searchMatches = [];
-      searchActive = 0;
+  // ── Annotations (highlight/note) ───────────────────────────────────────────
+  const SELECTION_SETTLE_MS = 350;
+  interface ViewportRect { left: number; top: number; width: number; height: number }
+  interface PendingSelection { draft: Omit<AnnotationDraft, "color" | "note">; anchor: ViewportRect }
+  let pendingSelection = $state<PendingSelection | null>(null);
+  let editing = $state<{ id: string; anchor: ViewportRect; focusNote: boolean } | null>(null);
+  let lastColor = $state<AnnotationColorCode>(readLastHighlightColor());
+  let selectionTimer: ReturnType<typeof setTimeout> | null = null;
+
+  const annotationsEnabled = $derived(Boolean(annotations && onCreateAnnotation));
+  const annotationByLocator = $derived(new Map((annotations ?? []).map((item) => [item.locator, item])));
+  const editingAnnotation = $derived(
+    editing ? (annotations ?? []).find((item) => item.id === editing?.id) ?? null : null,
+  );
+  const selectionActions: ReaderSelectionAction[] = [
+    { id: "highlight", label: "Highlight", icon: Highlighter, run: () => createFromSelection(false) },
+    { id: "note", label: "Add Note", icon: NotebookPen, run: () => createFromSelection(true) },
+  ];
+
+  function handleSelectionSettle() {
+    if (selectionTimer) clearTimeout(selectionTimer);
+    selectionTimer = setTimeout(captureSelection, SELECTION_SETTLE_MS);
+  }
+
+  function captureSelection() {
+    if (!annotationsEnabled || editing || flow === "paged") return;
+    const selection = document.getSelection();
+    if (!selection || selection.isCollapsed || selection.rangeCount === 0) {
+      pendingSelection = null;
       return;
     }
-    searchBusy = true;
-    await buildTextIndex();
-    searchBusy = false;
-    const matches: number[] = [];
-    textIndex?.forEach((text, page) => {
-      let from = text.indexOf(query);
-      while (from !== -1) {
-        matches.push(page);
-        from = text.indexOf(query, from + query.length);
-      }
+    const range = selection.getRangeAt(0);
+    const pageEl = (range.startContainer.parentElement ?? null)?.closest<HTMLElement>("[data-page-index]");
+    const page = pageEl ? Number(pageEl.dataset.pageIndex) : NaN;
+    if (!pageEl || Number.isNaN(page)) return;
+    const rects = computeSelectionRects(range, pageEl, scale);
+    const quote = textQuoteFor(range);
+    if (rects.length === 0 || !quote.selectedText.trim()) return;
+    pendingSelection = {
+      draft: {
+        locator: buildPdfLocator({ page, rects }),
+        spineIndex: page,
+        position: Math.max(0, Math.min(1, rects[0]?.y ?? 0)),
+        ...quote,
+      },
+      anchor: range.getBoundingClientRect(),
+    };
+  }
+
+  function clearSelection() {
+    pendingSelection = null;
+    try {
+      document.getSelection()?.removeAllRanges();
+    } catch {
+      // ignore
+    }
+  }
+
+  function createFromSelection(openNote: boolean) {
+    const pending = pendingSelection;
+    if (!pending || !onCreateAnnotation) return;
+    clearSelection();
+    const existing = annotationByLocator.get(pending.draft.locator);
+    const annotation = existing
+      ? (onUpdateAnnotation?.({ ...existing, color: lastColor }), existing)
+      : onCreateAnnotation({ ...pending.draft, color: lastColor, note: null });
+    if (openNote && annotation) editing = { id: annotation.id, anchor: pending.anchor, focusNote: true };
+  }
+
+  function handleHighlightTap(annotation: BookAnnotation, anchor: ViewportRect) {
+    pendingSelection = null;
+    editing = { id: annotation.id, anchor, focusNote: false };
+  }
+
+  function annotationsForPage(index: number): BookAnnotation[] {
+    return (annotations ?? []).filter((item) => {
+      const locator = parsePdfLocator(item.locator);
+      return locator?.page === index;
     });
-    searchMatches = matches;
-    searchActive = 0;
-    if (matches.length > 0) scrollToPage(matches[0]);
   }
 
-  function onSearchInput() {
-    if (searchDebounce) window.clearTimeout(searchDebounce);
-    searchDebounce = window.setTimeout(() => void runSearch(), 250);
+  // ── Bookmarks (page-based: locator kind "pdf", empty rects) ─────────────────
+  const bookmarksEnabled = $derived(Boolean(bookmarks && onAddBookmark));
+  const pageBookmark = $derived((bookmarks ?? []).find((b) => Number(b.spineIndex) === currentPage));
+  function toggleBookmark() {
+    if (pageBookmark) onDeleteBookmark?.(pageBookmark);
+    else onAddBookmark?.(currentPage);
   }
 
-  function gotoMatch(delta: number) {
-    if (searchMatches.length === 0) return;
-    searchActive = (searchActive + delta + searchMatches.length) % searchMatches.length;
-    scrollToPage(searchMatches[searchActive]);
+  function openBookmark(bookmark: BookBookmark) {
+    tocOpen = false;
+    scrollToPage(Number(bookmark.spineIndex));
   }
 
-  async function toggleSearch() {
-    searchOpen = !searchOpen;
-    if (searchOpen) {
-      await tick();
-      searchInputEl?.focus();
+  // ── Reader theme (M6): chrome background only, never the page canvases ──
+  $effect(() => {
+    const theme = prefsStore.value.theme;
+    if (theme === "light" || theme === "sepia" || theme === "dark") {
+      scrollEl?.style.setProperty("--pdf-stage-background", THEME_COLORS[theme].background);
     } else {
-      searchQuery = "";
-      searchMatches = [];
-      searchActive = 0;
+      scrollEl?.style.removeProperty("--pdf-stage-background");
     }
-  }
-
-  function onSearchKeydown(event: KeyboardEvent) {
-    if (event.key === "Enter") {
-      event.preventDefault();
-      if (searchMatches.length) gotoMatch(event.shiftKey ? -1 : 1);
-      else void runSearch();
-    } else if (event.key === "Escape") {
-      event.preventDefault();
-      void toggleSearch();
-    }
-  }
+  });
 
   // Pinch-to-zoom: two-finger gesture scales the page column live via CSS transform, then commits
   // to a crisp re-render on release. One-finger scrolling stays native (touch-action: pan-y).
@@ -300,7 +353,8 @@
   async function renderPage(index: number) {
     if (!pdf || rendered.has(index) || rendering.has(index)) return;
     const wrapper = wrappers[index];
-    if (!wrapper) return;
+    const host = canvasHosts[index];
+    if (!wrapper || !host) return;
     rendering.add(index);
     try {
       const page = await pdf.getPage(index + 1);
@@ -334,7 +388,7 @@
 
       const linkLayer = await buildLinkLayer(page, cssViewport);
 
-      wrapper.replaceChildren(canvas, textLayerDiv, ...(linkLayer ? [linkLayer] : []));
+      host.replaceChildren(canvas, textLayerDiv, ...(linkLayer ? [linkLayer] : []));
       rendered.add(index);
     } catch {
       // leave the placeholder; it will retry if it scrolls back into view
@@ -345,8 +399,7 @@
 
   function unloadPage(index: number) {
     if (!rendered.has(index)) return;
-    const wrapper = wrappers[index];
-    if (wrapper) wrapper.replaceChildren();
+    canvasHosts[index]?.replaceChildren();
     rendered.delete(index);
   }
 
@@ -477,10 +530,16 @@
   onMount(() => {
     let disposed = false;
 
+    void prefsStore.load();
+    document.addEventListener("selectionchange", handleSelectionSettle);
+
     void (async () => {
       try {
-        pdfjsLib = await import("pdfjs-dist/build/pdf.mjs");
-        const workerModule = await import("pdfjs-dist/build/pdf.worker.min.mjs?url");
+        // The legacy build bundles core-js polyfills (e.g. Map.prototype.getOrInsertComputed) the
+        // non-legacy build assumes the runtime already has, so PDFs still render on older browsers
+        // (older iPad Safari, Chrome/Edge that haven't shipped the newest Map methods).
+        pdfjsLib = await import("pdfjs-dist/legacy/build/pdf.mjs");
+        const workerModule = await import("pdfjs-dist/legacy/build/pdf.worker.min.mjs?url");
         pdfjsLib.GlobalWorkerOptions.workerSrc = (workerModule as { default: string }).default;
 
         const absoluteUrl = toApiUrl(sourceUrl) ?? sourceUrl;
@@ -560,6 +619,8 @@
       disposed = true;
       observer?.disconnect();
       observer = null;
+      document.removeEventListener("selectionchange", handleSelectionSettle);
+      if (selectionTimer) clearTimeout(selectionTimer);
       if (scrollRaf) cancelAnimationFrame(scrollRaf);
       try {
         pdf?.destroy?.();
@@ -585,7 +646,14 @@
   {#snippet counter()}{pageCount > 0 ? `Page ${currentPage + 1} / ${pageCount}` : ""}{/snippet}
 
   {#snippet controls()}
-    {#if hasToc}
+    {#if bookmarksEnabled}
+      {@const bookmarkLabel = pageBookmark ? "Remove bookmark" : "Bookmark this page"}
+      <Button variant="outline" size="sm" type="button" onclick={toggleBookmark} aria-pressed={Boolean(pageBookmark)}
+        class="aria-pressed:bg-accent aria-pressed:text-accent-foreground" aria-label={bookmarkLabel} title={bookmarkLabel}>
+        {#if pageBookmark}<BookmarkCheck class="h-4 w-4" />{:else}<Bookmark class="h-4 w-4" />{/if}
+      </Button>
+    {/if}
+    {#if hasToc || bookmarksEnabled}
       <Button variant="outline" size="sm"
         type="button"
         onclick={() => (tocOpen = true)}
@@ -600,7 +668,7 @@
 
     <Button variant="outline" size="sm"
       type="button"
-      onclick={() => void toggleSearch()}
+      onclick={toggleSearch}
       aria-pressed={searchOpen}
       class="aria-pressed:bg-accent aria-pressed:text-accent-foreground"
       aria-label="Search document"
@@ -710,9 +778,42 @@
         style={pinching ? `transform: scale(${pinchRatio}); transform-origin: center top` : ""}
       >
         {#each pageIndexes as index (index)}
-          <div class="pdf-page" data-page-index={index} bind:this={wrappers[index]}></div>
+          <div class="pdf-page" data-page-index={index} bind:this={wrappers[index]}>
+            <div class="pdf-canvas-host" bind:this={canvasHosts[index]}></div>
+            {#if annotationsEnabled}
+              <PdfHighlightLayer page={index} annotations={annotationsForPage(index)} onTap={handleHighlightTap} />
+            {/if}
+          </div>
         {/each}
       </div>
+    {/if}
+
+    {#if annotationsEnabled}
+      <ReaderSelectionMenu
+        anchor={pendingSelection?.anchor ?? null}
+        selectedText={pendingSelection?.draft.selectedText ?? ""}
+        actions={selectionActions} onDismiss={clearSelection}
+        sourceContext={pendingSelection && { bookId, locator: pendingSelection.draft.locator, textBefore: pendingSelection.draft.textBefore, textAfter: pendingSelection.draft.textAfter }}
+      />
+      <AnnotationEditor
+        anchor={editingAnnotation ? editing?.anchor ?? null : null}
+        color={editingAnnotation?.color ?? lastColor} note={editingAnnotation?.note ?? null}
+        focusNote={editing?.focusNote ?? false}
+        onChangeColor={(color) => {
+          lastColor = color;
+          rememberHighlightColor(color);
+          if (editingAnnotation) onUpdateAnnotation?.({ ...editingAnnotation, color });
+        }}
+        onSaveNote={(note) => {
+          if (editingAnnotation) onUpdateAnnotation?.({ ...editingAnnotation, note: note.trim() ? note : null });
+          editing = null;
+        }}
+        onDelete={() => {
+          if (editingAnnotation) onDeleteAnnotation?.(editingAnnotation);
+          editing = null;
+        }}
+        onDismiss={() => (editing = null)}
+      />
     {/if}
 
     {#if errorMessage}
@@ -750,53 +851,22 @@
       <ChevronRight class="h-6 w-6" />
     </Button>
   {/if}
-
-  {#if searchOpen}
-    <div class="pdf-search" data-reader-control>
-      <Search class="h-4 w-4 shrink-0 text-text-muted" />
-      <TextInput
-        bind:ref={searchInputEl}
-        bind:value={searchQuery}
-        oninput={onSearchInput}
-        onkeydown={onSearchKeydown}
-        type="search"
-        placeholder="Search document…"
-        class="w-[min(14rem,40vw)]"
-        aria-label="Search document"
-      />
-      <span class="pdf-search-count">
-        {#if searchBusy}…{:else if searchQuery.trim()}{searchMatches.length ? `${searchActive + 1}/${searchMatches.length}` : "0/0"}{/if}
-      </span>
-      <Button variant="outline" size="sm"
-        type="button"
-        class="aria-pressed:bg-accent aria-pressed:text-accent-foreground"
-        onclick={() => gotoMatch(-1)}
-        disabled={searchMatches.length === 0}
-        aria-label="Previous match"
-        title="Previous match"
-      >
-        <ChevronUp class="h-4 w-4" />
-      </Button>
-      <Button variant="outline" size="sm"
-        type="button"
-        class="aria-pressed:bg-accent aria-pressed:text-accent-foreground"
-        onclick={() => gotoMatch(1)}
-        disabled={searchMatches.length === 0}
-        aria-label="Next match"
-        title="Next match"
-      >
-        <ChevronDown class="h-4 w-4" />
-      </Button>
-      <Button variant="outline" size="sm" type="button" class="aria-pressed:bg-accent aria-pressed:text-accent-foreground" onclick={() => void toggleSearch()} aria-label="Close search" title="Close">
-        <X class="h-4 w-4" />
-      </Button>
-    </div>
-  {/if}
 </ReaderShell>
 
-<ReaderContentsSheet open={tocOpen} onClose={() => tocOpen = false}>
+{#if ready}
+  <PdfSearchPanel open={searchOpen} {pdf} onClose={() => (searchOpen = false)} onNavigate={(page) => scrollToPage(page)} />
+{/if}
+
+<ReaderContentsSheet open={tocOpen} onClose={() => tocOpen = false}
+  bookmarks={bookmarksEnabled ? bookmarkItems : undefined} bookmarkCount={bookmarks?.length ?? 0}>
   {@render tocItems(toc, 0)}
 </ReaderContentsSheet>
+
+{#snippet bookmarkItems()}
+  <ReaderBookmarkList bookmarks={bookmarks ?? []} onOpen={openBookmark}
+    onRename={(bookmark, label) => onRenameBookmark?.(bookmark, label)}
+    onDelete={(bookmark) => onDeleteBookmark?.(bookmark)} />
+{/snippet}
 
 {#snippet tocItems(items: TocEntry[], depth: number)}
   {#each items as entry (entry.label + (entry.pageIndex ?? ""))}
@@ -820,7 +890,9 @@
     inset: 0;
     overflow-y: auto;
     overflow-x: auto;
-    background: #0b0c0f;
+    /* M6 reader theme colours the chrome only (never the page canvases below): light/dark/sepia set
+       --pdf-stage-background via JS; "auto" removes the var and falls back to the app's dark chrome. */
+    background: var(--pdf-stage-background, #0b0c0f);
     overscroll-behavior: contain;
     /* Allow native one-finger scroll while we handle two-finger pinch ourselves. */
     touch-action: pan-x pan-y;
@@ -856,12 +928,16 @@
     pointer-events: none;
   }
 
-
-
   .pdf-page {
     position: relative;
     background: #1a1c22;
     box-shadow: 0 0 24px rgba(0, 0, 0, 0.5);
+  }
+
+  /* Holds the imperative canvas/text/link layers, so Svelte can render the highlight overlay too. */
+  .pdf-canvas-host {
+    position: absolute;
+    inset: 0;
   }
 
   :global(.pdf-canvas) {
@@ -920,32 +996,6 @@
     color: var(--color-text-secondary);
     text-align: center;
     pointer-events: none;
-  }
-
-  .pdf-search {
-    position: absolute;
-    top: max(3.25rem, calc(env(safe-area-inset-top) + 3rem));
-    right: 0.75rem;
-    z-index: 30;
-    display: flex;
-    align-items: center;
-    gap: 0.4rem;
-    max-width: calc(100vw - 1.5rem);
-    border: 1px solid var(--color-border-default);
-    border-radius: var(--radius-md);
-    background: var(--color-overlay-heavy);
-    padding: 0.4rem 0.5rem;
-    backdrop-filter: blur(var(--glass-blur-md));
-    box-shadow: var(--shadow-glow-accent);
-  }
-
-
-  .pdf-search-count {
-    min-width: 3.5ch;
-    text-align: center;
-    font-family: var(--font-mono, monospace);
-    font-size: 0.62rem;
-    color: var(--color-text-muted);
   }
 
 </style>

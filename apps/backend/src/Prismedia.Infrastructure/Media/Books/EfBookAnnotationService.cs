@@ -155,6 +155,12 @@ internal sealed class EfBookAnnotationService(
             return $"locator is required (max {LocatorMaxLength} characters).";
         }
 
+        if (request.LocatorKind == AnnotationLocatorKind.Pdf.ToCode() &&
+            PdfAnnotationLocatorCodec.TryParse(request.Locator) is null) {
+            return "locator must be a valid PDF locator " +
+                $"(page >= 0, at most {PdfAnnotationLocatorCodec.MaxRects} rects, each rect within 0..1).";
+        }
+
         if (string.IsNullOrEmpty(request.SelectedText) || request.SelectedText.Length > SelectedTextMaxLength) {
             return $"selectedText is required (max {SelectedTextMaxLength} characters).";
         }
