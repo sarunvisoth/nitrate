@@ -21,7 +21,7 @@ describe("defaultNavPrefs", () => {
     ]);
 
     const books = prefs.sections.find((s) => s.id === "books");
-    expect(books?.items).toEqual(["/authors", "/books", "/comics", "/ebooks", "/annotations"]);
+    expect(books?.items).toEqual(["/authors", "/books", "/comics", "/ebooks", "/annotations", "/vocabulary"]);
 
     const video = prefs.sections.find((s) => s.id === "video");
     expect(video?.items).toEqual(["/movies", "/series", "/videos"]);
@@ -54,7 +54,7 @@ describe("resolveNav", () => {
     const resolved = resolveNav(catalog, prefs);
     const books = resolved.find((s) => s.id === "books");
     // Kept prefs stay in the user's order; catalog items missing from prefs (Authors) append after.
-    expect(books?.items.map((i) => i.href)).toEqual(["/books", "/comics", "/ebooks", "/authors", "/annotations"]);
+    expect(books?.items.map((i) => i.href)).toEqual(["/books", "/comics", "/ebooks", "/authors", "/annotations", "/vocabulary"]);
   });
 });
 

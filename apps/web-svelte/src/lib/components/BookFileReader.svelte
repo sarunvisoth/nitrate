@@ -36,6 +36,9 @@
   import { bookmarkOnPage, pageStartLocator } from "$lib/reader/bookmark-page";
   import { findTextQuote, sameQuotedText } from "$lib/reader/annotation-reanchor";
   import type { BookmarkPage } from "$lib/reader/book-bookmark-store.svelte";
+  import ReaderSettingsButton from "$lib/components/reader/ReaderSettingsButton.svelte";
+  import { ReaderPreferencesStore } from "$lib/reader/reader-preferences-store.svelte";
+  import { buildReaderContentStyles } from "$lib/reader/reader-content-styles";
 
   type ReaderFlow = "paginated" | "scrolled";
 
@@ -104,8 +107,7 @@
     onDeleteBookmark,
   }: Props = $props();
 
-  const MIN_FONT = 80;
-  const MAX_FONT = 200;
+  const MIN_FONT = 80, MAX_FONT = 200;
 
   let shell = $state<ReturnType<typeof ReaderShell>>();
   let stageEl = $state<HTMLDivElement>();
@@ -122,24 +124,21 @@
   let tocOpen = $state(false);
   // Fixed-layout books (PDF) have no reflow, so font-size and paged/scrolled flow do not apply.
   let isFixedLayout = $state(false);
+  // Server-stored reader typography/theme/flow defaults (M6); loaded alongside the book itself.
+  const prefsStore = new ReaderPreferencesStore();
 
   const hasToc = $derived(toc.length > 0);
 
-  // Neutral accent accent so in-book links read as interactive without the default deep-blue.
   function contentStyles(percent: number): string {
-    // !important so the book's own stylesheet (which often colors links a hard blue) can't win.
-    return `
-      html { color-scheme: dark; font-size: ${percent}%; }
-      html, body { background: transparent !important; color: #e7e7ea !important; }
-      a, a:link, a:visited, a *,
-      a[href], a[href]:link, a[href]:visited, a[href] * {
-        color: #c7c9cc !important;
-        text-decoration: underline;
-        text-underline-offset: 2px;
-      }
-      a:hover, a:hover *, a[href]:hover, a[href]:hover * { color: #f7d59a !important; }
-      img { background: transparent; }
-    `;
+    const { fontFamily, lineHeight, marginStep, maxContentWidth, theme } = prefsStore.value;
+    return buildReaderContentStyles({ fontFamily, fontSizePercent: percent, lineHeight, marginStep, maxContentWidth, theme });
+  }
+
+  function onSettingsChange(patch: Partial<typeof prefsStore.value>) {
+    prefsStore.update(patch);
+    if (patch.fontSizePercent !== undefined) fontPercent = patch.fontSizePercent;
+    if (patch.flow !== undefined) setFlow(patch.flow === "scrolled" ? "scrolled" : "paginated");
+    applyStyles();
   }
 
   function applyFlow(next: ReaderFlow) {
@@ -620,6 +619,12 @@
   onMount(() => {
     let disposed = false;
 
+    void prefsStore.load().then(() => {
+      if (disposed) return;
+      fontPercent = prefsStore.value.fontSizePercent;
+      applyStyles();
+    });
+
     void (async () => {
       try {
         // Registers the <foliate-view> custom element (vendored, client-only).
@@ -728,6 +733,7 @@
       <Button variant="outline" size="sm" type="button" onclick={() => (bookSearchOpen = true)}
         aria-label="Search book" title="Search book"><Search class="h-4 w-4" /></Button>
     {/if}
+    <ReaderSettingsButton preferences={prefsStore.value} {isFixedLayout} onChange={onSettingsChange} />
     {#if hasToc || bookmarksEnabled}
       <Button variant="outline" size="sm"
         type="button"
