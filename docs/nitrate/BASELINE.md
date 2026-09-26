@@ -10,7 +10,7 @@ Tasks 4–7 compare against these numbers. A test that already fails here is not
 
 | Tool | Version | How obtained |
 |------|---------|--------------|
-| .NET SDK | 10.0.112 | `apt-get install dotnet-sdk-10.0` (Ubuntu `noble-updates`). The `dot.net/v1/dotnet-install.sh` script could not download from `builds.dotnet.microsoft.com` in the cloud sandbox (proxy 403). All projects target `net10.0`; there is no `global.json`. |
+| .NET SDK | 10.0.112 | `apt-get install dotnet-sdk-10.0` (Ubuntu `noble-updates`). The `dot.net/v1/dotnet-install.sh` script could not download from `builds.dotnet.microsoft.com` in the cloud sandbox (proxy 403). All projects target `net10.0`. **Note:** `apps/backend/global.json` pins SDK `10.0.201` (`rollForward: latestFeature`), which 10.0.112 does not satisfy, so run `dotnet` commands from the repo root (where that file is not picked up). `dotnet-ef` 10.0.8 was installed globally (`dotnet tool install --global dotnet-ef --version 10.0.8`) for the same reason. |
 | Node.js | 22.22.2 | preinstalled |
 | pnpm | 10.30.3 | preinstalled (matches `packageManager`) |
 | FFmpeg | 6.1.1 (Ubuntu build) | `apt-get install ffmpeg`. Linux build only; it does **not** prove `h264_amf` support. |

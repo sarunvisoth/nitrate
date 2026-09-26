@@ -381,7 +381,7 @@ public static class BookAnnotationWritePolicy {
 `PrismediaCapabilityModelConfiguration.cs` (`entity_consumption_events`). Use snake_case columns,
 `ValueGeneratedNever` ids, code conversions and cascade FKs.
 
-- [ ] **Step 1: Row**
+- [x] **Step 1: Row**
 
 ```csharp
 using Prismedia.Domain.Entities;
@@ -410,7 +410,7 @@ public sealed class BookAnnotationRow {
 }
 ```
 
-- [ ] **Step 2: Mapping.** Create `PrismediaBookAnnotationModelConfiguration.cs` as a new partial of
+- [x] **Step 2: Mapping.** Create `PrismediaBookAnnotationModelConfiguration.cs` as a new partial of
   `PrismediaModelConfiguration`. Add `ConfigureBookAnnotations(modelBuilder);` to `ConfigurePrismediaModel` in
   `PrismediaModelConfiguration.cs`.
 
@@ -467,7 +467,7 @@ internal static partial class PrismediaModelConfiguration {
 In `PrismediaDbContext.cs`, next to `EntityConsumptionEvents`, add:
 `public DbSet<BookAnnotationRow> BookAnnotations => Set<BookAnnotationRow>();`
 
-- [ ] **Step 3: Generate the migration.** `dotnet-ef` 10.0.8 is pinned in `apps/backend/dotnet-tools.json`.
+- [x] **Step 3: Generate the migration.** `dotnet-ef` 10.0.8 is pinned in `apps/backend/dotnet-tools.json`.
 
 ```bash
 cd apps/backend
@@ -481,7 +481,7 @@ Review the generated file as required by `docs/database-migrations.md`. `Up` mus
 `book_annotations`, its two FKs and its two indexes. `Down` must drop it. Nothing else may change. If the
 snapshot diff touches other tables, stop: the model has drifted and needs investigating.
 
-- [ ] **Step 4: Postgres migration test.** Copy the connection and skip helper pattern from
+- [x] **Step 4: Postgres migration test.** Copy the connection and skip helper pattern from
   `PostgresTestDatabase.cs`, as used by `UserEntityStateConcurrencyPostgresTests.cs`. Migrate a fresh database to
   latest, insert a user, a Book entity and one `BookAnnotationRow`, then assert:
   - it round-trips with codes intact;
@@ -490,7 +490,7 @@ snapshot diff touches other tables, stop: the model has drifted and needs invest
   Run
   `dotnet test apps/backend/tests/Prismedia.Infrastructure.Tests --filter "FullyQualifiedName~BookAnnotationMigrationPostgresTests"`,
   with Postgres up (BASELINE "Running locally").
-- [ ] **Step 5: Commit** the row, mapping, DbSet, migration, Designer, snapshot and test together:
+- [x] **Step 5: Commit** the row, mapping, DbSet, migration, Designer, snapshot and test together:
   `feat(api): add book_annotations table`
 
 ---

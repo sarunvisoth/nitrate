@@ -14,5 +14,6 @@ internal static partial class PrismediaModelConfiguration {
         ConfigureCollections(modelBuilder);
         ConfigureSystemTables(modelBuilder);
         ConfigureAcquisitionTables(modelBuilder);
+        ConfigureBookAnnotations(modelBuilder);
     }
 }
