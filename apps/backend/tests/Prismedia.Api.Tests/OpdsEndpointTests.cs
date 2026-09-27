@@ -155,6 +155,32 @@ public sealed class OpdsEndpointTests : IDisposable {
     }
 
     [Fact]
+    public async Task OpdsLinksIgnoreForwardedOriginFromAnUntrustedDirectCaller() {
+        using var factory = CreateFactory().WithSimulatedRemoteIp();
+        using var client = factory.CreateClient();
+        using var request = new HttpRequestMessage(HttpMethod.Get, OpdsProtocol.Routes.Recent);
+        request.Headers.Authorization = Basic(TestAuth.Password);
+        request.Headers.Host = "127.0.0.1:8008";
+        // Not a trusted proxy (only loopback is trusted by default): a direct internet caller
+        // reaching an exposed port cannot spoof the feed's absolute link origin this way.
+        request.Headers.Add(RemoteIpTestSupport.RemoteIpHeader, "203.0.113.7");
+        request.Headers.Add("X-Forwarded-Proto", "https");
+        request.Headers.Add("X-Forwarded-Host", "attacker.example.com");
+
+        using var response = await client.SendAsync(request);
+        var document = await ReadXmlAsync(response);
+        var hrefs = document.Descendants(Atom("link"))
+            .Select(link => (string?)link.Attribute("href"))
+            .Where(href => href is not null)
+            .Cast<string>()
+            .ToArray();
+
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        Assert.NotEmpty(hrefs);
+        Assert.DoesNotContain(hrefs, href => href.Contains("attacker.example.com", StringComparison.Ordinal));
+    }
+
+    [Fact]
     public async Task DirectCoverAndDownloadLinksRequireAuthorizationAndStreamWhenAuthorized() {
         using var factory = CreateFactory();
         using var anonymous = factory.CreateClient();
