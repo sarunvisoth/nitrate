@@ -53,6 +53,8 @@
   let browserVisible = $state(false);
   let addingRoot = $state(false);
   let newRootPath = $state("");
+  // Editable copy of the browsed path; Enter jumps the picker to whatever was typed.
+  let pathDraft = $state("");
   let newRootLabel = $state("");
   let newRootRecursive = $state(true);
   let newRootScanVideos = $state(true);
@@ -78,20 +80,23 @@
       browser = response;
       browserVisible = true;
       newRootPath = response.path;
+      pathDraft = response.path;
     } catch (err) {
       onError(err instanceof Error ? err.message : "Failed to browse folders");
     }
   }
 
   async function handleAddRoot() {
-    if (!newRootPath.trim()) {
+    // The path box is editable, so a typed-but-not-yet-browsed path wins over the browsed one.
+    const path = pathDraft.trim() || newRootPath.trim();
+    if (!path) {
       onError("Choose a folder before adding a library root.");
       return;
     }
     addingRoot = true;
     try {
       await createLibraryRoot({
-        path: newRootPath,
+        path,
         label: newRootLabel || undefined,
         recursive: newRootRecursive,
         scanVideos: newRootScanVideos,
@@ -103,6 +108,7 @@
       });
       onMessage("Library root added.");
       newRootPath = "";
+      pathDraft = "";
       newRootLabel = "";
       newRootIsNsfw = false;
       newRootAutoIdentify = true;
@@ -204,13 +210,21 @@
             <ChevronLeft class="h-3.5 w-3.5" />
             Up
           </Button>
-          <div
-            class="flex-1 overflow-x-auto scrollbar-hidden rounded-xs border border-border-subtle bg-surface-1 px-3 py-1.5 shadow-well"
-          >
-            <span class="whitespace-nowrap text-mono-sm text-text-accent">
-              {browser?.path ?? "Loading..."}
-            </span>
-          </div>
+          <input
+            type="text"
+            aria-label="Folder path"
+            spellcheck="false"
+            autocomplete="off"
+            bind:value={pathDraft}
+            placeholder={browser ? "This PC" : "Loading..."}
+            onkeydown={(event) => {
+              if (event.key === "Enter") {
+                event.preventDefault();
+                void openBrowser(pathDraft.trim() || undefined);
+              }
+            }}
+            class="min-w-0 flex-1 rounded-xs border border-border-subtle bg-surface-1 px-3 py-1.5 text-mono-sm text-text-accent shadow-well placeholder:text-text-disabled focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent-500/25"
+          />
         </div>
         <div
           class="scrollbar-hidden grid max-h-[260px] gap-1.5 overflow-y-auto md:grid-cols-2"
@@ -312,7 +326,7 @@
             variant="primary"
             size="sm"
             onclick={() => void handleAddRoot()}
-            disabled={addingRoot || !newRootPath}
+            disabled={addingRoot || !(pathDraft.trim() || newRootPath)}
             class="gap-1.5 px-4 py-2 text-xs"
           >
             {#if addingRoot}
@@ -332,6 +346,7 @@
             onclick={() => {
               browserVisible = false;
               newRootPath = "";
+              pathDraft = "";
               newRootLabel = "";
             }}
             class="px-3 py-2 text-xs"
