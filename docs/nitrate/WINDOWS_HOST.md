@@ -138,9 +138,8 @@ Run it with `powershell -ExecutionPolicy Bypass -File C:\Nitrate\start-nitrate.p
 2. Open <http://localhost:8008> and complete the first-run wizard, which creates the admin account.
 3. Add the libraries (§2).
 
-The worker is **not** supervised: in Docker, the entrypoint restarts it if it crashes, and here nothing does. If jobs
-stop progressing, check the worker window. Autostart on boot plus restart-on-failure (Windows Services) is planned
-for roadmap milestone M9.
+The worker is **not** supervised when started this way: if it crashes, nothing restarts it. See §10 for a
+boot-time, self-restarting setup instead of running `start-nitrate.ps1` by hand every time.
 
 ## 7. Enable AMD encoding
 
@@ -161,8 +160,11 @@ New-NetFirewallRule -DisplayName "Nitrate" -Direction Inbound -Protocol TCP -Loc
 
 Make sure Windows classifies your home network as Private (**Settings → Network & internet → your connection →
 Private network**). Then open `http://<PC LAN IP>:8008` (e.g. `http://192.168.x.x:8008`) from the Mac, iPad and
-Android phone. Find the IP with `ipconfig`. Do **not** port-forward on the router. Remote access comes later over
-Tailscale or WireGuard (M9).
+Android phone. Find the IP with `ipconfig`. Do **not** port-forward on the router for LAN-only use.
+
+For access from outside your home Wi-Fi (Tailscale, Cloudflare Tunnel, or a port-forward as a last resort), see
+[REMOTE_ACCESS.md](REMOTE_ACCESS.md). Both Tailscale Serve and cloudflared proxy from `localhost`, so this firewall
+rule needs no change either way — the API already trusts a loopback proxy's forwarded headers (M9).
 
 ## 8b. Reader lookups: outbound calls & privacy
 
@@ -189,7 +191,36 @@ dictionary/offline Wikipedia mirror is a possible future milestone, not this one
 always opens DuckDuckGo directly in the browser (not proxied); Search book never leaves the
 device.
 
-## 9. Known blockers and gaps
+## 9. Autostart on boot (M9)
+
+`scripts/windows/install-autostart.ps1` registers the API and worker as Windows Scheduled Tasks
+that start at boot without anyone logging in, and restart automatically (up to 3 times, a
+minute apart) if either process crashes. This replaces running `start-nitrate.ps1` by hand every
+time the PC restarts, and replaces the "not supervised" caveat in §6.
+
+```powershell
+# From an elevated (Administrator) PowerShell, after §4-5 are done (files exist under C:\Nitrate):
+powershell -ExecutionPolicy Bypass -File scripts\windows\install-autostart.ps1
+```
+
+Re-run it after every `git pull` + republish (§4) — it is idempotent, so it simply re-registers
+the tasks with the current paths. To remove it: `scripts\windows\uninstall-autostart.ps1`.
+
+Check status:
+
+```powershell
+Get-ScheduledTaskInfo -TaskName Nitrate-Api
+Get-ScheduledTaskInfo -TaskName Nitrate-Worker
+```
+
+or open Task Scheduler → Task Scheduler Library → `Nitrate-Api` / `Nitrate-Worker` → **History**
+tab for a run-by-run log, including restarts after a crash. The script also sets the PostgreSQL
+16 service to Automatic startup, so the database comes up on its own too.
+
+This uses only built-in Windows Scheduled Tasks — no third-party service wrapper (NSSM, WinSW,
+etc.) — per the repository's "no third-party service wrapper" preference for this milestone.
+
+## 10. Known blockers and gaps
 
 Fixed in Nitrate (Task 7):
 
@@ -202,7 +233,7 @@ Still open (listed, not fixed):
 
 | Issue | Effect | Workaround |
 |---|---|---|
-| No process supervision (Docker entrypoint loop has no native equivalent) | A crashed worker stays down; nothing starts Nitrate at boot | Re-run `start-nitrate.ps1`. Windows Services / Task Scheduler are M9 |
+| No process supervision when run via `start-nitrate.ps1` by hand | A crashed worker stays down; nothing starts Nitrate at boot | Fixed by §9 (`install-autostart.ps1`, M9) — Scheduled Tasks restart on crash and start at boot |
 | Host-load probe reads `/proc` only | On Windows, background media jobs never back off under CPU or memory pressure (they are still capped by CPU permits) | None needed for light use. A Windows sampler (`GetSystemTimes` + `GlobalMemoryStatusEx`) is a follow-up |
 | HLS cache `Directory.Delete` is unguarded (`HlsAssetService.cs`, `ResetStagingDirectory`) | If ffmpeg or a client still holds a segment open, Windows refuses the delete and that playback request fails | Retry playback. The fix needs care, because a failed delete must not leave stale segments mixed into new output |
 | Move-mode imports while a download client still has the files open | Move, copy and delete fail on Windows file locks | Use **Hardlink** or **Copy** import mode for acquisitions. Loosening the copy's share mode was rejected, because it could copy a half-written file |
@@ -225,3 +256,6 @@ Mode and `git config core.symlinks true` are both on. This is harmless for runni
 - [ ] Reachable from: Mac browser / iPad / Android phone over LAN
 - [ ] Prismedia iPhone/iPad App Store app can connect to the server
 - [ ] PC stays usable (normal apps, light gaming) while one stream transcodes
+- [ ] `install-autostart.ps1` run as Administrator; reboot the PC; API and worker start without
+  logging in (see [REMOTE_ACCESS.md](REMOTE_ACCESS.md) checklist for the rest of M9's items:
+  crash-restart, Tailscale/Cloudflare setup, Wake-on-LAN)
