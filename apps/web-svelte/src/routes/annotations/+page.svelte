@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { page } from "$app/state";
   import AnnotationLibrary from "$lib/components/annotations/AnnotationLibrary.svelte";
 </script>
 
@@ -6,4 +7,4 @@
   <title>Annotations · Prismedia</title>
 </svelte:head>
 
-<AnnotationLibrary />
+<AnnotationLibrary initialSearch={page.url.searchParams.get("q") ?? ""} />

@@ -4,12 +4,14 @@
   import { Search, SearchX, AlertTriangle, SlidersHorizontal, Loader2 } from "@lucide/svelte";
   import { Badge, Button, ChoiceGroup, SearchInput } from "@prismedia/ui-svelte";
   import SearchResultGroup from "$lib/components/SearchResultGroup.svelte";
+  import ReaderSearchResultGroup from "$lib/components/ReaderSearchResultGroup.svelte";
   import StatePlaceholder from "$lib/components/StatePlaceholder.svelte";
   import StarRatingPicker from "$lib/components/StarRatingPicker.svelte";
   import { buildHrefWithFrom } from "$lib/back-navigation";
   import { useNsfw } from "$lib/nsfw/store.svelte";
   import { ALL_SEARCH_KINDS, type SearchEntityKind, type SearchResponse } from "$lib/search/models";
   import { firstSearchResult, loadMoreSearchResults, searchEntities } from "$lib/search/entity-search";
+  import { searchReaderExtras, type ReaderSearchGroup } from "$lib/search/reader-search";
   import { entityAccentForKind } from "$lib/entities/entity-accent";
   import { SEARCH_KIND_CONFIG } from "$lib/components/search-kind-config";
 
@@ -21,6 +23,7 @@
   let filtersOpen = $state(false);
   let minRating = $state<number | null>(null);
   let results = $state<SearchResponse | null>(null);
+  let readerGroups = $state<ReaderSearchGroup[]>([]);
   let loading = $state(false);
   let failed = $state(false);
   let loadingMore = $state(false);
@@ -70,6 +73,7 @@
     searchGeneration += 1;
     let cancelled = false;
     results = null;
+    readerGroups = [];
     failed = false;
     loadingMore = false;
     moreFailed = false;
@@ -77,8 +81,11 @@
     if (q.length < 2) return;
     const timer = window.setTimeout(async () => {
       try {
-        const data = await searchEntities({ query: q, hideNsfw, directLimit: 160, relatedSourceLimit: 6, relatedLimitPerSource: 60 });
-        if (!cancelled) results = data;
+        const [data, extras] = await Promise.all([
+          searchEntities({ query: q, hideNsfw, directLimit: 160, relatedSourceLimit: 6, relatedLimitPerSource: 60 }),
+          searchReaderExtras(q, 5).catch(() => [] as ReaderSearchGroup[]),
+        ]);
+        if (!cancelled) { results = data; readerGroups = extras; }
       } catch {
         if (!cancelled) failed = true;
       } finally {
@@ -160,13 +167,16 @@
     <StatePlaceholder icon={AlertTriangle} title="Search couldn't load" description="Check your connection and try again.">
       <Button variant="outline" onclick={() => { retry += 1; }}>Try again</Button>
     </StatePlaceholder>
-  {:else if !filtered?.groups.length}
+  {:else if !filtered?.groups.length && readerGroups.length === 0}
     <StatePlaceholder icon={SearchX} title={results?.continuation ? "No matches in the loaded results" : `No matches for “${query.trim()}”`} description={results?.continuation ? "Load more matches or adjust your filters." : hasFilters ? "Try another title or clear your filters." : "Try another title, person, or tag."}>
       {#if hasFilters}<Button variant="outline" onclick={clearFilters}>Clear filters</Button>{/if}
     </StatePlaceholder>
   {:else}
-    {#each filtered.groups as group (`${filtered.query}:${group.kind}:${minRating}`)}
+    {#each filtered?.groups ?? [] as group (`${filtered?.query}:${group.kind}:${minRating}`)}
       <SearchResultGroup {group} {currentPath} topResultId={topResult?.id} />
+    {/each}
+    {#each readerGroups as group (group.kind)}
+      <ReaderSearchResultGroup {group} {currentPath} />
     {/each}
   {/if}
 </div>

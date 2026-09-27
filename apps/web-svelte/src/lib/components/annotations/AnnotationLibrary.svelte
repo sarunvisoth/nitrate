@@ -31,13 +31,14 @@
 
   let {
     loaders = { list: fetchAnnotationLibrary, books: fetchAnnotationLibraryBooks },
-  }: { loaders?: AnnotationLibraryLoaders } = $props();
+    initialSearch = "",
+  }: { loaders?: AnnotationLibraryLoaders; initialSearch?: string } = $props();
 
   const ALL = "";
   const PAGE_SIZE = 200;
   const SEARCH_DEBOUNCE_MS = 250;
 
-  let search = $state("");
+  let search = $state(initialSearch);
   let bookFilter = $state(ALL);
   let colorFilter = $state(ALL);
   let notesOnly = $state(false);

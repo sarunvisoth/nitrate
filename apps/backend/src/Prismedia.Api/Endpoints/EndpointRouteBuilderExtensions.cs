@@ -19,6 +19,7 @@ public static class EndpointRouteBuilderExtensions {
         routes.MapAnnotationLibraryEndpoints();
         routes.MapReaderPreferencesEndpoints();
         routes.MapVocabularyEndpoints();
+        routes.MapReaderSearchEndpoints();
         routes.MapOpdsEndpoints();
         routes.MapMusicArtistEndpoints();
         routes.MapAudioLibraryEndpoints();

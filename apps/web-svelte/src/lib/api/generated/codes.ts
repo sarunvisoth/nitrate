@@ -1362,6 +1362,14 @@ export const READER_PROVIDER_KIND = {
 
 export type ReaderProviderKindCode = (typeof READER_PROVIDER_KIND)[keyof typeof READER_PROVIDER_KIND];
 
+// source: enum ReaderSearchGroupKind
+export const READER_SEARCH_GROUP_KIND = {
+  annotation: "annotation",
+  vocabulary: "vocabulary",
+} as const;
+
+export type ReaderSearchGroupKindCode = (typeof READER_SEARCH_GROUP_KIND)[keyof typeof READER_SEARCH_GROUP_KIND];
+
 // source: enum ReaderTheme
 export const READER_THEME = {
   auto: "auto",

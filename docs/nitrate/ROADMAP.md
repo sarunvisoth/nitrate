@@ -17,7 +17,7 @@ Legend for who does the work: **Cloud** = a Claude cloud session can do it end t
 | M5 | `DictionaryProvider` + Define popup, `TranslationProvider` + Translate, Wikipedia / Search Book / Search Web | Cloud | [m5-reader-lookups](plans/2026-09-26-m5-reader-lookups.md) | Built; awaiting owner check |
 | M6 | Per-user reader settings (fonts, spacing, themes, scroll/paginated), vocabulary list | Cloud | [m6-reader-settings-vocabulary](plans/2026-09-26-m6-reader-settings-vocabulary.md) | Built; awaiting owner check |
 | M7 | PDF annotations (page-anchored), PDF search/define/translate | Cloud | [m7-pdf-annotations](plans/2026-09-26-m7-pdf-annotations.md) | Built; awaiting owner check |
-| M8 | Mobile/tablet layout pass, unified global search | Cloud; Owner checks devices | — | Not started |
+| M8 | Mobile/tablet layout pass, unified global search | Cloud; Owner checks devices | [m8-mobile-and-global-search](plans/2026-09-26-m8-mobile-and-global-search.md) | Built; awaiting owner device check |
 | M9 | Autostart on Windows boot, Tailscale/WireGuard remote access, Wake-on-LAN | Owner-heavy | — | Not started |
 | M10 | Native client investigation (Android/macOS/Windows) | Cloud research, Owner decides | — | Not started |
 
