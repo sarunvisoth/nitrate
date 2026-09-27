@@ -798,24 +798,18 @@ public static class OpdsEndpoints {
             pairs.Add(new KeyValuePair<string, string?>(ApiAuthenticationProtocol.AccessTokenQuery, accessToken));
         }
 
+        // Request.Scheme/Host already reflect X-Forwarded-Proto/Host here: the API's
+        // ForwardedHeadersMiddleware (see ForwardedHeadersSetup) rewrites them for requests
+        // from a trusted proxy before any endpoint runs, and leaves them untouched otherwise.
+        // OPDS no longer parses these headers itself, so a direct (non-proxied) caller cannot
+        // forge them into an absolute link.
         return UriHelper.BuildAbsolute(
-            ForwardedScheme(request),
-            ForwardedHost(request),
+            request.Scheme,
+            request.Host,
             request.PathBase,
             path,
             pairs.Count == 0 ? QueryString.Empty : QueryString.Create(pairs));
     }
-
-    private static string ForwardedScheme(HttpRequest request) =>
-        FirstForwardedValue(request.Headers["X-Forwarded-Proto"]) ?? request.Scheme;
-
-    private static HostString ForwardedHost(HttpRequest request) =>
-        HostString.FromUriComponent(FirstForwardedValue(request.Headers["X-Forwarded-Host"]) ?? request.Host.ToUriComponent());
-
-    private static string? FirstForwardedValue(IEnumerable<string?> values) =>
-        values
-            .SelectMany(value => (value ?? "").Split(',', StringSplitOptions.TrimEntries | StringSplitOptions.RemoveEmptyEntries))
-            .FirstOrDefault(value => !string.IsNullOrWhiteSpace(value));
 
     private static IReadOnlyList<KeyValuePair<string, string?>> QueryPairs(params (string Key, string? Value)[] pairs) =>
         pairs

@@ -100,6 +100,11 @@ builder.Services.AddHostedService<TranscodeReaperService>();
 
 var app = builder.Build();
 
+// Must run before anything reads Request.Scheme/Host/IsHttps or Connection.RemoteIpAddress
+// (session cookie Secure flag, the login throttle's per-IP bucket, OPDS absolute links) so
+// those all see the real client behind a reverse proxy (Tailscale Serve, Cloudflare Tunnel).
+app.UseForwardedHeaders(Prismedia.Api.Security.ForwardedHeadersSetup.Build(app.Configuration));
+
 app.UseResponseCompression();
 app.UseMiddleware<Prismedia.Api.Diagnostics.RequestTimingMiddleware>();
 
