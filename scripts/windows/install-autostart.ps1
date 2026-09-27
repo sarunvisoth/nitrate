@@ -65,11 +65,14 @@ foreach ($required in @($apiDll, $workerDll, $envScript)) {
 function New-NitrateAction {
     param([string]$Dll, [string]$WorkingDirectory)
 
-    $inner = ". `"$envScript`"; & dotnet `"$Dll`""
+    # -ExecutionPolicy Bypass: SYSTEM's effective policy is Restricted when none is set, which blocks
+    # dot-sourcing nitrate-env.ps1. $ErrorActionPreference = Stop keeps dotnet from starting without
+    # the env (it would fall back to the default "prismedia" DB user) if the env script fails to load.
+    $inner = "`$ErrorActionPreference = 'Stop'; . `"$envScript`"; & dotnet `"$Dll`""
     $encoded = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($inner))
     return New-ScheduledTaskAction `
         -Execute "powershell.exe" `
-        -Argument "-NoProfile -WindowStyle Hidden -EncodedCommand $encoded" `
+        -Argument "-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -EncodedCommand $encoded" `
         -WorkingDirectory $WorkingDirectory
 }
 

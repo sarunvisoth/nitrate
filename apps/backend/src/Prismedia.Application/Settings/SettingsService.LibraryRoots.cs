@@ -31,30 +31,87 @@ public sealed partial class SettingsService {
         _persistence.GetLibraryRootAsync(id, cancellationToken);
 
     /// <summary>
+    /// Pseudo-path for the Windows drive list ("This PC"). Browsing it returns every ready drive as
+    /// a child directory with an empty <see cref="LibraryBrowseResponse.Path"/>, and it is the
+    /// parent of each drive root, so the picker can move between drives.
+    /// </summary>
+    public const string DriveListBrowsePath = "::drives";
+
+    /// <summary>
     /// Lists subdirectories under <paramref name="path"/> for the watched-root folder picker.
     /// Falls back to the user profile directory or the filesystem root when no readable path is
-    /// supplied.
+    /// supplied. On Windows, a missing path opens the drive list, and a drive root's parent is
+    /// <see cref="DriveListBrowsePath"/>.
     /// </summary>
     public Task<LibraryBrowseResponse> BrowseLibraryPathAsync(string? path, CancellationToken cancellationToken) {
         cancellationToken.ThrowIfCancellationRequested();
-        var requestedPath = string.IsNullOrWhiteSpace(path)
-            ? Environment.GetFolderPath(Environment.SpecialFolder.UserProfile)
-            : path;
-        var directory = new DirectoryInfo(requestedPath);
-        if (!directory.Exists) {
-            directory = new DirectoryInfo(Path.GetPathRoot(requestedPath) ?? "/");
+        // On Windows the server usually runs as SYSTEM, whose profile directory
+        // (C:\Windows\system32\config\systemprofile) is a useless starting point, so start at the drives.
+        if (OperatingSystem.IsWindows() && (path == DriveListBrowsePath || string.IsNullOrWhiteSpace(path))) {
+            return Task.FromResult(BrowseDriveList());
         }
 
-        var directories = directory.EnumerateDirectories()
-            .Where(child => !child.Attributes.HasFlag(FileAttributes.Hidden))
-            .OrderBy(child => child.Name)
-            .Select(child => new LibraryBrowseEntry(child.Name, child.FullName))
-            .ToArray();
+        var requestedPath = string.IsNullOrWhiteSpace(path)
+            ? Environment.GetFolderPath(Environment.SpecialFolder.UserProfile)
+            : path.Trim();
+        var directory = ResolveBrowseDirectory(requestedPath);
+        if (directory is null) {
+            return Task.FromResult(OperatingSystem.IsWindows()
+                ? BrowseDriveList()
+                : BrowseDirectory(new DirectoryInfo("/")));
+        }
 
-        return Task.FromResult(new LibraryBrowseResponse(
-            directory.FullName,
-            directory.Parent?.FullName,
-            directories));
+        return Task.FromResult(BrowseDirectory(directory));
+    }
+
+    private static DirectoryInfo? ResolveBrowseDirectory(string requestedPath) {
+        try {
+            var directory = new DirectoryInfo(requestedPath);
+            if (directory.Exists) {
+                return directory;
+            }
+
+            var root = Path.GetPathRoot(directory.FullName);
+            return string.IsNullOrEmpty(root) || !Directory.Exists(root) ? null : new DirectoryInfo(root);
+        } catch (Exception ex) when (ex is ArgumentException or IOException or UnauthorizedAccessException or NotSupportedException) {
+            return null;
+        }
+    }
+
+    private static LibraryBrowseResponse BrowseDirectory(DirectoryInfo directory) {
+        LibraryBrowseEntry[] directories;
+        try {
+            directories = directory.EnumerateDirectories()
+                .Where(child => !child.Attributes.HasFlag(FileAttributes.Hidden))
+                .OrderBy(child => child.Name)
+                .Select(child => new LibraryBrowseEntry(child.Name, child.FullName))
+                .ToArray();
+        } catch (Exception ex) when (ex is IOException or UnauthorizedAccessException) {
+            directories = [];
+        }
+
+        var parentPath = directory.Parent?.FullName
+            ?? (OperatingSystem.IsWindows() ? DriveListBrowsePath : null);
+        return new LibraryBrowseResponse(directory.FullName, parentPath, directories);
+    }
+
+    private static LibraryBrowseResponse BrowseDriveList() {
+        var drives = DriveInfo.GetDrives()
+            .Where(drive => drive.IsReady)
+            .Select(drive => new LibraryBrowseEntry(DescribeDrive(drive), drive.RootDirectory.FullName))
+            .ToArray();
+        return new LibraryBrowseResponse(string.Empty, null, drives);
+    }
+
+    private static string DescribeDrive(DriveInfo drive) {
+        string label;
+        try {
+            label = string.IsNullOrWhiteSpace(drive.VolumeLabel) ? drive.DriveType.ToString() : drive.VolumeLabel;
+        } catch (Exception ex) when (ex is IOException or UnauthorizedAccessException) {
+            label = drive.DriveType.ToString();
+        }
+
+        return $"{drive.Name.TrimEnd('\\')} ({label})";
     }
 
     /// <summary>

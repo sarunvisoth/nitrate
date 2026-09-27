@@ -183,6 +183,7 @@ public abstract class ScanJobHandler(
                     outcome = await ScanRootCoreAsync(context, root, cancellationToken);
                 }
                 ThrowIfFilesFailed(outcome);
+                await OnRootScanCompletedAsync(context, root, cancellationToken);
                 LogRootMetrics(context.Job.Type, root, mode, currentCount, previousCount, delta, timer.Finish());
                 return;
             }
@@ -252,6 +253,7 @@ public abstract class ScanJobHandler(
                     }
                 }
                 await CompletePendingChangesAsync(root.Id, scanKind, pendingChanges, cancellationToken);
+                await OnRootScanCompletedAsync(context, root, cancellationToken);
                 LogRootMetrics(context.Job.Type, root, mode, currentCount, previousCount, delta, timer.Finish());
                 return;
             }
@@ -305,6 +307,7 @@ public abstract class ScanJobHandler(
             }
             ThrowIfFilesFailed(detailedOutcome);
             await CompletePendingChangesAsync(root.Id, scanKind, pendingChanges, cancellationToken);
+            await OnRootScanCompletedAsync(context, root, cancellationToken);
             LogRootMetrics(context.Job.Type, root, mode, currentCount, previousCount, delta, timer.Finish());
         } catch (OperationCanceledException) {
             LogRootMetrics(context.Job.Type, root, "cancelled", currentCount, previousCount, delta, timer.Finish());
@@ -321,6 +324,17 @@ public abstract class ScanJobHandler(
     /// Filesystem change scans never call this hook.
     /// </summary>
     protected virtual Task OnUnchangedIntegrityScanAsync(
+        JobContext context,
+        LibraryRootData root,
+        CancellationToken cancellationToken) => Task.CompletedTask;
+
+    /// <summary>
+    /// Runs after every successful scan of one root — full, delta, unchanged, and change-only no-op alike.
+    /// Use it for work driven by files outside <see cref="ScanCategories"/> (such as folder artwork),
+    /// which never changes the media signature snapshot and so cannot rely on the detailed pass.
+    /// The default is idle.
+    /// </summary>
+    protected virtual Task OnRootScanCompletedAsync(
         JobContext context,
         LibraryRootData root,
         CancellationToken cancellationToken) => Task.CompletedTask;
