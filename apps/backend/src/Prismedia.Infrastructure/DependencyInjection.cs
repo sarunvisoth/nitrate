@@ -371,6 +371,12 @@ public static class DependencyInjection {
                 provider.GetRequiredService<PrismediaDbContext>(),
                 new EntityImageAssetStorageOptions(cacheDir),
                 provider.GetRequiredService<IGridThumbnailService>()));
+        services.AddScoped<IFolderArtworkImporter>(provider =>
+            new FolderArtworkImporter(
+                provider.GetRequiredService<PrismediaDbContext>(),
+                new EntityImageAssetStorageOptions(cacheDir),
+                provider.GetRequiredService<IGridThumbnailService>(),
+                provider.GetRequiredService<ILogger<FolderArtworkImporter>>()));
         services.AddScoped<IOpdsCatalogService, EfOpdsCatalogService>();
     }
 

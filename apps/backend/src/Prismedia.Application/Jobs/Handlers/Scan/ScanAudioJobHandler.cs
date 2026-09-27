@@ -25,7 +25,8 @@ public sealed class ScanAudioJobHandler(
     IScanSnapshotStore? snapshots = null,
     IAcquisitionHintApplier? acquisitionHints = null,
     IMediaProcessingStatePersistence? processingState = null,
-    ILibraryFileChangeIntake? changeIntake = null)
+    ILibraryFileChangeIntake? changeIntake = null,
+    IFolderArtworkImporter? folderArtwork = null)
     : ScanJobHandler(logger, fileDiscovery, roots, snapshots, processingState, changeIntake) {
     protected override bool IsEligibleRoot(LibraryRootData root) => root.ScanAudio;
 
@@ -444,6 +445,26 @@ public sealed class ScanAudioJobHandler(
         }
 
         return ScanRootOutcome.Success;
+    }
+
+    /// <summary>
+    /// Adopts <c>cover.jpg</c>/<c>artist.jpg</c>-style images in album and artist folders as their
+    /// covers. Runs after every scan route, because adding or replacing an image never changes the
+    /// audio signature snapshot. Best effort: artwork problems are logged and never fail the scan.
+    /// </summary>
+    protected override async Task OnRootScanCompletedAsync(
+        JobContext context,
+        LibraryRootData root,
+        CancellationToken cancellationToken) {
+        if (folderArtwork is null) {
+            return;
+        }
+
+        try {
+            await folderArtwork.ImportMusicFolderArtworkAsync(root.Id, cancellationToken);
+        } catch (Exception ex) when (ex is not OperationCanceledException) {
+            logger.LogWarning(ex, "ScanAudio: folder artwork import failed for {Label}", root.Label);
+        }
     }
 
     /// <summary>Queues probe and fingerprint jobs for a freshly upserted track when needed.</summary>
