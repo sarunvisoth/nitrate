@@ -69,7 +69,7 @@ test.describe("unified global search", () => {
     await page.goto("/");
     await page.getByRole("button", { name: "Open search" }).click();
     await page.getByRole("dialog").getByLabel("Search library").fill(phrase);
-    const annotationItem = page.getByRole("option", { name: new RegExp(phrase) });
+    const annotationItem = page.getByRole("option").filter({ hasText: phrase }).filter({ hasNotText: "See all results" });
     await expect(annotationItem).toBeVisible();
     await annotationItem.click();
     await expect(page).toHaveURL(new RegExp(`/books/${bookId}/reader`));
@@ -78,7 +78,8 @@ test.describe("unified global search", () => {
     await page.goto("/");
     await page.getByRole("button", { name: "Open search" }).click();
     await page.getByRole("dialog").getByLabel("Search library").fill(word);
-    await expect(page.getByRole("option", { name: new RegExp(word) })).toBeVisible();
+    const vocabularyItem = page.getByRole("option").filter({ hasText: word }).filter({ hasNotText: "See all results" });
+    await expect(vocabularyItem).toBeVisible();
     await page.getByRole("option", { name: /See all vocabulary/i }).click();
     await expect(page).toHaveURL(new RegExp(`/vocabulary\\?q=${word}`));
     await expect(page.getByText(word, { exact: true })).toBeVisible();
